@@ -19,3 +19,5 @@ skillproof pilot `
 ```
 
 After a separate reviewer scores the samples, merge the completed annotations with the unblinding key using `skillproof grader-agreement`. The resulting report includes score error, threshold agreement, Cohen's kappa, and results by condition after unblinding. It describes agreement; it does not validate the benchmark or certify the grader.
+
+Failed runs are kept out of agreement. An agent failure has no output, so it is never sent to reviewers. A grader failure is sent for review but has no grader score, so it is not paired. Both are counted in the report (`excluded_runs_before_review`, `excluded_annotations`), so you can see how much data a run lost.

@@ -78,7 +78,7 @@ def test_blind_review_bundle_hides_condition_and_grader_score():
         assert "grader_score" not in sample
         assert "model" not in sample
     assert {row["human_score"] for row in bundle["annotation_template"]} == {None}
-    assert {item["condition"] for key, item in bundle["sealed_unblinding_key"].items() if key != "__task_heuristics__"} == {"baseline", "skill_enabled"}
+    assert {item["condition"] for key, item in bundle["sealed_unblinding_key"].items() if not key.startswith("__")} == {"baseline", "skill_enabled"}
 
 
 def test_task_heuristic_predictions_are_sealed_while_task_prompt_is_blind():
@@ -101,6 +101,53 @@ def test_grader_human_score_agreement_metrics():
     assert result["pass_fail_metrics"]["agreement_rate"] == 1
     assert result["pass_fail_metrics"]["cohen_kappa"] == 1
     assert result["by_condition_after_unblinding"]["baseline"]["samples"] == 1
+
+
+def _failure_experiment():
+    runs = [
+        {"task_id": "t", "trial_id": f"t:{i}", "condition": "baseline", "score": score, "output": "real answer"}
+        for i, score in enumerate([0.9, 0.9, 0.2, 0.2])
+    ]
+    runs += [
+        {"task_id": "t", "trial_id": f"f:{i}", "condition": "skill_enabled", "score": 0.0, "output": None, "error": "APIConnectionError: down"}
+        for i in range(4)
+    ]
+    runs.append({"task_id": "t", "trial_id": "g:1", "condition": "skill_enabled", "score": 0.0, "output": "graded output", "error": "ValidationError: bad grader JSON"})
+    return {"runs": runs}
+
+
+def test_agent_failures_are_not_sent_to_reviewers():
+    tasks = [BenchmarkTask(task_id="t", prompt="p", criteria=["c"])]
+    bundle = create_blind_review_bundle(_failure_experiment(), tasks)
+    assert all(sample["candidate_output"] for sample in bundle["review_samples"])
+    assert len(bundle["review_samples"]) == 5
+    excluded = bundle["sealed_unblinding_key"]["__excluded_runs__"]
+    assert [item["reason"] for item in excluded] == ["agent_failure"] * 4
+
+
+def test_failed_runs_do_not_inflate_grader_agreement():
+    tasks = [BenchmarkTask(task_id="t", prompt="p", criteria=["c"])]
+    bundle = create_blind_review_bundle(_failure_experiment(), tasks)
+    samples = bundle["review_samples"]
+    human_scores = [0.2, 0.9, 0.9, 0.2, 0.0]  # grader disagrees on 2 of 4 real samples; last is the grader failure
+    annotations = [HumanAnnotation(sample_id=s["sample_id"], human_score=h, reviewer_id="r1") for s, h in zip(samples, human_scores)]
+    result = compare_score_agreement(annotations, bundle["sealed_unblinding_key"])
+    assert result["sample_count"] == 4
+    assert result["pass_fail_metrics"]["agreement_rate"] == 0.5
+    assert result["pass_fail_metrics"]["cohen_kappa"] == 0
+    assert result["excluded_annotations"]["failed_run"] == 1
+    assert result["excluded_runs_before_review"] == 4
+
+
+def test_legacy_sealed_key_with_zero_scored_failures_is_still_excluded():
+    annotations = [
+        HumanAnnotation(sample_id="ok", human_score=0.9, reviewer_id="r1"),
+        HumanAnnotation(sample_id="failed", human_score=0.0, reviewer_id="r1"),
+    ]
+    key = {"ok": {"grader_score": 0.8, "condition": "baseline"}, "failed": {"grader_score": 0.0, "condition": "baseline", "error": "Timeout"}}
+    result = compare_score_agreement(annotations, key)
+    assert result["sample_count"] == 1
+    assert result["excluded_annotations"]["failed_run"] == 1
 
 
 def test_assurance_or_heuristic_decision_human_agreement():

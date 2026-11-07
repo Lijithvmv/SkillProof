@@ -36,10 +36,17 @@ def create_blind_review_bundle(
         review = reviews_by_id.get(task.task_id)
         if review:
             task_heuristics[task.task_id] = {"heuristic_decision": review.get("disposition"), "finding_codes": [finding.get("code") for finding in review.get("findings", [])]}
+    excluded_runs: list[dict[str, Any]] = []
     for run in experiment.get("runs", []):
         task = task_by_id.get(run.get("task_id"))
         if task is None:
             continue
+        if not isinstance(run.get("output"), str) or not run["output"].strip():
+            # An agent failure has no output to review. Sending a blank sample would let a reviewer's
+            # obvious 0 "agree" with the recorded 0.0 failure score and inflate agreement.
+            excluded_runs.append({"trial_id": run.get("trial_id"), "condition": run.get("condition"), "reason": "agent_failure", "error": run.get("error")})
+            continue
+        grader_failed = bool(run.get("error"))
         sample_id = uuid.uuid4().hex
         samples.append({
             "sample_id": sample_id,
@@ -53,13 +60,15 @@ def create_blind_review_bundle(
         sealed_key[sample_id] = {
             "trial_id": run.get("trial_id"),
             "condition": run.get("condition"),
-            "grader_score": run.get("score"),
+            # A grader failure is recorded as 0.0 in the experiment; it is not a grader judgment.
+            "grader_score": None if grader_failed else run.get("score"),
             "grader_evidence": run.get("grader_evidence", []),
             "model": run.get("model"),
             "grader_model": run.get("grader_model"),
             "error": run.get("error"),
         }
     sealed_key["__task_heuristics__"] = task_heuristics
+    sealed_key["__excluded_runs__"] = excluded_runs
     return {
         "review_samples": samples,
         "annotation_template": annotations,
@@ -80,13 +89,23 @@ def compare_score_agreement(
     if len(ids) != len(set(ids)):
         raise ValueError("sample_id values must be unique")
     paired = []
+    excluded = {"failed_run": 0, "no_grader_score": 0, "not_in_sealed_key": 0}
     for annotation in annotations:
-        key = sealed_key.get(annotation.sample_id)
-        if not key or not isinstance(key.get("grader_score"), (int, float)):
+        key = sealed_key.get(annotation.sample_id) if not annotation.sample_id.startswith("__") else None
+        if not isinstance(key, dict):
+            excluded["not_in_sealed_key"] += 1
             continue
-        paired.append((annotation, float(key["grader_score"]), key))
+        if key.get("error"):
+            # Also catches keys written before this fix, where failures carried grader_score 0.0.
+            excluded["failed_run"] += 1
+            continue
+        score = key.get("grader_score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            excluded["no_grader_score"] += 1
+            continue
+        paired.append((annotation, float(score), key))
     if not paired:
-        raise ValueError("No annotations match numeric grader scores in the sealed key")
+        raise ValueError("No annotations match successful, numerically graded runs in the sealed key")
 
     deltas = [grader - human.human_score for human, grader, _ in paired]
     absolute = [abs(delta) for delta in deltas]
@@ -123,6 +142,8 @@ def compare_score_agreement(
         }
     return {
         "sample_count": len(paired),
+        "excluded_annotations": excluded,
+        "excluded_runs_before_review": len(sealed_key.get("__excluded_runs__") or []),
         "pass_threshold": pass_threshold,
         "score_metrics": {
             "mean_absolute_error": round(sum(absolute) / len(absolute), 4),

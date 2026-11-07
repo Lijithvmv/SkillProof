@@ -1,0 +1,12 @@
+{
+  "benchmark_id": "skillproof-evidence-summary-pilot",
+  "version": "0.1.0",
+  "status": "candidate_requires_independent_review",
+  "task_file": "benchmark.jsonl",
+  "task_count": 3,
+  "review_requirements": [
+    "Check that task prompts do not reveal the skill instructions.",
+    "Check rubric measurability and feasibility.",
+    "Add independent reviewer identity and date before treating results as a validated benchmark."
+  ]
+}

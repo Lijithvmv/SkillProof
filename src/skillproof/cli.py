@@ -33,6 +33,18 @@ def _write_json(payload: dict[str, Any], destination: str, stdout: TextIO = sys.
         path.write_text(rendered + "\n", encoding="utf-8")
 
 
+def _read_annotation_rows(path: str) -> list[dict[str, Any]]:
+    """Read annotations as a JSON array or JSONL; rows not yet scored (human_score null) are skipped."""
+    text = Path(path).read_text(encoding="utf-8")
+    if text.lstrip().startswith("["):
+        rows = json.loads(text)
+    else:
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    if not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"{path}: every annotation must be a JSON object")
+    return [row for row in rows if row.get("human_score") is not None]
+
+
 def scan_archive(path: str) -> tuple[dict[str, Any], int]:
     try:
         files = read_skill_zip(Path(path).read_bytes())
@@ -94,8 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--unblinding-key-output", required=True, help="Keep this separate from reviewers until scoring is complete.")
 
     agreement = commands.add_parser("grader-agreement", help="Compare completed human scores to blinded grader scores.")
-    agreement.add_argument("annotations", help="Completed JSON array of sample_id, human_score, reviewer_id, rationale objects.")
+    agreement.add_argument("annotations", help="Completed annotations (JSON array or JSONL) of sample_id, human_score, reviewer_id, rationale objects.")
     agreement.add_argument("unblinding_key", help="Separate unblinding key JSON from the pilot run.")
+    agreement.add_argument("--extra-annotations", action="append", default=[], metavar="FILE", help="Another reviewer's completed annotations; repeat once per file.")
     agreement.add_argument("--pass-threshold", type=float, default=0.7)
     agreement.add_argument("--tolerance", type=float, default=0.1)
     agreement.add_argument("--output", default="-", help="Agreement report destination; use - for stdout.")
@@ -160,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_json(result, args.output)
     elif args.command == "grader-agreement":
         try:
-            annotation_data = json.loads(Path(args.annotations).read_text(encoding="utf-8"))
+            annotation_data = [row for path in [args.annotations, *args.extra_annotations] for row in _read_annotation_rows(path)]
             key_data = json.loads(Path(args.unblinding_key).read_text(encoding="utf-8"))
             annotations = [HumanAnnotation.model_validate(item) for item in annotation_data]
             result = compare_score_agreement(annotations, key_data, pass_threshold=args.pass_threshold, tolerance=args.tolerance)

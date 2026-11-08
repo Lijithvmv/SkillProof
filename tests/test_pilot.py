@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from skillproof.evaluation import BenchmarkTask
-from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
+from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle, krippendorff_alpha
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
 from skillproof.pilot import load_benchmark, read_manifest
 
@@ -148,6 +148,90 @@ def test_legacy_sealed_key_with_zero_scored_failures_is_still_excluded():
     result = compare_score_agreement(annotations, key)
     assert result["sample_count"] == 1
     assert result["excluded_annotations"]["failed_run"] == 1
+
+
+def test_krippendorff_alpha_matches_published_reliability_example():
+    # Krippendorff (2011), "Computing Krippendorff's Alpha-Reliability": 4 coders, 12 units, missing values.
+    coders = [
+        [1, 2, 3, 3, 2, 1, 4, 1, 2, None, None, None],
+        [1, 2, 3, 3, 2, 2, 4, 1, 2, 5, None, 3],
+        [None, 3, 3, 3, 2, 3, 4, 2, 2, 5, 1, None],
+        [1, 2, 3, 3, 2, 4, 4, 1, 2, 5, 1, None],
+    ]
+    units = [[value for value in unit if value is not None] for unit in zip(*coders)]
+    assert round(krippendorff_alpha(units, metric="nominal"), 3) == 0.743
+    assert round(krippendorff_alpha(units, metric="interval"), 3) == 0.849
+
+
+def _two_reviewer_case():
+    key = {
+        "s1": {"grader_score": 0.9, "condition": "baseline"},
+        "s2": {"grader_score": 0.9, "condition": "baseline"},
+        "s3": {"grader_score": 0.1, "condition": "skill_enabled"},
+        "s4": {"grader_score": 0.1, "condition": "skill_enabled"},
+    }
+    # r1 and r2 agree on pass/fail everywhere; the grader is reversed on s2 and s3.
+    r1 = {"s1": 0.9, "s2": 0.2, "s3": 0.8, "s4": 0.1}
+    r2 = {"s1": 0.8, "s2": 0.3, "s3": 0.9, "s4": 0.2}
+    annotations = [HumanAnnotation(sample_id=s, human_score=v, reviewer_id="r1") for s, v in r1.items()]
+    annotations += [HumanAnnotation(sample_id=s, human_score=v, reviewer_id="r2") for s, v in r2.items()]
+    return annotations, key
+
+
+def test_two_reviewers_measure_human_agreement_and_grader_fit():
+    annotations, key = _two_reviewer_case()
+    result = compare_score_agreement(annotations, key, pass_threshold=0.7)
+    assert result["sample_count"] == 4
+    assert result["reviewer_count"] == 2
+    human = result["human_agreement"]
+    assert human["status"] == "measured"
+    assert human["multi_reviewed_samples"] == 4
+    assert human["pairwise"] == [{"reviewers": ["r1", "r2"], "samples": 4, "mean_absolute_error": 0.1, "agreement_rate": 1.0, "cohen_kappa": 1.0}]
+    alphas = human["krippendorff_alpha"]
+    assert alphas["humans_only"]["pass_fail_alpha_nominal"] == 1.0
+    assert alphas["humans_plus_grader"]["pass_fail_alpha_nominal"] < alphas["humans_only"]["pass_fail_alpha_nominal"]
+    assert alphas["humans_plus_grader"]["score_alpha_interval"] < alphas["humans_only"]["score_alpha_interval"]
+    assert result["grader_vs_each_reviewer"]["r1"]["cohen_kappa"] == 0
+    assert result["pass_fail_metrics"]["agreement_rate"] == 0.5
+
+
+def test_single_reviewer_reports_human_agreement_not_measured():
+    annotations, key = _two_reviewer_case()
+    result = compare_score_agreement([a for a in annotations if a.reviewer_id == "r1"], key)
+    assert result["reviewer_count"] == 1
+    assert result["human_agreement"]["status"] == "not_measured"
+    assert result["human_agreement"]["multi_reviewed_samples"] == 0
+
+
+def test_same_reviewer_scoring_a_sample_twice_is_rejected():
+    import pytest
+
+    annotations = [
+        HumanAnnotation(sample_id="s1", human_score=0.9, reviewer_id="r1"),
+        HumanAnnotation(sample_id="s1", human_score=0.1, reviewer_id="r1"),
+    ]
+    with pytest.raises(ValueError, match="only once"):
+        compare_score_agreement(annotations, {"s1": {"grader_score": 0.5}})
+
+
+def test_cli_grader_agreement_merges_reviewer_files_including_jsonl(tmp_path):
+    from skillproof.cli import main
+
+    annotations, key = _two_reviewer_case()
+    rows = [a.model_dump() for a in annotations]
+    first = tmp_path / "r1.json"
+    first.write_text(json.dumps([r for r in rows if r["reviewer_id"] == "r1"]), encoding="utf-8")
+    second = tmp_path / "r2.jsonl"
+    unscored = {"sample_id": "s1", "human_score": None, "reviewer_id": "r3", "rationale": ""}
+    second.write_text("\n".join(json.dumps(r) for r in [*[r for r in rows if r["reviewer_id"] == "r2"], unscored]) + "\n", encoding="utf-8")
+    key_file = tmp_path / "key.json"
+    key_file.write_text(json.dumps(key), encoding="utf-8")
+    out = tmp_path / "report.json"
+    exit_code = main(["grader-agreement", str(first), str(key_file), "--extra-annotations", str(second), "--output", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["reviewers"] == ["r1", "r2"]
+    assert report["human_agreement"]["status"] == "measured"
 
 
 def test_assurance_or_heuristic_decision_human_agreement():

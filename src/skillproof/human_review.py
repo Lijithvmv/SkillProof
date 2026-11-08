@@ -79,16 +79,62 @@ def create_blind_review_bundle(
     }
 
 
+def _binary_agreement(pairs: list[tuple[bool, bool]]) -> tuple[float, float | None]:
+    """Observed agreement and Cohen's kappa for two raters' pass/fail labels."""
+    total = len(pairs)
+    observed = sum(a == b for a, b in pairs) / total
+    a_pass = sum(a for a, _ in pairs) / total
+    b_pass = sum(b for _, b in pairs) / total
+    expected = a_pass * b_pass + (1 - a_pass) * (1 - b_pass)
+    kappa = (observed - expected) / (1 - expected) if expected < 1 else None
+    return observed, kappa
+
+
+def krippendorff_alpha(units: list[list[float]], *, metric: str = "interval") -> float | None:
+    """Krippendorff's alpha for any number of raters with missing ratings.
+
+    Each unit is the list of values the raters gave one sample. Units with fewer than two
+    values cannot be paired and are ignored. Returns None when alpha is undefined
+    (fewer than two pairable values, or no variation at all in the pairable values).
+    """
+    if metric not in {"interval", "nominal"}:
+        raise ValueError("metric must be 'interval' or 'nominal'")
+
+    def delta(a: float, b: float) -> float:
+        return (a - b) ** 2 if metric == "interval" else float(a != b)
+
+    pairable = [unit for unit in units if len(unit) >= 2]
+    values = [value for unit in pairable for value in unit]
+    n = len(values)
+    if n < 2:
+        return None
+    disagreement_observed = sum(
+        sum(delta(unit[i], unit[j]) for i in range(len(unit)) for j in range(len(unit)) if i != j) / (len(unit) - 1)
+        for unit in pairable
+    ) / n
+    disagreement_expected = sum(delta(values[i], values[j]) for i in range(n) for j in range(n) if i != j) / (n * (n - 1))
+    if disagreement_expected == 0:
+        return None
+    return 1 - disagreement_observed / disagreement_expected
+
+
+def _round(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None
+
+
 def compare_score_agreement(
     annotations: list[HumanAnnotation], sealed_key: dict[str, Any], *,
     pass_threshold: float = 0.7, tolerance: float = 0.1,
 ) -> dict[str, Any]:
     if not 0 <= pass_threshold <= 1 or not 0 <= tolerance <= 1:
         raise ValueError("pass_threshold and tolerance must be in [0, 1]")
-    ids = [item.sample_id for item in annotations]
-    if len(ids) != len(set(ids)):
-        raise ValueError("sample_id values must be unique")
-    paired = []
+    seen = [(item.sample_id, item.reviewer_id) for item in annotations]
+    if len(seen) != len(set(seen)):
+        raise ValueError("Each reviewer may score a sample_id only once")
+
+    by_sample: dict[str, dict[str, float]] = defaultdict(dict)
+    grader_by_sample: dict[str, float] = {}
+    condition_by_sample: dict[str, str] = {}
     excluded = {"failed_run": 0, "no_grader_score": 0, "not_in_sealed_key": 0}
     for annotation in annotations:
         key = sealed_key.get(annotation.sample_id) if not annotation.sample_id.startswith("__") else None
@@ -96,73 +142,139 @@ def compare_score_agreement(
             excluded["not_in_sealed_key"] += 1
             continue
         if key.get("error"):
-            # Also catches keys written before this fix, where failures carried grader_score 0.0.
+            # Also catches keys written before failed runs were sealed without a score.
             excluded["failed_run"] += 1
             continue
         score = key.get("grader_score")
         if isinstance(score, bool) or not isinstance(score, (int, float)):
             excluded["no_grader_score"] += 1
             continue
-        paired.append((annotation, float(score), key))
-    if not paired:
+        by_sample[annotation.sample_id][annotation.reviewer_id] = annotation.human_score
+        grader_by_sample[annotation.sample_id] = float(score)
+        condition_by_sample[annotation.sample_id] = str(key.get("condition") or "unknown")
+    if not by_sample:
         raise ValueError("No annotations match successful, numerically graded runs in the sealed key")
 
-    deltas = [grader - human.human_score for human, grader, _ in paired]
+    reviewers = sorted({reviewer for scores in by_sample.values() for reviewer in scores})
+    sample_ids = sorted(by_sample)
+    # Grader versus the human consensus: the mean of every reviewer's score for the sample.
+    consensus = {sid: sum(by_sample[sid].values()) / len(by_sample[sid]) for sid in sample_ids}
+    deltas = [grader_by_sample[sid] - consensus[sid] for sid in sample_ids]
     absolute = [abs(delta) for delta in deltas]
-    squared = [delta * delta for delta in deltas]
     within = sum(value <= tolerance for value in absolute)
-    true_pass = false_pass = true_fail = false_fail = 0
-    groups: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    for human, grader, key in paired:
-        human_pass = human.human_score >= pass_threshold
-        grader_pass = grader >= pass_threshold
-        groups[str(key.get("condition") or "unknown")].append((human.human_score, grader))
-        if human_pass and grader_pass:
-            true_pass += 1
-        elif grader_pass:
-            false_pass += 1
-        elif human_pass:
-            false_fail += 1
-        else:
-            true_fail += 1
-    agreements = true_pass + true_fail
-    observed = agreements / len(paired)
-    human_positive = true_pass + false_fail
-    grader_positive = true_pass + false_pass
-    human_negative = true_fail + false_pass
-    grader_negative = true_fail + false_fail
-    expected = (human_positive * grader_positive + human_negative * grader_negative) / (len(paired) ** 2)
-    denominator = 1 - expected
-    per_condition = {}
-    for condition, values in groups.items():
-        per_condition[condition] = {
-            "samples": len(values),
-            "mean_absolute_error": round(sum(abs(g - h) for h, g in values) / len(values), 4),
-            "pass_fail_agreement": round(sum((h >= pass_threshold) == (g >= pass_threshold) for h, g in values) / len(values), 4),
+    labels = [(consensus[sid] >= pass_threshold, grader_by_sample[sid] >= pass_threshold) for sid in sample_ids]
+    observed, kappa = _binary_agreement(labels)
+    matrix = {
+        "human_pass_grader_pass": sum(h and g for h, g in labels),
+        "human_fail_grader_pass": sum(g and not h for h, g in labels),
+        "human_pass_grader_fail": sum(h and not g for h, g in labels),
+        "human_fail_grader_fail": sum(not h and not g for h, g in labels),
+    }
+    groups: dict[str, list[str]] = defaultdict(list)
+    for sid in sample_ids:
+        groups[condition_by_sample[sid]].append(sid)
+    per_condition = {
+        condition: {
+            "samples": len(ids),
+            "mean_absolute_error": round(sum(abs(grader_by_sample[s] - consensus[s]) for s in ids) / len(ids), 4),
+            "pass_fail_agreement": round(sum((consensus[s] >= pass_threshold) == (grader_by_sample[s] >= pass_threshold) for s in ids) / len(ids), 4),
         }
+        for condition, ids in groups.items()
+    }
+
+    grader_vs_each_reviewer = {}
+    for reviewer in reviewers:
+        ids = [sid for sid in sample_ids if reviewer in by_sample[sid]]
+        pairs = [(by_sample[sid][reviewer] >= pass_threshold, grader_by_sample[sid] >= pass_threshold) for sid in ids]
+        agree, k = _binary_agreement(pairs)
+        grader_vs_each_reviewer[reviewer] = {
+            "samples": len(ids),
+            "mean_absolute_error": round(sum(abs(grader_by_sample[s] - by_sample[s][reviewer]) for s in ids) / len(ids), 4),
+            "agreement_rate": round(agree, 4),
+            "cohen_kappa": _round(k),
+        }
+
     return {
-        "sample_count": len(paired),
+        "sample_count": len(sample_ids),
+        "reviewer_count": len(reviewers),
+        "reviewers": reviewers,
+        "human_reference": "mean of all reviewer scores for each sample",
         "excluded_annotations": excluded,
         "excluded_runs_before_review": len(sealed_key.get("__excluded_runs__") or []),
         "pass_threshold": pass_threshold,
         "score_metrics": {
             "mean_absolute_error": round(sum(absolute) / len(absolute), 4),
-            "root_mean_squared_error": round(math.sqrt(sum(squared) / len(squared)), 4),
-            "within_tolerance_rate": round(within / len(paired), 4),
+            "root_mean_squared_error": round(math.sqrt(sum(d * d for d in deltas) / len(deltas)), 4),
+            "within_tolerance_rate": round(within / len(sample_ids), 4),
             "tolerance": tolerance,
         },
         "pass_fail_metrics": {
             "agreement_rate": round(observed, 4),
-            "cohen_kappa": round((observed - expected) / denominator, 4) if denominator else None,
-            "confusion_matrix": {
-                "human_pass_grader_pass": true_pass,
-                "human_fail_grader_pass": false_pass,
-                "human_pass_grader_fail": false_fail,
-                "human_fail_grader_fail": true_fail,
-            },
+            "cohen_kappa": _round(kappa),
+            "confusion_matrix": matrix,
         },
+        "grader_vs_each_reviewer": grader_vs_each_reviewer,
+        "human_agreement": _human_agreement(by_sample, grader_by_sample, reviewers, pass_threshold),
         "by_condition_after_unblinding": per_condition,
         "limitations": "Agreement is descriptive and depends on reviewer consistency, rubric quality, sample selection, and threshold choice. It does not establish benchmark validity.",
+    }
+
+
+def _human_agreement(
+    by_sample: dict[str, dict[str, float]], grader_by_sample: dict[str, float],
+    reviewers: list[str], pass_threshold: float,
+) -> dict[str, Any]:
+    """How much reviewers agree with each other, and whether the grader fits inside that range."""
+    shared = sorted(sid for sid, scores in by_sample.items() if len(scores) >= 2)
+    if not shared:
+        return {
+            "multi_reviewed_samples": 0,
+            "status": "not_measured",
+            "reason": "No sample was scored by two or more reviewers, so there is no human baseline for the grader.",
+        }
+
+    pairwise = []
+    for index, first in enumerate(reviewers):
+        for second in reviewers[index + 1:]:
+            ids = [sid for sid in shared if first in by_sample[sid] and second in by_sample[sid]]
+            if not ids:
+                continue
+            pairs = [(by_sample[s][first] >= pass_threshold, by_sample[s][second] >= pass_threshold) for s in ids]
+            agree, k = _binary_agreement(pairs)
+            pairwise.append({
+                "reviewers": [first, second],
+                "samples": len(ids),
+                "mean_absolute_error": round(sum(abs(by_sample[s][first] - by_sample[s][second]) for s in ids) / len(ids), 4),
+                "agreement_rate": round(agree, 4),
+                "cohen_kappa": _round(k),
+            })
+
+    human_units = [list(by_sample[sid].values()) for sid in shared]
+    with_grader_units = [list(by_sample[sid].values()) + [grader_by_sample[sid]] for sid in shared]
+
+    def as_pass(units: list[list[float]]) -> list[list[float]]:
+        return [[float(value >= pass_threshold) for value in unit] for unit in units]
+
+    alphas = {
+        "humans_only": {
+            "score_alpha_interval": _round(krippendorff_alpha(human_units, metric="interval")),
+            "pass_fail_alpha_nominal": _round(krippendorff_alpha(as_pass(human_units), metric="nominal")),
+        },
+        "humans_plus_grader": {
+            "score_alpha_interval": _round(krippendorff_alpha(with_grader_units, metric="interval")),
+            "pass_fail_alpha_nominal": _round(krippendorff_alpha(as_pass(with_grader_units), metric="nominal")),
+        },
+    }
+    return {
+        "multi_reviewed_samples": len(shared),
+        "status": "measured",
+        "pairwise": pairwise,
+        "krippendorff_alpha": alphas,
+        "reading": (
+            "Compare humans_only with humans_plus_grader on the same samples. If adding the grader as one more "
+            "rater lowers alpha, the grader disagrees with reviewers more than they disagree with each other. "
+            "Alpha from a small number of samples is unstable."
+        ),
     }
 
 

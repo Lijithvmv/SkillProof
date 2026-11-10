@@ -1,0 +1,6 @@
+{"name": "changelog-writer", "description": "Write a changelog or release notes from a list of commits or merged pull requests. Use when the user wants release notes drafted for publication."}
+{"name": "customer-reply-drafter", "description": "Draft a friendly reply to a customer email or support ticket. Use when the user asks for a response to send to a customer."}
+{"name": "status-report-builder", "description": "Turn a list of tasks and owners into a weekly status report with red/amber/green ratings. Use for team status reports."}
+{"name": "sql-query-helper", "description": "Write, explain, and optimize SQL queries for PostgreSQL and SQLite. Use when the user asks about database queries."}
+{"name": "pdf-form-filler", "description": "Fill in PDF forms from structured data and flatten the result. Use when the user wants a PDF form completed."}
+{"name": "python-debugger", "description": "Diagnose Python tracebacks and propose minimal fixes. Use when the user shares a Python error."}

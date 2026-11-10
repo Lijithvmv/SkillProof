@@ -18,6 +18,19 @@ skillproof pilot --provider ollama `
 
 Use any models you have pulled. A grader that differs from the agent model avoids a model grading its own answers. The Ollama adapter only connects to a loopback address (`--ollama-url`, default `http://127.0.0.1:11434`), so task text and outputs stay on your machine. The agent samples at `--temperature 0.7` with one seed per call taken from `--seed`: rerunning with the same seed and models reproduces the run, and repeats of one task still differ. The grader always uses temperature 0 and a JSON schema. Small local models are slow (minutes per call on a laptop CPU) and grade less reliably than large hosted models, so check the grader against human scores before trusting it.
 
+### Load rate: is the skill picked when it is not forced?
+
+The paired run pastes the skill in, so its lift is the gain *when the skill is used*. Add `--distractor-skills examples/pilot/distractor-skills.jsonl --unrelated-tasks examples/pilot/unrelated-tasks.jsonl` (Ollama only for now) and the report gets an `activation` section: the agent model sees the skill's name and description among the distractors, in shuffled order, and chooses one skill or `none` for each benchmark prompt and each unrelated prompt.
+
+- `relevant.activation_rate`: share of benchmark prompts where it picked this skill.
+- `unrelated.false_activation_rate`: share of unrelated prompts where it picked this skill anyway.
+- `expected_lift_percentage_points`: activation rate × the forced lift.
+- `by_request`: the rate and the choices for each prompt. Read this first: an average can hide a task where the skill is never picked because another skill's description fits it better.
+
+Seeds reduce but do not remove run-to-run variation in local models, and thinking models need a token budget large enough to finish reasoning before they answer.
+
+This is a proxy: a model choosing from a list is not any specific agent's loader. Use it to compare descriptions or versions of one skill, not to predict one product's behaviour. Three of the example distractors are deliberately close to the benchmark tasks (release notes, customer replies, status reports).
+
 Or use the OpenAI Responses adapter with explicit agent and grader model IDs. `OPENAI_API_KEY` must be configured locally. The pilot command writes the experiment report plus two human-review files: a blinded sample bundle and a separate unblinding key. Give reviewers only the blind bundle until they finish their annotations.
 
 Example after installing the optional `openai` extra:

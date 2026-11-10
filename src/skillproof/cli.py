@@ -19,7 +19,8 @@ from skillproof.history import EvaluationHistoryStore
 from skillproof.monitoring import monitor_skill_history
 from skillproof.pilot import load_benchmark, read_manifest
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
-from skillproof.ollama_adapter import OllamaEvaluator, OllamaRunner
+from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
+from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
 from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
 
@@ -103,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"), help="Loopback Ollama server for --provider ollama.")
     pilot.add_argument("--seed", type=int, default=0, help="Order randomization seed, and the sampling seed for Ollama.")
     pilot.add_argument("--temperature", type=float, default=0.7, help="Ollama agent sampling temperature (the grader always uses 0).")
+    pilot.add_argument("--distractor-skills", help="JSONL of other skills (name, description). Turns on the load-rate test (Ollama only).")
+    pilot.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for (false activation).")
     pilot.add_argument("--model", default=os.getenv("SKILLPROOF_MODEL") or os.getenv("SKILLPROOF_OPENAI_MODEL"), help="Agent model ID; defaults to SKILLPROOF_MODEL or SKILLPROOF_OPENAI_MODEL.")
     pilot.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"), help="Grader model ID; defaults to SKILLPROOF_GRADER_MODEL or SKILLPROOF_OPENAI_GRADER_MODEL.")
     pilot.add_argument("--repeats", type=int, default=2)
@@ -173,6 +176,21 @@ def main(argv: list[str] | None = None) -> int:
                 seed=args.seed,
             )
             experiment["benchmark"] = {"benchmark_id": manifest.get("benchmark_id"), "version": manifest.get("version"), "validation_status": manifest.get("status")}
+            if args.distractor_skills:
+                if args.provider != "ollama":
+                    raise ValueError("The load-rate test currently needs --provider ollama.")
+                experiment["activation"] = measure_activation(
+                    target=read_skill_card(args.skill_file),
+                    distractors=read_distractors(args.distractor_skills),
+                    relevant_requests=[task.prompt for task in tasks],
+                    unrelated_requests=read_requests(args.unrelated_tasks) if args.unrelated_tasks else [],
+                    probe=OllamaActivationProbe(model=args.model, base_url=args.ollama_url, seed=args.seed, temperature=args.temperature),
+                    repeats=args.repeats,
+                    seed=args.seed,
+                    forced_lift_percentage_points=experiment["comparison"].get("skill_lift_percentage_points"),
+                )
+            elif args.unrelated_tasks:
+                raise ValueError("--unrelated-tasks needs --distractor-skills.")
             bundle = create_blind_review_bundle(experiment, tasks, task_reviews)
             _write_json({"review_samples": bundle["review_samples"], "annotation_template": bundle["annotation_template"], "task_review_samples": bundle["task_review_samples"], "task_review_template": bundle["task_review_template"], "instructions": bundle["instructions"]}, args.review_output)
             _write_json(bundle["sealed_unblinding_key"], args.unblinding_key_output)

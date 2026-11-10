@@ -23,7 +23,10 @@ class FakeOllama:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append((self.path, body))
-                if "format" in body:
+                if "format" in body and "skill" in body["format"]["properties"]:
+                    request = body["messages"][1]["content"]
+                    content = json.dumps({"skill": "evidence-summary" if "ummarize" in request else "none"})
+                elif "format" in body:
                     criteria = json.loads(body["messages"][1]["content"])["criteria"]
                     scored = criteria if owner.score_all_criteria else criteria[:-1]
                     content = json.dumps({"score": 0.5, "evidence": ["e"], "criterion_scores": [{"criterion": c, "score": 0.8, "evidence": "ok"} for c in scored]})
@@ -114,3 +117,46 @@ def test_pilot_cli_runs_end_to_end_on_ollama(ollama, tmp_path):
     assert len(json.loads(bundle.read_text(encoding="utf-8"))["review_samples"]) == 6
     # 3 tasks x 2 conditions, each one agent call and one grader call.
     assert len(ollama.requests) == 12
+
+
+def test_pilot_cli_reports_load_rate_with_distractors(ollama, tmp_path):
+    root = Path(__file__).parents[1] / "examples" / "pilot"
+    report = tmp_path / "report.json"
+    code = main([
+        "pilot", "--provider", "ollama", "--ollama-url", ollama.url, "--model", "m", "--grader-model", "g",
+        "--skill-file", str(root / "skill.md"), "--benchmark", str(root / "benchmark.jsonl"), "--repeats", "1",
+        "--distractor-skills", str(root / "distractor-skills.jsonl"), "--unrelated-tasks", str(root / "unrelated-tasks.jsonl"),
+        "--output", str(report), "--review-output", str(tmp_path / "b.json"), "--unblinding-key-output", str(tmp_path / "k.json"),
+    ])
+    assert code == 0
+    activation = json.loads(report.read_text(encoding="utf-8"))["activation"]
+    # Fake model picks the skill only when the request says "summarize": 2 of the 3 pilot prompts do.
+    assert activation["relevant"]["activation_rate"] == 0.6667
+    assert activation["unrelated"]["false_activation_rate"] == 0.0
+    assert activation["candidate_skills"] == 7
+    routing = [body for _, body in ollama.requests if "format" in body and "skill" in body["format"]["properties"]]
+    assert len(routing) == 7 and "changelog-writer" in routing[0]["messages"][0]["content"]
+
+
+def test_empty_answer_at_token_limit_gives_a_clear_error():
+    from skillproof.ollama_adapter import _content
+    with pytest.raises(RuntimeError, match="token limit"):
+        _content({"message": {"content": "", "thinking": "..."}, "done_reason": "length"})
+
+
+def test_probe_accepts_a_bare_listed_name_but_not_free_text():
+    from skillproof.activation import SkillCard
+    from skillproof.ollama_adapter import OllamaActivationProbe
+
+    class Client:
+        def __init__(self, text):
+            self.text = text
+
+        def chat(self, payload):
+            return {"message": {"content": self.text}, "done_reason": "stop"}
+
+    cards = [SkillCard("evidence-summary", "d"), SkillCard("sql-query-helper", "d")]
+    assert OllamaActivationProbe(model="m", client=Client("sql-query-helper\n")).choose(request="r", cards=cards) == "sql-query-helper"
+    assert OllamaActivationProbe(model="m", client=Client('{"skill": "none"}')).choose(request="r", cards=cards) == "none"
+    with pytest.raises(RuntimeError, match="no usable skill choice"):
+        OllamaActivationProbe(model="m", client=Client("I would pick the SQL one")).choose(request="r", cards=cards)

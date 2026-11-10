@@ -75,6 +75,9 @@ def _content(body: dict[str, Any]) -> str:
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
         raise RuntimeError("Ollama returned no message content")
+    if not content.strip() and body.get("done_reason") == "length":
+        # Thinking models can spend the whole token budget reasoning and never write the answer.
+        raise RuntimeError("Ollama hit the token limit before answering (a thinking model may need a larger budget)")
     return content
 
 
@@ -175,3 +178,61 @@ class OllamaEvaluator:
             input_tokens=_tokens(body, "prompt_eval_count"),
             output_tokens=_tokens(body, "eval_count"),
         )
+
+
+class OllamaActivationProbe:
+    """Asks a local model which listed skill (if any) it would load for a request.
+
+    The answer is constrained by a JSON schema to one of the listed names or 'none'. Sampling follows the agent
+    settings (temperature and a per-call seed sequence) so repeats behave like separate agent sessions.
+    """
+
+    def __init__(
+        self, *, model: str, base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 600,
+        temperature: float = 0.7, seed: int | None = 0, allow_remote: bool = False, client: Any | None = None,
+        max_output_tokens: int = 1024,
+    ):
+        if not model.strip():
+            raise ValueError("model must be explicitly configured")
+        self.model = model
+        # The answer is a few tokens, but thinking models reason first; a small budget leaves no answer.
+        self.max_output_tokens = max_output_tokens
+        self.temperature = temperature
+        self.seed = seed
+        self.calls = 0
+        self.client = client or _OllamaClient(base_url=base_url, timeout=timeout, allow_remote=allow_remote)
+
+    def choose(self, *, request: str, cards: list[Any]) -> str:
+        from skillproof.activation import NONE, ROUTER_INSTRUCTIONS
+
+        listing = "\n".join(f"- {card.name}: {card.description}" for card in cards)
+        schema = {
+            "type": "object",
+            "properties": {"skill": {"type": "string", "enum": [card.name for card in cards] + [NONE]}},
+            "required": ["skill"],
+        }
+        call_seed = None if self.seed is None else self.seed + self.calls
+        self.calls += 1
+        body = self.client.chat({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": ROUTER_INSTRUCTIONS + "\n\nAvailable skills:\n" + listing},
+                {"role": "user", "content": request},
+            ],
+            "stream": False,
+            "format": schema,
+            "options": _options(self.temperature, call_seed, self.max_output_tokens),
+        })
+        content = _content(body)
+        allowed = schema["properties"]["skill"]["enum"]
+        try:
+            parsed = json.loads(content)
+            choice = parsed.get("skill") if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            # Seen with a thinking model that skipped its reasoning: it returned the bare name, not the JSON
+            # object. Accept it only when it is exactly one of the listed names.
+            bare = content.strip().strip('"').strip()
+            choice = bare if bare in allowed else None
+        if not isinstance(choice, str):
+            raise RuntimeError(f"Ollama returned no usable skill choice: {content[:120]!r}")
+        return choice

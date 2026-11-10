@@ -2,7 +2,23 @@
 
 This is a three-task candidate benchmark for the included evidence-summary skill. It covers factual summary, a source containing an instruction injection, and conflicting source statements. The tasks and rubric are hand-authored and have **not** received independent human review; the manifest labels them accordingly.
 
-Use the OpenAI Responses adapter with explicit agent and grader model IDs. `OPENAI_API_KEY` must be configured locally. The pilot command writes the experiment report plus two human-review files: a blinded sample bundle and a separate unblinding key. Give reviewers only the blind bundle until they finish their annotations.
+You can run the pilot on a local [Ollama](https://ollama.com) server with no account or API key:
+
+```powershell
+skillproof pilot --provider ollama `
+  --model gemma4-e4b-ctx8k:latest `
+  --grader-model qwen2.5-coder-7b-ctx8k:latest `
+  --skill-file examples/pilot/skill.md `
+  --benchmark examples/pilot/benchmark.jsonl `
+  --repeats 1 `
+  --output pilot-report.json `
+  --review-output review/blinded-samples.json `
+  --unblinding-key-output review/unblinding-key.json
+```
+
+Use any models you have pulled. A grader that differs from the agent model avoids a model grading its own answers. The Ollama adapter only connects to a loopback address (`--ollama-url`, default `http://127.0.0.1:11434`), so task text and outputs stay on your machine. The agent samples at `--temperature 0.7` with one seed per call taken from `--seed`: rerunning with the same seed and models reproduces the run, and repeats of one task still differ. The grader always uses temperature 0 and a JSON schema. Small local models are slow (minutes per call on a laptop CPU) and grade less reliably than large hosted models, so check the grader against human scores before trusting it.
+
+Or use the OpenAI Responses adapter with explicit agent and grader model IDs. `OPENAI_API_KEY` must be configured locally. The pilot command writes the experiment report plus two human-review files: a blinded sample bundle and a separate unblinding key. Give reviewers only the blind bundle until they finish their annotations.
 
 Example after installing the optional `openai` extra:
 

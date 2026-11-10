@@ -19,6 +19,7 @@ from skillproof.history import EvaluationHistoryStore
 from skillproof.monitoring import monitor_skill_history
 from skillproof.pilot import load_benchmark, read_manifest
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
+from skillproof.ollama_adapter import OllamaEvaluator, OllamaRunner
 from skillproof.execution import execute_experiment
 from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
 
@@ -95,11 +96,15 @@ def main(argv: list[str] | None = None) -> int:
     monitor.add_argument("--regression-threshold-pp", type=float, default=5)
     monitor.add_argument("--output", default="-", help="Monitor report destination; use - for stdout.")
 
-    pilot = commands.add_parser("pilot", help="Run a paired OpenAI agent/grader pilot on a JSONL benchmark.")
+    pilot = commands.add_parser("pilot", help="Run a paired agent/grader pilot on a JSONL benchmark (OpenAI or local Ollama).")
     pilot.add_argument("--skill-file", required=True)
     pilot.add_argument("--benchmark", required=True)
-    pilot.add_argument("--model", default=os.getenv("SKILLPROOF_OPENAI_MODEL"), help="Agent model ID; defaults to SKILLPROOF_OPENAI_MODEL.")
-    pilot.add_argument("--grader-model", default=os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"), help="Grader model ID; defaults to SKILLPROOF_OPENAI_GRADER_MODEL.")
+    pilot.add_argument("--provider", choices=["openai", "ollama"], default=os.getenv("SKILLPROOF_PROVIDER", "openai"), help="openai needs OPENAI_API_KEY; ollama runs locally with no key.")
+    pilot.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"), help="Loopback Ollama server for --provider ollama.")
+    pilot.add_argument("--seed", type=int, default=0, help="Order randomization seed, and the sampling seed for Ollama.")
+    pilot.add_argument("--temperature", type=float, default=0.7, help="Ollama agent sampling temperature (the grader always uses 0).")
+    pilot.add_argument("--model", default=os.getenv("SKILLPROOF_MODEL") or os.getenv("SKILLPROOF_OPENAI_MODEL"), help="Agent model ID; defaults to SKILLPROOF_MODEL or SKILLPROOF_OPENAI_MODEL.")
+    pilot.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"), help="Grader model ID; defaults to SKILLPROOF_GRADER_MODEL or SKILLPROOF_OPENAI_GRADER_MODEL.")
     pilot.add_argument("--repeats", type=int, default=2)
     pilot.add_argument("--output", required=True, help="Experiment report JSON path.")
     pilot.add_argument("--review-output", required=True, help="Blind review bundle JSON path.")
@@ -148,7 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "pilot":
         try:
             if not args.model or not args.grader_model:
-                raise ValueError("Set explicit --model and --grader-model values, or configure their SKILLPROOF_OPENAI_* environment variables.")
+                raise ValueError("Set explicit --model and --grader-model values, or configure SKILLPROOF_MODEL and SKILLPROOF_GRADER_MODEL.")
+            if args.provider == "ollama":
+                runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, temperature=args.temperature)
+                evaluator = OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed)
+            else:
+                runner = OpenAIResponsesRunner(model=args.model)
+                evaluator = OpenAIResponsesEvaluator(model=args.grader_model)
             skill_instructions = Path(args.skill_file).read_text(encoding="utf-8")
             tasks = load_benchmark(args.benchmark)
             manifest = read_manifest(args.benchmark)
@@ -156,9 +167,10 @@ def main(argv: list[str] | None = None) -> int:
             experiment = execute_experiment(
                 tasks=tasks,
                 skill_instructions=skill_instructions,
-                runner=OpenAIResponsesRunner(model=args.model),
-                evaluator=OpenAIResponsesEvaluator(model=args.grader_model),
+                runner=runner,
+                evaluator=evaluator,
                 repeats=args.repeats,
+                seed=args.seed,
             )
             experiment["benchmark"] = {"benchmark_id": manifest.get("benchmark_id"), "version": manifest.get("version"), "validation_status": manifest.get("status")}
             bundle = create_blind_review_bundle(experiment, tasks, task_reviews)

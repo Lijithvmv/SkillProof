@@ -50,6 +50,7 @@ class Grade:
     input_tokens: int | None = None
     output_tokens: int | None = None
     response_id: str | None = None
+    model_overall_score: float | None = None  # the grader's own overall number, kept for audit only
 
 
 class OutputEvaluator(Protocol):
@@ -100,6 +101,7 @@ def _run_one(
         "cost_usd": result.cost_usd,
         "response_id": result.response_id,
         "grader_criterion_scores": grade.criterion_scores if grade is not None else [],
+        "grader_model_overall_score": grade.model_overall_score if grade is not None else None,
         "grader_provider": grade.provider if grade is not None else None,
         "grader_model": grade.model if grade is not None else None,
         "grader_duration_ms": grade.duration_ms if grade is not None and grade.duration_ms is not None else round((time.perf_counter() - grader_started) * 1000),

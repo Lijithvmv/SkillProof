@@ -55,7 +55,8 @@ def test_openai_structured_grader_returns_criterion_and_usage_data():
     client = FakeClient([response(json.dumps(result), model="explicit-grader-model")])
     task = BenchmarkTask(task_id="release", prompt="Summarize notes", criteria=["Names version"])
     grade = OpenAIResponsesEvaluator(model="explicit-grader-model", client=client).evaluate(task=task, output='{"version":"2.4.1"}')
-    assert grade.score == 0.8
+    assert grade.score == 1.0  # mean of the criterion scores
+    assert grade.model_overall_score == 0.8  # the grader's own overall number, kept for audit
     assert grade.criterion_scores[0]["criterion"] == "Names version"
     assert grade.model == "explicit-grader-model"
     assert grade.input_tokens == 100

@@ -58,3 +58,33 @@ def test_evaluation_api_endpoints():
     assert compare_response.status_code == 200
     assert compare_response.json()["skill_lift_percentage_points"] == 25.0
 
+
+
+def test_criterion_requiring_skill_format_absent_from_prompt_is_flagged():
+    from skillproof.evaluation import BenchmarkTask, validate_benchmark_task
+    skill = "Return one JSON object with `summary`, `facts` (claim and evidence), and `uncertainties`."
+    task = BenchmarkTask(task_id="t", prompt="Summarize the key changes in these release notes.",
+                         criteria=["Names version 2.4.1.", "Returns syntactically valid JSON with summary, facts, and uncertainties."])
+    codes = {(f["code"], f["severity"]) for f in validate_benchmark_task(skill, task)["findings"]}
+    assert ("TASK_CRITERION_REQUIRES_SKILL_FORMAT", "warning") in codes
+
+
+def test_format_criterion_is_fair_when_the_prompt_asks_for_it():
+    from skillproof.evaluation import BenchmarkTask, validate_benchmark_task
+    skill = "Return one JSON object with `summary`, `facts`, and `uncertainties`."
+    task = BenchmarkTask(task_id="t", prompt="Summarize the release notes as JSON with summary, facts and uncertainties.",
+                         criteria=["Returns syntactically valid JSON with summary, facts, and uncertainties."])
+    codes = {f["code"] for f in validate_benchmark_task(skill, task)["findings"]}
+    assert "TASK_CRITERION_REQUIRES_SKILL_FORMAT" not in codes
+    assert "TASK_CRITERION_SKILL_SPECIFIC" not in codes
+
+
+def test_skill_specific_behaviour_criterion_is_review_not_warning():
+    from skillproof.evaluation import BenchmarkTask, validate_benchmark_task
+    skill = "For each important claim, include a short exact quotation from the source as evidence for every fact."
+    task = BenchmarkTask(task_id="t", prompt="Summarize this customer message for the service team.",
+                         criteria=["Notes that the customer reports no data loss.", "Provides source evidence for reported facts."])
+    findings = validate_benchmark_task(skill, task)["findings"]
+    flagged = [f for f in findings if f["code"].startswith("TASK_CRITERION_")]
+    assert [(f["code"], f["severity"]) for f in flagged] == [("TASK_CRITERION_SKILL_SPECIFIC", "info")]
+    assert "data loss" not in flagged[0]["evidence"]

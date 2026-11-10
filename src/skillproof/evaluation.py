@@ -53,6 +53,56 @@ def _finding(code: str, severity: str, message: str, evidence: str) -> dict[str,
     return {"code": code, "severity": severity, "message": message, "evidence": evidence[:500]}
 
 
+_STOP = {
+    "the", "and", "for", "with", "that", "this", "from", "each", "any", "all", "are", "not", "does", "its", "into",
+    "only", "when", "then", "than", "both", "one", "two", "has", "have", "who", "which", "what", "will", "should",
+    "must", "can", "may", "use", "uses", "using", "return", "returns", "provide", "provides", "include", "includes",
+    "state", "states", "valid", "short", "reported", "report", "reports",
+}
+_FORMATS = {"json", "yaml", "yml", "xml", "csv", "markdown", "table", "schema", "html", "toml"}
+
+
+def _stem(word: str) -> str:
+    for suffix in ("ies", "es", "s"):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return word
+
+
+def _content_terms(text: str) -> set[str]:
+    return {_stem(word) for word in _words(text) if len(word) >= 3 and word not in _STOP and not word.isdigit()}
+
+
+def _criteria_requiring_skill(skill_instructions: str, task: BenchmarkTask) -> list[dict[str, str]]:
+    """Flag rubric lines that grade the baseline on something only the skill asked for.
+
+    A paired with/without experiment is fair only if both conditions are asked to do the same task. A criterion
+    whose distinctive words come from the skill and not from the prompt or source grades the baseline on an
+    instruction it never received. Output-format demands (JSON, a schema, named fields) are the clearest case
+    and are warnings; other skill-only behaviour (e.g. "quote evidence") may be the very thing the skill is
+    meant to add, so it is reported for review.
+    """
+    skill_terms = _content_terms(skill_instructions)
+    asked_terms = _content_terms(task.prompt + " " + (task.context or ""))
+    findings = []
+    for criterion in task.criteria:
+        skill_only = sorted((_content_terms(criterion) & skill_terms) - asked_terms)
+        formats = [term for term in skill_only if term in _FORMATS]
+        if formats:
+            findings.append(_finding(
+                "TASK_CRITERION_REQUIRES_SKILL_FORMAT", "warning",
+                "A criterion requires an output format that comes from the skill, but the task prompt never asks for it; the baseline is graded on an instruction it did not receive.",
+                f"{criterion} (skill-only terms: {', '.join(skill_only)})",
+            ))
+        elif len(skill_only) >= 3:
+            findings.append(_finding(
+                "TASK_CRITERION_SKILL_SPECIFIC", "info",
+                "A criterion's distinctive terms come from the skill, not the task prompt. Fine if it is the behaviour the skill should add; report lift with and without it.",
+                f"{criterion} (skill-only terms: {', '.join(skill_only)})",
+            ))
+    return findings
+
+
 def validate_benchmark_task(skill_instructions: str, task: BenchmarkTask) -> dict[str, Any]:
     """Check obvious lexical leakage and task completeness; not an independent semantic review."""
     findings: list[dict[str, str]] = []
@@ -71,6 +121,7 @@ def validate_benchmark_task(skill_instructions: str, task: BenchmarkTask) -> dic
     exposed = [" ".join(terms) for terms in criterion_terms if " ".join(terms) in prompt_text]
     if exposed:
         findings.append(_finding("TASK_CRITERIA_LEAKAGE", "warning", "The prompt includes wording from one or more grading criteria.", "; ".join(exposed[:3])))
+    findings.extend(_criteria_requiring_skill(skill_instructions, task))
 
     if not re.search(r"\b(create|write|build|produce|draft|analyze|review|convert|implement|summarize|generate|classify|extract|compare|fix|debug|design|plan|explain|find|identify)\b", task.prompt, re.I):
         findings.append(_finding("TASK_ACTION_UNCLEAR", "warning", "Task prompt does not contain a recognizable action; confirm the requested work is clear.", task.prompt))

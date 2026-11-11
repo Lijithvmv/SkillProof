@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -42,7 +43,7 @@ GRADE_SCHEMA = {
 
 
 
-def grade_schema_for(task: BenchmarkTask) -> dict:
+def grade_schema_for(task: BenchmarkTask, *, require_quotes: bool = False) -> dict:
     """GRADE_SCHEMA narrowed to one task, for providers whose structured output follows the schema as a grammar.
 
     With the generic schema a local grader (qwen2.5-coder 7B) wrote each criterion judgment into `evidence` and
@@ -50,14 +51,14 @@ def grade_schema_for(task: BenchmarkTask) -> dict:
     Here the per-criterion list comes first, must hold exactly one entry per criterion, and each entry names a
     listed criterion. The overall score comes last, after the judgments it should summarise.
     """
+    properties: dict[str, Any] = {"criterion": {"type": "string", "enum": list(task.criteria)}}
+    if require_quotes:  # the quote comes before the score, so the grader looks for the words before judging
+        properties["quote"] = {"type": "string"}
+    properties.update({"score": {"type": "number"}, "evidence": {"type": "string"}})
     item = {
         "type": "object",
-        "properties": {
-            "criterion": {"type": "string", "enum": list(task.criteria)},
-            "score": {"type": "number"},
-            "evidence": {"type": "string"},
-        },
-        "required": ["criterion", "score", "evidence"],
+        "properties": properties,
+        "required": list(properties),
         "additionalProperties": False,
     }
     n = len(task.criteria)
@@ -84,6 +85,53 @@ class CriterionGrade(BaseModel):
     criterion: str
     score: float = Field(ge=0, le=1)
     evidence: str
+    quote: str | None = None
+    quote_check: str | None = None  # found / not_found / not_needed, set by apply_quote_check
+    score_before_quote_check: float | None = None
+
+
+GRADER_QUOTE_INSTRUCTIONS = (
+    " For each criterion, first copy into `quote` the exact words from the candidate output that meet it. "
+    "If no words in the candidate output meet it, leave `quote` empty and score that criterion 0. "
+    "Do not quote the task, the source context, or your own wording."
+)
+
+_WORD = re.compile(r"[a-z0-9]+(?:[.,:/-][a-z0-9]+)*")
+
+
+def _words(text: str) -> list[str]:
+    # Answers written as JSON carry literal "\n" and "\t" escapes; without this "\nThe" would read as "nthe".
+    return _WORD.findall(text.lower().replace(r"\n", " ").replace(r"\t", " "))
+
+
+def _contains(haystack: list[str], needle: list[str]) -> bool:
+    n = len(needle)
+    return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+
+def quote_found(quote: str | None, output: str) -> bool:
+    """True when every part of the quote (split at ellipses) appears word for word in the output, ignoring case,
+    punctuation between words, markdown and JSON escaping."""
+    parts = [_words(part) for part in re.split(r"\.\.\.|…", quote or "")]
+    parts = [part for part in parts if part]
+    if not parts:
+        return False
+    out = _words(output)
+    return all(_contains(out, part) for part in parts)
+
+
+def apply_quote_check(graded: "GraderOutput", output: str) -> None:
+    """A criterion scored as met must be backed by words that are really in the output; otherwise it scores 0.
+
+    A local grader passed 6 of 8 answers that each left out one required item, writing evidence that asserted the
+    missing item. Checking the quote against the output is mechanical: it cannot tell whether the quoted words
+    meet the criterion, only that the grader did not invent them. The grader's own score is kept for audit.
+    """
+    for item in graded.criterion_scores:
+        item.quote_check = "not_needed" if item.score < 0.5 else "found" if quote_found(item.quote, output) else "not_found"
+        item.score_before_quote_check = item.score
+        if item.quote_check == "not_found":
+            item.score = 0.0
 
 
 class GraderOutput(BaseModel):

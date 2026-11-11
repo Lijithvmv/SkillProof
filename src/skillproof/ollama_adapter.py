@@ -16,7 +16,10 @@ from urllib.parse import urlparse
 
 from skillproof.evaluation import BenchmarkTask
 from skillproof.execution import AgentResult, Grade
-from skillproof.openai_adapter import BASELINE_POLICY, GRADER_INSTRUCTIONS, GraderOutput, grade_schema_for, score_from_criteria
+from skillproof.openai_adapter import (
+    BASELINE_POLICY, GRADER_INSTRUCTIONS, GRADER_QUOTE_INSTRUCTIONS, GraderOutput, apply_quote_check, grade_schema_for,
+    score_from_criteria,
+)
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 
@@ -145,11 +148,12 @@ class OllamaEvaluator:
     def __init__(
         self, *, model: str, base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 600,
         max_output_tokens: int = 1200, seed: int | None = 0, allow_remote: bool = False,
-        client: Any | None = None,
+        client: Any | None = None, require_quotes: bool = False,
     ):
         if not model.strip():
             raise ValueError("grader model must be explicitly configured")
         self.model = model
+        self.require_quotes = require_quotes
         self.options = _options(0.0, seed, max_output_tokens)
         self.client = client or _OllamaClient(base_url=base_url, timeout=timeout, allow_remote=allow_remote)
 
@@ -159,16 +163,18 @@ class OllamaEvaluator:
         body = self.client.chat({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": GRADER_INSTRUCTIONS},
+                {"role": "system", "content": GRADER_INSTRUCTIONS + (GRADER_QUOTE_INSTRUCTIONS if self.require_quotes else "")},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             "stream": False,
-            "format": grade_schema_for(task),
+            "format": grade_schema_for(task, require_quotes=self.require_quotes),
             "options": self.options,
         })
         raw = _content(body)
         try:
             graded = GraderOutput.model_validate_json(raw)
+            if self.require_quotes:
+                apply_quote_check(graded, output)
             score = score_from_criteria(graded, task)
         except ValueError as exc:  # keep what the grader said, so a failure can be diagnosed from the record
             raise ValueError(f"{exc} | grader reply: {raw[:400]}") from exc
@@ -176,7 +182,7 @@ class OllamaEvaluator:
             score=score,
             model_overall_score=graded.score,
             evidence=graded.evidence,
-            criterion_scores=[item.model_dump() for item in graded.criterion_scores],
+            criterion_scores=[item.model_dump(exclude_none=True) for item in graded.criterion_scores],
             provider="ollama",
             model=body.get("model") or self.model,
             duration_ms=round((time.perf_counter() - started) * 1000),

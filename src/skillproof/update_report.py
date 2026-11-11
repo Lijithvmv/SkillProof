@@ -52,10 +52,13 @@ def _lift(report: dict[str, Any] | None) -> dict[str, Any] | None:
     if not report:
         return None
     comparison = report.get("comparison", {})
+    coverage = comparison.get("coverage", {})
     return {
         "lift_percentage_points": comparison.get("skill_lift_percentage_points"),
-        "runs_per_condition": comparison.get("baseline", {}).get("runs"),
-        "provider_failures": sum((report.get("failure_counts") or {}).values()),
+        "complete_pairs": coverage.get("complete_pairs", comparison.get("baseline", {}).get("runs")),
+        "total_pairs": coverage.get("total_pairs"),
+        "failures": sum((report.get("failure_counts") or {}).values()),
+        "uneven_failures": coverage.get("uneven_failures"),
     }
 
 

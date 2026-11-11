@@ -156,13 +156,39 @@ def execute_experiment(
                 trial_records[condition] = trial_id
             pairs.append({"task_id": task.task_id, **trial_records})
 
-    baseline_scores = [record["score"] for record in records if record["condition"] == "baseline"]
-    enabled_scores = [record["score"] for record in records if record["condition"] == "skill_enabled"]
-    comparison = compare_runs(ComparisonRequest(
-        baseline=RunScores(scores=baseline_scores),
-        skill_enabled=RunScores(scores=enabled_scores),
-        pass_threshold=pass_threshold,
-    ))
+    # Lift is computed on complete pairs only. A failed run is stored with score 0.0 so it stays visible, but
+    # counting that 0.0 as a result invents lift: in a local pilot the grader failed on 4 of 6 baseline outputs
+    # and 0 of 6 skill outputs, and the averaged "lift" was +40 to +75 points.
+    by_key = {(record["trial_id"], record["condition"]): record for record in records}
+    complete = [
+        (by_key[(pair["baseline"], "baseline")], by_key[(pair["skill_enabled"], "skill_enabled")])
+        for pair in pairs
+        if not by_key[(pair["baseline"], "baseline")]["error"] and not by_key[(pair["skill_enabled"], "skill_enabled")]["error"]
+    ]
+    failures = {
+        condition: sum(bool(r["error"]) for r in records if r["condition"] == condition)
+        for condition in ("baseline", "skill_enabled")
+    }
+    coverage = {
+        "complete_pairs": len(complete),
+        "total_pairs": len(pairs),
+        "failures_by_condition": failures,
+        "uneven_failures": failures["baseline"] != failures["skill_enabled"],
+    }
+    if coverage["uneven_failures"]:
+        coverage["warning"] = (
+            "Failures are not spread evenly across conditions, so they are probably not random: excluding them "
+            "can bias the lift. Inspect the failed runs before using this comparison."
+        )
+    if complete:
+        comparison = compare_runs(ComparisonRequest(
+            baseline=RunScores(scores=[b["score"] for b, _ in complete]),
+            skill_enabled=RunScores(scores=[s["score"] for _, s in complete]),
+            pass_threshold=pass_threshold,
+        ))
+    else:
+        comparison = {"skill_lift_percentage_points": None, "interpretation": "not_measured", "reason": "No pair had both runs graded successfully."}
+    comparison["coverage"] = coverage
     return {
         "experiment_id": experiment_id,
         "engine_version": "1.7.0",

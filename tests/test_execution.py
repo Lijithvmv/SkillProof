@@ -73,3 +73,33 @@ def test_invalid_experiment_configuration_is_rejected(kwargs):
     with pytest.raises(ValueError):
         execute_experiment(**kwargs)
 
+
+
+class FlakyBaselineGrader:
+    """Fails to grade every other baseline output, like the small local grader did on real runs."""
+
+    def __init__(self):
+        self.baseline_seen = 0
+
+    def evaluate(self, *, task, output):
+        if "unstructured" in output:
+            self.baseline_seen += 1
+            if self.baseline_seen % 2:
+                raise ValueError("grader scored 0 of 1 criteria")
+            return Grade(0.4, ["ok"])
+        return Grade(0.9, ["ok"])
+
+
+def test_lift_uses_complete_pairs_and_flags_uneven_failures():
+    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(), evaluator=FlakyBaselineGrader(), repeats=4, seed=7)
+    coverage = result["comparison"]["coverage"]
+    assert coverage == {**coverage, "complete_pairs": 2, "total_pairs": 4, "uneven_failures": True}
+    assert "warning" in coverage
+    # Counting the failed baselines as 0.0 would have reported +70 points; complete pairs give +50.
+    assert result["comparison"]["skill_lift_percentage_points"] == 50.0
+
+
+def test_no_complete_pair_means_no_lift():
+    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(fail_baseline=True), evaluator=FakeEvaluator(), repeats=2, seed=1)
+    assert result["comparison"]["skill_lift_percentage_points"] is None
+    assert result["comparison"]["coverage"]["complete_pairs"] == 0

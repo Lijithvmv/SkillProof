@@ -5,6 +5,7 @@ secret values from evidence.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -36,6 +37,11 @@ def scan_security(files: dict[str, str]) -> dict[str, Any]:
                 findings.append({"code": "EXTERNAL_REFERENCE_REVIEW", "severity": "info", "message": "External URL found; review destination and the trust of fetched content.", "evidence": f"{path}:{line_no} ({target[:120]})"})
     unique = {(item["code"], item["evidence"]): item for item in findings}
     findings = sorted(unique.values(), key=lambda item: (item["severity"], item["code"], item["evidence"]))
+    for item in findings:
+        # A static match is a lead, not a verdict. It stays needs_validation until a reviewer records
+        # confirmed or rejected with a reason (see record_validation).
+        item["finding_id"] = hashlib.sha256(f"{item['code']}|{item['evidence']}".encode("utf-8")).hexdigest()[:12]
+        item["status"] = "needs_validation"
     weights = {"critical": 35, "high": 20, "medium": 10, "low": 5, "info": 0}
     score = max(0, 100 - sum(weights[item["severity"]] for item in findings))
     return {
@@ -44,4 +50,42 @@ def scan_security(files: dict[str, str]) -> dict[str, Any]:
         "status": "review_required" if any(item["severity"] in {"critical", "high", "medium"} for item in findings) else "no_static_findings",
         "findings": findings,
         "limitations": "A static pattern scan can produce false positives and miss novel or contextual attacks. No package code was executed; this is not a security certification.",
+    }
+
+
+STATUSES = {"needs_validation", "confirmed", "rejected"}
+BLOCKING = {"critical", "high"}
+
+
+def record_validation(report: dict[str, Any], decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply reviewer decisions to a security report's findings.
+
+    Each decision names a finding_id, a status of confirmed or rejected, a reviewer, and a reason. The reason is
+    required: it records what the reviewer checked when trying to disprove the finding, so a "rejected" is an
+    argument, not a shrug. Findings without a decision keep needs_validation.
+    """
+    findings = [dict(item) for item in report.get("findings", [])]
+    by_id = {item.get("finding_id"): item for item in findings}
+    for decision in decisions:
+        finding_id, status = decision.get("finding_id"), decision.get("status")
+        if finding_id not in by_id:
+            raise ValueError(f"Unknown finding_id: {finding_id!r}")
+        if status not in {"confirmed", "rejected"}:
+            raise ValueError("Decision status must be confirmed or rejected")
+        reviewer, reason = str(decision.get("reviewer") or "").strip(), str(decision.get("reason") or "").strip()
+        if not reviewer or len(reason) < 10:
+            raise ValueError(f"Decision for {finding_id} needs a reviewer and a reason of at least 10 characters")
+        by_id[finding_id].update(status=status, reviewer=reviewer, reason=reason[:2000])
+    counts = {status: sum(item.get("status") == status for item in findings) for status in sorted(STATUSES)}
+    confirmed_blocking = [item["finding_id"] for item in findings if item.get("status") == "confirmed" and item["severity"] in BLOCKING]
+    open_review = [item["finding_id"] for item in findings if item.get("status") == "needs_validation" and item["severity"] not in {"low", "info"}]
+    decision = "blocked" if confirmed_blocking else "review_required" if open_review else "cleared"
+    return {
+        "method": "static_findings_with_recorded_validation",
+        "decision": decision,
+        "status_counts": counts,
+        "confirmed_blocking": confirmed_blocking,
+        "awaiting_validation": open_review,
+        "findings": findings,
+        "limitations": "Decisions are as good as the reviewer's check. Cleared means no medium-or-higher finding is open or confirmed; it is not a security certification.",
     }

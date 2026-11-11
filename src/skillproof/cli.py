@@ -20,6 +20,7 @@ from skillproof.monitoring import monitor_skill_history
 from skillproof.pilot import load_benchmark, read_manifest
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
 from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
+from skillproof.security import record_validation
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
@@ -84,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("archive", help="Path to skill package ZIP.")
     scan.add_argument("--output", default="-", help="Report destination; use - for stdout.")
 
+    validate = commands.add_parser("validate-findings", help="Record confirmed/rejected decisions on security findings. Exit 2 if a high or critical finding is confirmed, 1 if any medium+ finding is still unvalidated.")
+    validate.add_argument("report", help="A scan report (with a security section) or a security report JSON.")
+    validate.add_argument("decisions", help="JSON array of {finding_id, status, reviewer, reason}.")
+    validate.add_argument("--output", default="-", help="Destination; use - for stdout.")
+
     manifest = commands.add_parser("manifest", help="List what a skill (directory or ZIP) can reach or change, after decoding hidden content.")
     manifest.add_argument("package", help="Skill directory or ZIP.")
     manifest.add_argument("--output", default="-", help="Manifest destination; use - for stdout.")
@@ -141,6 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "scan":
         result, exit_code = scan_archive(args.archive)
+    elif args.command == "validate-findings":
+        try:
+            report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+            decisions = json.loads(Path(args.decisions).read_text(encoding="utf-8"))
+            if not isinstance(decisions, list):
+                raise ValueError("Decisions file must be a JSON array")
+            result = record_validation(report.get("security", report), decisions)
+            exit_code = {"blocked": 2, "review_required": 1, "cleared": 0}[result["decision"]]
+        except (OSError, json.JSONDecodeError, ValueError, AttributeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command == "manifest":
         try:
             result, exit_code = build_manifest(read_package_bytes(args.package)), 0

@@ -115,7 +115,7 @@ DESTRUCTIVE = [
     ("format/mkfs", r"\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:"), ("git push --force", r"\bgit\s+push\b[^\n]*(?:--force|-f)\b"),
     ("dd", r"\bdd\s+if="),
 ]
-WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd (?:this|the following|a line)|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
+WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
 
 CATEGORIES = (
     "network_hosts", "network_clients", "process_execution", "agent_config_writes", "persistence",
@@ -376,6 +376,13 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")):
                             manifest.add("network_hosts", ip, location)
             if not is_code:
+                # Prose still matters for the two most specific attacks: an instruction to write to agent
+                # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write
+                # verb on the same line; network and execution patterns stay code-only because prose mentions
+                # of tools are common and harmless.
+                if WRITE_CUE.search(line):
+                    _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
+                    _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
                 continue
             _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, line, location)
             _scan_patterns(manifest, "process_execution", PROCESS_EXEC, line, location)

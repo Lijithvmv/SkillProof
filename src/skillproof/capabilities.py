@@ -115,6 +115,13 @@ DESTRUCTIVE = [
     ("format/mkfs", r"\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:"), ("git push --force", r"\bgit\s+push\b[^\n]*(?:--force|-f)\b"),
     ("dd", r"\bdd\s+if="),
 ]
+# Real local skill files showed four more harmless groups (VS Code / Copilot, Codex, Kimi and Claude skill copies):
+# placeholder links ("github.com/owner/repo"), tool names inside a match pattern ("curl|wget|nc" in a hook that
+# blocks them), location variables read as "credentials" ($env:APPDATA), and Markdown tables describing rules.
+PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
+ALTERNATION = re.compile(r"(?<![\w|])[\w.-]+(?:\|[\w.-]+)+(?![\w|])")
+LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP)$", re.I)
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")  # a Markdown table row starts and ends with |; a pipe continuation does not
 WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
 
 CATEGORIES = (
@@ -370,6 +377,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     host = match.group(1).lower().strip("[]")
                     if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                         continue
+                    if PLACEHOLDER_PATH.match(line[match.end():]):
+                        continue  # a template link such as https://github.com/owner/repo/pull/123
                     manifest.add("network_hosts", host, location)
                 if is_code:
                     for ip in IPV4.findall(line):
@@ -380,20 +389,22 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write
                 # verb on the same line; network and execution patterns stay code-only because prose mentions
                 # of tools are common and harmless.
-                if WRITE_CUE.search(line):
+                if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
                     _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
                     _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
                 continue
-            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, line, location)
+            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, ALTERNATION.sub(" ", line), location)
             _scan_patterns(manifest, "process_execution", PROCESS_EXEC, line, location)
             _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
             _scan_patterns(manifest, "credential_access", CREDENTIALS, line, location)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, line, location)
             window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
-            if WRITE_CUE.search(window):
+            if WRITE_CUE.search(window) and not TABLE_ROW.match(original_line(number, line)):
                 _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
             for match in ENV_READ.finditer(line):
-                manifest.add("credential_access", "env:" + next(g for g in match.groups() if g).upper(), location)
+                name = next(g for g in match.groups() if g).upper()
+                if not LOCATION_ENV.match(name):  # $env:APPDATA is a folder, not a secret
+                    manifest.add("credential_access", "env:" + name, location)
             if ENV_ALL.search(line):
                 manifest.add("credential_access", "env:<all>", location)
             for match in INSTALL.finditer(line):

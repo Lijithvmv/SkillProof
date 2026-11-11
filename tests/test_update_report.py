@@ -62,3 +62,13 @@ def test_grader_check_is_its_own_column_and_can_drive_a_policy(tmp_path):
     out = tmp_path / "r.json"
     assert main(["update-report", str(old), str(new), "--grader-check", str(check), "--policy", str(policy), "--output", str(out)]) == 1
     assert json.loads(out.read_text(encoding="utf-8"))["policy_rules_applied"] == ["review: grader check disagreement 0.125 above 0.1"]
+
+
+def test_lift_change_is_a_reason_with_its_interpretation(tmp_path):
+    old = skill(tmp_path / "old", "Summarize notes. Use when asked.")
+    new = skill(tmp_path / "new", "Summarize notes. Use when asked.")
+    def pilot(path, lift, p):
+        path.write_text(json.dumps({"comparison": {"skill_lift_percentage_points": lift, "paired_by_task": {"tasks": 4, "sign_flip_p_value": p, "interval_excludes_zero": True}}}), encoding="utf-8")
+        return path
+    report = build_update_report(old, new, old_pilot=pilot(tmp_path / "p1.json", 0.0, 1.0), new_pilot=pilot(tmp_path / "p2.json", 50.0, 0.25))
+    assert "lift +0 -> +50 points (new: not_distinguishable_from_zero, 4 tasks, p = 0.25)" in report["reasons"]

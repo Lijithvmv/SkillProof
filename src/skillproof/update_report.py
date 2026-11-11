@@ -125,6 +125,10 @@ def build_update_report(
     new_rate = (evidence["load_rate"]["new"] or {}).get("activation_rate")
     if old_rate is not None and new_rate is not None:
         reasons.append(f"load rate {old_rate:.0%} -> {new_rate:.0%}")
+    old_lift, new_lift = evidence["lift"]["old"] or {}, evidence["lift"]["new"] or {}
+    if old_lift.get("lift_percentage_points") is not None and new_lift.get("lift_percentage_points") is not None:
+        reasons.append(f"lift {old_lift['lift_percentage_points']:+g} -> {new_lift['lift_percentage_points']:+g} points "
+                       f"(new: {new_lift.get('interpretation')}, {new_lift.get('tasks')} tasks, p = {new_lift.get('sign_flip_p_value')})")
     new_false = (evidence["load_rate"]["new"] or {}).get("false_activation_rate")
     old_false = (evidence["load_rate"]["old"] or {}).get("false_activation_rate")
     if new_false is not None and old_false is not None and new_false > old_false:

@@ -103,3 +103,29 @@ def test_no_complete_pair_means_no_lift():
     result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(fail_baseline=True), evaluator=FakeEvaluator(), repeats=2, seed=1)
     assert result["comparison"]["skill_lift_percentage_points"] is None
     assert result["comparison"]["coverage"]["complete_pairs"] == 0
+
+
+def _pair(task_id, baseline, enabled):
+    return ({"task_id": task_id, "score": baseline}, {"task_id": task_id, "score": enabled})
+
+
+def test_one_improved_task_out_of_three_is_not_called_positive():
+    from skillproof.execution import paired_task_uncertainty
+    result = paired_task_uncertainty([_pair("a", 0.5, 1.0), _pair("b", 1.0, 1.0), _pair("c", 1.0, 1.0)])
+    assert (result["tasks"], result["tasks_improved"], result["tasks_unchanged"]) == (3, 1, 2)
+    assert result["sign_flip_p_value"] == 1.0 and result["smallest_possible_p_value"] == 0.25
+    assert result["interval_excludes_zero"] is False
+
+
+def test_repeats_of_one_task_count_once():
+    from skillproof.execution import paired_task_uncertainty
+    result = paired_task_uncertainty([_pair("a", 0.0, 1.0)] * 5 + [_pair("b", 0.5, 0.5)])
+    assert result["tasks"] == 2 and result["per_task_lift_percentage_points"] == {"a": 100.0, "b": 0.0}
+
+
+def test_consistent_lift_across_many_tasks_is_distinguishable_from_zero():
+    from skillproof.execution import paired_task_uncertainty
+    result = paired_task_uncertainty([_pair(f"t{i}", 0.4, 0.8 + 0.01 * i) for i in range(8)])
+    assert result["tasks_improved"] == 8
+    assert result["sign_flip_p_value"] == round(2 / 256, 4)
+    assert result["interval_excludes_zero"] is True

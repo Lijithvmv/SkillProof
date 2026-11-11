@@ -112,6 +112,46 @@ def _run_one(
     }
 
 
+def paired_task_uncertainty(complete: list[tuple[dict[str, Any], dict[str, Any]]], *, seed: int = 0, resamples: int = 2000) -> dict[str, Any]:
+    """Uncertainty of the lift with the task as the unit.
+
+    Repeats of one task share a prompt and rubric, so they are not independent evidence. Each task contributes one
+    number: the mean of (skill score - baseline score) over its complete pairs. On those per-task differences this
+    reports an exact two-sided sign-flip test (every sign pattern, up to 16 tasks), a percentile bootstrap interval
+    resampled over tasks, and how many tasks improved, got worse or did not change. With n tasks the smallest
+    possible p-value is 2 / 2**n, which is reported so a small benchmark cannot look conclusive.
+    """
+    by_task: dict[str, list[float]] = {}
+    for baseline, enabled in complete:
+        by_task.setdefault(baseline["task_id"], []).append(enabled["score"] - baseline["score"])
+    diffs = [sum(v) / len(v) for v in by_task.values()]
+    n = len(diffs)
+    result: dict[str, Any] = {
+        "unit": "task",
+        "tasks": n,
+        "tasks_improved": sum(d > 0 for d in diffs),
+        "tasks_worse": sum(d < 0 for d in diffs),
+        "tasks_unchanged": sum(d == 0 for d in diffs),
+        "per_task_lift_percentage_points": {task: round(sum(v) / len(v) * 100, 2) for task, v in by_task.items()},
+    }
+    if n == 0:
+        return result
+    observed = abs(sum(diffs))
+    if n <= 16:
+        hits = 0
+        for mask in range(2 ** n):
+            total = sum(-d if mask >> i & 1 else d for i, d in enumerate(diffs))
+            hits += abs(total) >= observed - 1e-12
+        result["sign_flip_p_value"] = round(hits / 2 ** n, 4)
+        result["smallest_possible_p_value"] = round(2 / 2 ** n, 4) if n else None
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choice(diffs) for _ in range(n)) / n for _ in range(resamples))
+    low, high = means[int(0.025 * resamples)], means[int(0.975 * resamples) - 1]
+    result["bootstrap_95_interval_percentage_points"] = [round(low * 100, 2), round(high * 100, 2)]
+    result["interval_excludes_zero"] = low > 0 or high < 0
+    return result
+
+
 def execute_experiment(
     *, tasks: list[BenchmarkTask], skill_instructions: str, runner: AgentRunner,
     evaluator: OutputEvaluator, repeats: int = 3, pass_threshold: float = 0.7,
@@ -189,6 +229,12 @@ def execute_experiment(
     else:
         comparison = {"skill_lift_percentage_points": None, "interpretation": "not_measured", "reason": "No pair had both runs graded successfully."}
     comparison["coverage"] = coverage
+    if complete:
+        paired = paired_task_uncertainty(complete, seed=seed)
+        comparison["paired_by_task"] = paired
+        if not paired.get("interval_excludes_zero"):
+            # The mean difference alone said "positive" for +16.7 points carried by one of three tasks.
+            comparison["interpretation"] = "not_distinguishable_from_zero"
     return {
         "experiment_id": experiment_id,
         "engine_version": "1.7.0",

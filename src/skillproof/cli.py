@@ -22,6 +22,7 @@ from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesR
 from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
 from skillproof.security import record_validation
 from skillproof.inventory import inventory
+from skillproof.installed import default_roots, scan_installed
 from skillproof.update_report import build_update_report
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
@@ -99,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     update.add_argument("--grader-check", help="grader-check report JSON (labelled answers; not a substitute for --agreement).")
     update.add_argument("--policy", help="Your decision rules (JSON). Without it no decision is made.")
     update.add_argument("--output", default="-", help="Destination; use - for stdout.")
+
+    watch = commands.add_parser("watch-installed", help="Diff installed skills against the last scan and report what each update adds. Exit 1 when an update adds capabilities.")
+    watch.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
+    watch.add_argument("--state", default=str(Path.home() / ".skillproof" / "installed-state.json"), help="Local state file (manifests of the last scan, not skill contents).")
+    watch.add_argument("--output", default="-")
 
     inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
     inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
@@ -185,6 +191,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             exit_code = {"block": 2, "review": 1, "reviewer_decision_required": 1, "accept": 0}[result["decision"]]
         except (OSError, ValueError, KeyError, PackageError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "watch-installed":
+        try:
+            roots = [Path(r) for r in args.root] or default_roots()
+            if not roots:
+                raise ValueError("No skill folders found; pass --root.")
+            result = scan_installed(roots, args.state)
+            exit_code = 1 if result["changes_adding_capabilities"] else 0
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "inventory":
         try:

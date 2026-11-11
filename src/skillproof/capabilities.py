@@ -55,7 +55,16 @@ HEX_RUN = re.compile(r"(?<![0-9a-fA-F])(?:[0-9a-fA-F]{2}){16,}(?![0-9a-fA-F])")
 
 URL = re.compile(r"\b(?:https?|ftp|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?::\d+)?", re.I)
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|request|requests|upload|post|get|send|http|invoke-webrequest|iwr)\b", re.I)
+FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests?\.\w+|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
+# A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
+NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
+# Registries of identifiers (XML namespaces, schemas), not services a skill talks to.
+IDENTIFIER_HOSTS = {"www.w3.org", "schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "ns.adobe.com", "json-schema.org", "json.schemastore.org", "xmlns.com"}
+LOCKFILES = {"uv.lock", "poetry.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "go.sum", "pipfile.lock", "composer.lock", "gemfile.lock"}
+INLINE_CODE = re.compile(r"`([^`]+)`")
+NEGATED = re.compile(r"\b(?:do not|don't|never|no need to|without|instead of|avoid)\b[^.;]*$", re.I)
+COMMENT_LINE = re.compile(r"^\s*(?:#(?!!)|//|/\*|\*|<!--|--|REM\b|;)")
+NOT_EXTERNAL = re.compile(r"^(?:[^a-z0-9]*|localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|::1|[^.]*|.*\.(?:example|test|invalid|localhost|local)|(?:.*\.)?example\.(?:com|org|net))$", re.I)
 
 NETWORK_CLIENTS = [
     ("curl", r"\bcurl\b"), ("wget", r"\bwget\b"), ("python-requests", r"\brequests\.(?:get|post|put|patch|delete|request|Session)\b"),
@@ -67,7 +76,7 @@ NETWORK_CLIENTS = [
 PROCESS_EXEC = [
     ("subprocess", r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\b"), ("os.system", r"\bos\.(?:system|popen|exec\w*)\("),
     ("eval", r"(?<![\w.])eval\("), ("exec", r"(?<![\w.])exec\("), ("child_process", r"\bchild_process\b|\bexecSync\(|\bspawnSync?\("),
-    ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node)\b"),
+    ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"),
     ("powershell", r"\bpowershell(?:\.exe)?\b|\bpwsh\b"), ("cmd /c", r"\bcmd(?:\.exe)?\s+/c\b"),
 ]
 AGENT_CONFIG = [
@@ -294,7 +303,15 @@ def _active_lines(path: str, text: str) -> list[tuple[int, str, bool]]:
         if line.lstrip().startswith(("```", "~~~")):
             fenced = not fenced
             continue
-        rows.append((n, line, fenced or "`" in line))
+        if fenced:
+            rows.append((n, line, True))
+        elif "`" in line:
+            # Outside a code block only the inline code counts: "use `curl`" is an instruction, while the prose
+            # and link targets around it ("see [docs](https://...)") are not capabilities.
+            rows.append((n, "  ".join(INLINE_CODE.findall(line)), True))
+            rows.append((n, line, False))
+        else:
+            rows.append((n, line, False))
     return rows
 
 
@@ -335,14 +352,24 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 manifest.add("hiding_techniques", step["technique"], path)
         original_lines = len(text.splitlines())
         lines = _active_lines(path, decoded)
+        source_lines = decoded.splitlines()
+
+        def original_line(number: int, fallback: str) -> str:
+            return source_lines[number - 1] if 0 < number <= len(source_lines) else fallback
         for index, (number, line, is_code) in enumerate(lines):
             location = f"{path}:{number}" if number <= original_lines else f"{path}:decoded"
             if number > original_lines:
                 is_code = True  # revealed payloads are always treated as code
+            in_comment = is_code and number <= original_lines and bool(COMMENT_LINE.match(line)) and suffix in SCRIPT_SUFFIXES
+            if in_comment:
+                continue  # a comment describes code; it does not run (license headers, notes about attacks)
             cue = is_code or bool(FETCH_CUE.search(line))
-            if cue:
+            if cue and PurePosixPath(path).name.lower() not in LOCKFILES:
                 for match in URL.finditer(line):
-                    manifest.add("network_hosts", match.group(1).lower().strip("[]"), location)
+                    host = match.group(1).lower().strip("[]")
+                    if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
+                        continue
+                    manifest.add("network_hosts", host, location)
                 if is_code:
                     for ip in IPV4.findall(line):
                         if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")):
@@ -354,7 +381,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
             _scan_patterns(manifest, "credential_access", CREDENTIALS, line, location)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, line, location)
-            window = " ".join(row[1] for row in lines[max(0, index - 1): index + 2])
+            window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
             if WRITE_CUE.search(window):
                 _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
             for match in ENV_READ.finditer(line):
@@ -362,6 +389,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             if ENV_ALL.search(line):
                 manifest.add("credential_access", "env:<all>", location)
             for match in INSTALL.finditer(line):
+                if NEGATED.search(original_line(number, line)[: max(0, original_line(number, line).find(match.group(0)))][-40:]):
+                    continue  # "do not run `npm install` first" is the opposite of an install
                 groups = [g for g in match.groups() if g]
                 tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
                 package = groups[-1].strip(".,;:)\"'`")

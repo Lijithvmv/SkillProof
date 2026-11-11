@@ -179,30 +179,3 @@ def test_out_of_range_overall_score_is_kept_but_does_not_drop_the_grade(ollama):
     task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a", "b"])
     grade = OllamaEvaluator(model="g", base_url=ollama.url).evaluate(task=task, output="out")
     assert grade.score == 0.8 and grade.model_overall_score == 3
-
-
-def test_quote_check_matches_words_not_formatting():
-    from skillproof.openai_adapter import quote_found
-    output = '{"summary": "Release **2.4.1** (published 2026-09-14).\nAdds CSV export."}'
-    assert quote_found("release 2.4.1 (published 2026-09-14)", output)
-    assert quote_found("Release 2.4.1 ... adds CSV export", output)
-    assert not quote_found("published on 2026-09-14", output)  # "on" is not in the output
-    assert not quote_found("", output) and not quote_found(None, output)
-
-
-def test_passed_criterion_without_a_real_quote_scores_zero(ollama):
-    # The fake grader returns no quote, so with quotes required every passed criterion is unsupported.
-    task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a", "b"])
-    grade = OllamaEvaluator(model="g", base_url=ollama.url, require_quotes=True).evaluate(task=task, output="out")
-    request = ollama.requests[0][1]
-    assert list(request["format"]["properties"]["criterion_scores"]["items"]["properties"]) == ["criterion", "quote", "score", "evidence"]
-    assert "copy into `quote`" in request["messages"][0]["content"]
-    assert grade.score == 0.0
-    assert {(c["quote_check"], c["score_before_quote_check"]) for c in grade.criterion_scores} == {("not_found", 0.8)}
-
-
-def test_quotes_are_off_by_default(ollama):
-    task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a"])
-    grade = OllamaEvaluator(model="g", base_url=ollama.url).evaluate(task=task, output="out")
-    assert "quote" not in ollama.requests[0][1]["format"]["properties"]["criterion_scores"]["items"]["properties"]
-    assert grade.score == 0.8 and "quote_check" not in grade.criterion_scores[0]

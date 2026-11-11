@@ -145,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--model", default=os.getenv("SKILLPROOF_MODEL") or os.getenv("SKILLPROOF_OPENAI_MODEL"), help="Agent model ID; defaults to SKILLPROOF_MODEL or SKILLPROOF_OPENAI_MODEL.")
     pilot.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"), help="Grader model ID; defaults to SKILLPROOF_GRADER_MODEL or SKILLPROOF_OPENAI_GRADER_MODEL.")
     pilot.add_argument("--repeats", type=int, default=2)
-    pilot.add_argument("--grader-quotes", action="store_true", help="Ollama grader must quote the answer for each criterion it passes; a quote not found in the answer scores that criterion 0.")
     pilot.add_argument("--output", required=True, help="Experiment report JSON path.")
     pilot.add_argument("--review-output", required=True, help="Blind review bundle JSON path.")
     pilot.add_argument("--unblinding-key-output", required=True, help="Keep this separate from reviewers until scoring is complete.")
@@ -157,7 +156,6 @@ def main(argv: list[str] | None = None) -> int:
     gcheck.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
     gcheck.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"))
     gcheck.add_argument("--seed", type=int, default=0)
-    gcheck.add_argument("--grader-quotes", action="store_true", help="Ollama grader must quote the answer for each criterion it passes; a quote not found in the answer scores that criterion 0.")
     gcheck.add_argument("--output", default="-")
 
     agreement = commands.add_parser("grader-agreement", help="Compare completed human scores to blinded grader scores.")
@@ -242,13 +240,11 @@ def main(argv: list[str] | None = None) -> int:
             store.close()
     elif args.command == "pilot":
         try:
-            if args.grader_quotes and args.provider != "ollama":
-                raise ValueError("--grader-quotes currently needs --provider ollama.")
             if not args.model or not args.grader_model:
                 raise ValueError("Set explicit --model and --grader-model values, or configure SKILLPROOF_MODEL and SKILLPROOF_GRADER_MODEL.")
             if args.provider == "ollama":
                 runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, temperature=args.temperature)
-                evaluator = OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed, require_quotes=args.grader_quotes)
+                evaluator = OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed)
             else:
                 runner = OpenAIResponsesRunner(model=args.model)
                 evaluator = OpenAIResponsesEvaluator(model=args.grader_model)
@@ -294,9 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if not args.grader_model:
                 raise ValueError("Set --grader-model or SKILLPROOF_GRADER_MODEL.")
-            if args.grader_quotes and args.provider != "ollama":
-                raise ValueError("--grader-quotes currently needs --provider ollama.")
-            evaluator = (OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed, require_quotes=args.grader_quotes)
+            evaluator = (OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed)
                          if args.provider == "ollama" else OpenAIResponsesEvaluator(model=args.grader_model))
             result = check_grader(load_benchmark(args.benchmark), read_cases(args.cases), evaluator)
             exit_code = 1 if result["disagreements"] or result["grader_failures"] else 0

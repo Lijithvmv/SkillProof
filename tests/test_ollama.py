@@ -78,7 +78,7 @@ def test_grader_sends_json_schema_and_zero_temperature(ollama):
     task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["c"])
     grade = OllamaEvaluator(model="local-grader", base_url=ollama.url).evaluate(task=task, output="out")
     _, request = ollama.requests[0]
-    assert request["format"]["required"] == ["score", "evidence", "criterion_scores"]
+    assert request["format"]["required"] == ["criterion_scores", "evidence", "score"]
     assert request["options"]["temperature"] == 0.0
     assert grade.score == 0.8 and grade.model_overall_score == 0.5 and grade.provider == "ollama"
 
@@ -86,8 +86,19 @@ def test_grader_sends_json_schema_and_zero_temperature(ollama):
 def test_grade_that_skips_a_criterion_is_rejected(ollama):
     ollama.score_all_criteria = False
     task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a", "b"])
-    with pytest.raises(ValueError, match="scored 1 of 2 criteria"):
+    with pytest.raises(ValueError, match="scored 1 of 2 criteria.*grader reply"):
         OllamaEvaluator(model="g", base_url=ollama.url).evaluate(task=task, output="out")
+
+
+def test_grade_schema_requires_one_entry_per_listed_criterion(ollama):
+    # A local grader once wrote its criterion judgments into `evidence` and returned an empty criterion list.
+    task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a", "b", "c"])
+    OllamaEvaluator(model="g", base_url=ollama.url).evaluate(task=task, output="out")
+    schema = ollama.requests[0][1]["format"]
+    scores = schema["properties"]["criterion_scores"]
+    assert scores["minItems"] == scores["maxItems"] == 3
+    assert scores["items"]["properties"]["criterion"]["enum"] == ["a", "b", "c"]
+    assert list(schema["properties"]) == ["criterion_scores", "evidence", "score"]
 
 
 @pytest.mark.parametrize("url", ["http://192.168.1.20:11434", "http://example.com:11434", "ftp://127.0.0.1"])

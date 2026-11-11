@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from skillproof.evaluation import BenchmarkTask
 from skillproof.execution import AgentResult, Grade
-from skillproof.openai_adapter import BASELINE_POLICY, GRADE_SCHEMA, GRADER_INSTRUCTIONS, GraderOutput, score_from_criteria
+from skillproof.openai_adapter import BASELINE_POLICY, GRADER_INSTRUCTIONS, GraderOutput, grade_schema_for, score_from_criteria
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 
@@ -163,12 +163,17 @@ class OllamaEvaluator:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             "stream": False,
-            "format": GRADE_SCHEMA,
+            "format": grade_schema_for(task),
             "options": self.options,
         })
-        graded = GraderOutput.model_validate_json(_content(body))
+        raw = _content(body)
+        try:
+            graded = GraderOutput.model_validate_json(raw)
+            score = score_from_criteria(graded, task)
+        except ValueError as exc:  # keep what the grader said, so a failure can be diagnosed from the record
+            raise ValueError(f"{exc} | grader reply: {raw[:400]}") from exc
         return Grade(
-            score=score_from_criteria(graded, task),
+            score=score,
             model_overall_score=graded.score,
             evidence=graded.evidence,
             criterion_scores=[item.model_dump() for item in graded.criterion_scores],

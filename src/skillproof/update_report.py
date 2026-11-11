@@ -80,6 +80,8 @@ def build_update_report(
         "capability_delta": {
             "status": diff["status"],
             "added": {category: sorted(values) for category, values in diff["added"].items()},
+            "added_by_source": diff["added_by_source"],
+            "only_in_tests": sorted(f"{c}:{v}" for c, vals in diff["added_sources"].items() for v, kinds in vals.items() if kinds == ["test"]),
             "removed": diff["removed"],
         },
         "description_changed": bool(metadata["old"] and metadata["new"] and metadata["old"] != metadata["new"]),

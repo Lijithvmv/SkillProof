@@ -402,6 +402,24 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
     return manifest.to_dict()
 
 
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec)/", re.I)
+TEST_NAME = re.compile(r"^(?:test_.*|.*_test\.\w+|.*\.(?:test|spec)\.\w+|conftest\.py)$", re.I)
+DOC_SUFFIXES = {".md", ".txt", ".rst"}
+
+
+def source_kind(location: str) -> str:
+    """Where a capability lives: 'instructions' (Markdown the agent reads and follows), 'shipped' (scripts and
+    files that ship and can run), or 'test' (test files only). Instructions are not lower risk than code: for a
+    skill they are what the agent is told to do."""
+    path = location.rsplit(":", 1)[0] if re.search(r":(?:\d+|decoded)$", location) else location
+    name = PurePosixPath(path).name
+    if TEST_PATH.search(path) or TEST_NAME.match(name):
+        return "test"
+    if PurePosixPath(name).suffix.lower() in DOC_SUFFIXES:
+        return "instructions"
+    return "shipped"
+
+
 def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Capabilities the new version has that the old one did not (and the reverse)."""
     added: dict[str, dict[str, list[str]]] = {}
@@ -414,10 +432,20 @@ def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
             added[category] = gained
         if lost:
             removed[category] = lost
+    sources: dict[str, dict[str, list[str]]] = {}
+    by_source = {"instructions": 0, "shipped": 0, "test": 0}
+    for category, values in added.items():
+        for value, locations in values.items():
+            kinds = sorted({source_kind(location) for location in locations})
+            sources.setdefault(category, {})[value] = kinds
+            # An item counts once, under the riskiest place it appears: shipped code, then instructions, then tests.
+            by_source[next(k for k in ("shipped", "instructions", "test") if k in kinds)] += 1
     return {
         "method": "capability_manifest_diff",
         "status": "new_capabilities" if added else "no_new_capabilities",
         "added": added,
+        "added_sources": sources,
+        "added_by_source": by_source,
         "removed": removed,
         "new_categories": sorted(c for c in added if not old["capabilities"].get(c)),
         "limitations": "Compares extracted facts, not code. A capability that both versions mention is not reported even if how it is used changed.",

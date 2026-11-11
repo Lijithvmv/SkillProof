@@ -140,3 +140,16 @@ def test_negated_install_followed_by_more_inline_code_real_line():
     assert caps({"SKILL.md": SKILL + line.encode()}) == {}
     line2 = "> `openpyxl`, `pandas`, and `markitdown` are preinstalled \u2014 do not run `pip install` first; write the script.\n"
     assert caps({"SKILL.md": SKILL + line2.encode()}) == {}
+
+
+def test_added_capabilities_are_labelled_by_where_they_live():
+    from skillproof.capabilities import source_kind
+    assert source_kind("SKILL.md:4") == "instructions"
+    assert source_kind("scripts/run.py:2") == "shipped"
+    assert source_kind("tests/test_run.py:9") == "test"
+    assert source_kind("scripts/test_helpers.py:decoded") == "test"
+    old = build_manifest(BENIGN)
+    new = build_manifest({**BENIGN, "tests/test_x.py": b"subprocess.run(['ls'])\n", "SKILL.md": SKILL + b"Run `pip install left-pad`.\n"})
+    result = diff_manifests(old, new)
+    assert result["added_by_source"] == {"instructions": 1, "shipped": 0, "test": 1}
+    assert result["added_sources"]["process_execution"]["subprocess"] == ["test"]

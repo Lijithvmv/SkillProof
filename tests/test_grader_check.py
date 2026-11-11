@@ -69,3 +69,11 @@ def test_cli_runs_against_a_local_grader(tmp_path):
     report = json.loads(out.read_text(encoding="utf-8"))
     # The fake grader scores every criterion 0.8, so every label-0 criterion is a false pass.
     assert code == 1 and report["false_fail"] == 0 and report["false_pass"] > 0
+
+
+def test_example_cases_include_a_single_omission_answer_per_task():
+    root = Path(__file__).parents[1] / "examples" / "pilot"
+    cases = read_cases(root / "grader-check-cases.jsonl")
+    subtle = [c for c in cases if c.note.startswith("subtle omission")]
+    assert {c.task_id for c in subtle} == {t.task_id for t in load_benchmark(root / "benchmark.jsonl")}
+    assert all(c.expected.count(0) <= 2 for c in subtle)

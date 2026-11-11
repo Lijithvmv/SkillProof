@@ -74,7 +74,7 @@ Failed runs are kept out of agreement. An agent failure has no output, so it is 
 
 ### Checking the grader before trusting a lift number
 
-`grader-check-cases.jsonl` holds two answers per task, one that meets every criterion and one that breaks some on purpose, each with a 0/1 label per criterion. The grader grades them and every criterion where it disagrees with the label is listed with its own evidence:
+`grader-check-cases.jsonl` holds three answers per task, each with a 0/1 label per criterion: one that meets every criterion, one that breaks several plainly, and one that reads well but leaves out a single qualifier (a date, "did not help", "more than 12 months old"). The last kind is there because a grader that only catches blatant errors can still pass answers that quietly drop a qualifier. The grader grades them and every criterion where it disagrees with the label is listed with its own evidence:
 
 ```powershell
 skillproof grader-check --provider ollama --grader-model qwen2.5-coder:7b `
@@ -82,4 +82,4 @@ skillproof grader-check --provider ollama --grader-model qwen2.5-coder:7b `
   --output grader-check.json
 ```
 
-Exit code 1 means at least one disagreement or grader failure. The labels were written by the benchmark author, so a clean result bounds grader error on these 16 answers only; it does not replace review by other people.
+Exit code 1 means at least one disagreement or grader failure. The labels were written by the benchmark author, so a clean result bounds grader error on these 24 answers only; it does not replace review by other people.

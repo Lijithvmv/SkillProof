@@ -87,7 +87,10 @@ class CriterionGrade(BaseModel):
 
 
 class GraderOutput(BaseModel):
-    score: float = Field(ge=0, le=1)
+    # The grader's own overall number is kept for audit only; the run score is the criterion mean. It is not
+    # bounded here because a local grader once returned 3 with four valid criterion scores, and rejecting the
+    # whole grade over an unused number dropped a run.
+    score: float
     evidence: list[str]
     criterion_scores: list[CriterionGrade]
 

@@ -17,6 +17,7 @@ class FakeOllama:
     def __init__(self):
         self.requests = []
         self.score_all_criteria = True
+        self.overall = 0.5
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -29,7 +30,7 @@ class FakeOllama:
                 elif "format" in body:
                     criteria = json.loads(body["messages"][1]["content"])["criteria"]
                     scored = criteria if owner.score_all_criteria else criteria[:-1]
-                    content = json.dumps({"score": 0.5, "evidence": ["e"], "criterion_scores": [{"criterion": c, "score": 0.8, "evidence": "ok"} for c in scored]})
+                    content = json.dumps({"score": owner.overall, "evidence": ["e"], "criterion_scores": [{"criterion": c, "score": 0.8, "evidence": "ok"} for c in scored]})
                 else:
                     content = f"answer seed={body['options'].get('seed')}"
                 reply = json.dumps({"model": body["model"], "message": {"role": "assistant", "content": content}, "prompt_eval_count": 50, "eval_count": 7}).encode()
@@ -171,3 +172,10 @@ def test_probe_accepts_a_bare_listed_name_but_not_free_text():
     assert OllamaActivationProbe(model="m", client=Client('{"skill": "none"}')).choose(request="r", cards=cards) == "none"
     with pytest.raises(RuntimeError, match="no usable skill choice"):
         OllamaActivationProbe(model="m", client=Client("I would pick the SQL one")).choose(request="r", cards=cards)
+
+
+def test_out_of_range_overall_score_is_kept_but_does_not_drop_the_grade(ollama):
+    ollama.overall = 3
+    task = BenchmarkTask(task_id="t", prompt="Summarize notes", criteria=["a", "b"])
+    grade = OllamaEvaluator(model="g", base_url=ollama.url).evaluate(task=task, output="out")
+    assert grade.score == 0.8 and grade.model_overall_score == 3

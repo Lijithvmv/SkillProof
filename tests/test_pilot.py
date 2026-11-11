@@ -255,6 +255,6 @@ def test_candidate_pilot_benchmark_loads_and_is_marked_for_review():
     root = Path(__file__).parents[1] / "examples" / "pilot"
     tasks = load_benchmark(root / "benchmark.jsonl")
     manifest = read_manifest(root / "benchmark.jsonl")
-    assert len(tasks) == 3
+    assert len(tasks) == manifest["task_count"] == 8
     assert manifest["status"] == "candidate_requires_independent_review"
 

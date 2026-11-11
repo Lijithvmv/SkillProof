@@ -126,9 +126,9 @@ def test_pilot_cli_runs_end_to_end_on_ollama(ollama, tmp_path):
     assert code == 0
     result = json.loads(report.read_text(encoding="utf-8"))
     assert sum(result["failure_counts"].values()) == 0
-    assert len(json.loads(bundle.read_text(encoding="utf-8"))["review_samples"]) == 6
-    # 3 tasks x 2 conditions, each one agent call and one grader call.
-    assert len(ollama.requests) == 12
+    assert len(json.loads(bundle.read_text(encoding="utf-8"))["review_samples"]) == 16
+    # 8 tasks x 2 conditions, each one agent call and one grader call.
+    assert len(ollama.requests) == 32
 
 
 def test_pilot_cli_reports_load_rate_with_distractors(ollama, tmp_path):
@@ -142,12 +142,12 @@ def test_pilot_cli_reports_load_rate_with_distractors(ollama, tmp_path):
     ])
     assert code == 0
     activation = json.loads(report.read_text(encoding="utf-8"))["activation"]
-    # Fake model picks the skill only when the request says "summarize": 2 of the 3 pilot prompts do.
-    assert activation["relevant"]["activation_rate"] == 0.6667
+    # Fake model picks the skill only when the request says "summarize": 4 of the 8 pilot prompts do.
+    assert activation["relevant"]["activation_rate"] == 0.5
     assert activation["unrelated"]["false_activation_rate"] == 0.0
     assert activation["candidate_skills"] == 7
     routing = [body for _, body in ollama.requests if "format" in body and "skill" in body["format"]["properties"]]
-    assert len(routing) == 7 and "changelog-writer" in routing[0]["messages"][0]["content"]
+    assert len(routing) == 12 and "changelog-writer" in routing[0]["messages"][0]["content"]
 
 
 def test_empty_answer_at_token_limit_gives_a_clear_error():

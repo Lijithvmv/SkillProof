@@ -68,6 +68,6 @@ The grader is compared with the mean of the reviewers' scores, and with each rev
 
 With one reviewer, `human_agreement.status` is `not_measured`: there is no human baseline to judge the grader against.
 
-Small samples: this pilot produces at most 12 samples (3 tasks × 2 repeats × 2 conditions). Kappa and alpha from that few samples can move a lot when one label changes. Read them as a first check, not a result.
+Small samples: this pilot produces 32 samples at 2 repeats (8 tasks × 2 repeats × 2 conditions). Kappa and alpha from that few samples can move a lot when one label changes. Read them as a first check, not a result.
 
 Failed runs are kept out of agreement. An agent failure has no output, so it is never sent to reviewers. A grader failure is sent for review but has no grader score, so it is not paired. Both are counted in the report (`excluded_runs_before_review`, `excluded_annotations`), so you can see how much data a run lost.

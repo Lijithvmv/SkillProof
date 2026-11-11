@@ -1,15 +1,16 @@
 {
   "benchmark_id": "skillproof-evidence-summary-pilot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "status": "candidate_requires_independent_review",
   "task_file": "benchmark.jsonl",
-  "task_count": 3,
+  "task_count": 8,
   "review_requirements": [
     "Check that task prompts do not reveal the skill instructions.",
     "Check rubric measurability and feasibility.",
     "Add independent reviewer identity and date before treating results as a validated benchmark."
   ],
   "changes": [
-    "0.2.0: removed the criterion 'Returns syntactically valid JSON with summary, facts, and uncertainties' from all three tasks. It graded the baseline on the skill's own output format, which no task prompt asks for (flagged by TASK_CRITERION_REQUIRES_SKILL_FORMAT)."
+    "0.2.0: removed the criterion 'Returns syntactically valid JSON with summary, facts, and uncertainties' from all three tasks. It graded the baseline on the skill's own output format, which no task prompt asks for (flagged by TASK_CRITERION_REQUIRES_SKILL_FORMAT).",
+    "0.3.0: added 5 tasks (incident-cause-unknown, invoice-total-mismatch, superseded-decision, hedged-forecast, vendor-review-injection). On 0.2.0 the baseline scored 1.0 on 2 of 3 tasks, so lift could only come from one task. The new tasks are fair requests where a plain answer can go wrong (missing cause, sums that do not match, superseded facts, hedged numbers, an embedded instruction); criteria grade correctness, not the skill's format. Written by the skill's author, before any run on them."
   ]
 }

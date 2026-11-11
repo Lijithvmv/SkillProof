@@ -17,6 +17,7 @@ from typing import Any
 
 from skillproof.activation import read_skill_card
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
+from skillproof.execution import interpret_lift
 
 DECISIONS = ("accept", "review", "block")
 
@@ -59,7 +60,8 @@ def _lift(report: dict[str, Any] | None) -> dict[str, Any] | None:
         "total_pairs": coverage.get("total_pairs"),
         "failures": sum((report.get("failure_counts") or {}).values()),
         "uneven_failures": coverage.get("uneven_failures"),
-        "interpretation": comparison.get("interpretation"),
+        # Recomputed, so a report saved under an older, more lenient rule cannot carry its label over.
+        "interpretation": interpret_lift(comparison.get("skill_lift_percentage_points"), comparison.get("paired_by_task")),
         "tasks": (comparison.get("paired_by_task") or {}).get("tasks"),
         "interval_95_percentage_points": (comparison.get("paired_by_task") or {}).get("bootstrap_95_interval_percentage_points"),
         "sign_flip_p_value": (comparison.get("paired_by_task") or {}).get("sign_flip_p_value"),

@@ -152,6 +152,20 @@ def paired_task_uncertainty(complete: list[tuple[dict[str, Any], dict[str, Any]]
     return result
 
 
+def interpret_lift(lift: float | None, paired: dict[str, Any] | None, *, alpha: float = 0.05) -> str:
+    """'positive' / 'negative' only when the bootstrap interval excludes zero AND the exact sign-flip test is at or
+    below alpha. The interval alone is too lenient with few tasks: on 4 held-out tasks it gave [18.75, 75] while the
+    exact test could not go below 0.125 and was 0.25. The mean difference alone called +16.7 points carried by one
+    of three tasks 'positive'."""
+    if lift is None:
+        return "not_measured"
+    paired = paired or {}
+    p_value = paired.get("sign_flip_p_value")
+    if paired.get("interval_excludes_zero") and p_value is not None and p_value <= alpha:
+        return "positive" if lift > 0 else "negative"
+    return "not_distinguishable_from_zero"
+
+
 def execute_experiment(
     *, tasks: list[BenchmarkTask], skill_instructions: str, runner: AgentRunner,
     evaluator: OutputEvaluator, repeats: int = 3, pass_threshold: float = 0.7,
@@ -232,9 +246,7 @@ def execute_experiment(
     if complete:
         paired = paired_task_uncertainty(complete, seed=seed)
         comparison["paired_by_task"] = paired
-        if not paired.get("interval_excludes_zero"):
-            # The mean difference alone said "positive" for +16.7 points carried by one of three tasks.
-            comparison["interpretation"] = "not_distinguishable_from_zero"
+        comparison["interpretation"] = interpret_lift(comparison.get("skill_lift_percentage_points"), paired)
     return {
         "experiment_id": experiment_id,
         "engine_version": "1.7.0",

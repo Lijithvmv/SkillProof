@@ -129,3 +129,11 @@ def test_consistent_lift_across_many_tasks_is_distinguishable_from_zero():
     assert result["tasks_improved"] == 8
     assert result["sign_flip_p_value"] == round(2 / 256, 4)
     assert result["interval_excludes_zero"] is True
+
+
+def test_interval_alone_is_not_enough_with_few_tasks():
+    from skillproof.execution import interpret_lift, paired_task_uncertainty
+    paired = paired_task_uncertainty([_pair("a", 0.25, 1.0), _pair("b", 0.25, 1.0), _pair("c", 0.25, 0.75), _pair("d", 1.0, 1.0)])
+    assert paired["interval_excludes_zero"] is True and paired["sign_flip_p_value"] == 0.25
+    assert interpret_lift(50.0, paired) == "not_distinguishable_from_zero"
+    assert interpret_lift(None, paired) == "not_measured"

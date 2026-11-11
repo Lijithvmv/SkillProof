@@ -26,6 +26,7 @@ from skillproof.update_report import build_update_report
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
+from skillproof.grader_check import check_grader, read_cases
 from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
 
 
@@ -146,6 +147,15 @@ def main(argv: list[str] | None = None) -> int:
     pilot.add_argument("--output", required=True, help="Experiment report JSON path.")
     pilot.add_argument("--review-output", required=True, help="Blind review bundle JSON path.")
     pilot.add_argument("--unblinding-key-output", required=True, help="Keep this separate from reviewers until scoring is complete.")
+
+    gcheck = commands.add_parser("grader-check", help="Grade answers with known per-criterion labels and list where the grader disagrees. Exit 1 on any disagreement or grader failure.")
+    gcheck.add_argument("--benchmark", required=True)
+    gcheck.add_argument("--cases", required=True, help="JSONL of case_id, task_id, output, expected (one 0/1 per criterion), note.")
+    gcheck.add_argument("--provider", choices=["openai", "ollama"], default=os.getenv("SKILLPROOF_PROVIDER", "openai"))
+    gcheck.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
+    gcheck.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"))
+    gcheck.add_argument("--seed", type=int, default=0)
+    gcheck.add_argument("--output", default="-")
 
     agreement = commands.add_parser("grader-agreement", help="Compare completed human scores to blinded grader scores.")
     agreement.add_argument("annotations", help="Completed annotations (JSON array or JSONL) of sample_id, human_score, reviewer_id, rationale objects.")
@@ -274,6 +284,16 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             result, exit_code = {"error": str(exc)}, 4
             _write_json(result, args.output)
+    elif args.command == "grader-check":
+        try:
+            if not args.grader_model:
+                raise ValueError("Set --grader-model or SKILLPROOF_GRADER_MODEL.")
+            evaluator = (OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed)
+                         if args.provider == "ollama" else OpenAIResponsesEvaluator(model=args.grader_model))
+            result = check_grader(load_benchmark(args.benchmark), read_cases(args.cases), evaluator)
+            exit_code = 1 if result["disagreements"] or result["grader_failures"] else 0
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command == "grader-agreement":
         try:
             annotation_data = [row for path in [args.annotations, *args.extra_annotations] for row in _read_annotation_rows(path)]

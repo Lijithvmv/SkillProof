@@ -71,3 +71,15 @@ With one reviewer, `human_agreement.status` is `not_measured`: there is no human
 Small samples: this pilot produces 32 samples at 2 repeats (8 tasks × 2 repeats × 2 conditions). Kappa and alpha from that few samples can move a lot when one label changes. Read them as a first check, not a result.
 
 Failed runs are kept out of agreement. An agent failure has no output, so it is never sent to reviewers. A grader failure is sent for review but has no grader score, so it is not paired. Both are counted in the report (`excluded_runs_before_review`, `excluded_annotations`), so you can see how much data a run lost.
+
+### Checking the grader before trusting a lift number
+
+`grader-check-cases.jsonl` holds two answers per task, one that meets every criterion and one that breaks some on purpose, each with a 0/1 label per criterion. The grader grades them and every criterion where it disagrees with the label is listed with its own evidence:
+
+```powershell
+skillproof grader-check --provider ollama --grader-model qwen2.5-coder:7b `
+  --benchmark examples/pilot/benchmark.jsonl --cases examples/pilot/grader-check-cases.jsonl `
+  --output grader-check.json
+```
+
+Exit code 1 means at least one disagreement or grader failure. The labels were written by the benchmark author, so a clean result bounds grader error on these 16 answers only; it does not replace review by other people.

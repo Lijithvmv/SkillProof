@@ -72,10 +72,23 @@ def _agreement(report: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _grader_check(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not report:
+        return None
+    return {
+        "disagreement_rate": report.get("disagreement_rate"),
+        "criterion_judgments": report.get("criterion_judgments"),
+        "false_pass": report.get("false_pass"),
+        "false_fail": report.get("false_fail"),
+        "grader_failures": len(report.get("grader_failures") or []),
+        "note": "Labelled answers written by the benchmark author: bounds grader error on those cases, not agreement with people.",
+    }
+
+
 def build_update_report(
     old: str | Path, new: str | Path, *, old_activation: str | Path | None = None, new_activation: str | Path | None = None,
     old_pilot: str | Path | None = None, new_pilot: str | Path | None = None, agreement: str | Path | None = None,
-    policy: str | Path | None = None,
+    policy: str | Path | None = None, grader_check: str | Path | None = None,
 ) -> dict[str, Any]:
     diff = diff_manifests(build_manifest(read_package_bytes(old)), build_manifest(read_package_bytes(new)))
     metadata = {"old": _description(old), "new": _description(new)}
@@ -91,6 +104,7 @@ def build_update_report(
         "load_rate": {"old": _activation(_load(old_activation)), "new": _activation(_load(new_activation))},
         "lift": {"old": _lift(_load(old_pilot)), "new": _lift(_load(new_pilot))},
         "grader_agreement": _agreement(_load(agreement)),
+        "grader_check": _grader_check(_load(grader_check)),
     }
     missing = [name for name, present in (
         ("load rate (old)", evidence["load_rate"]["old"]), ("load rate (new)", evidence["load_rate"]["new"]),
@@ -109,6 +123,10 @@ def build_update_report(
     old_false = (evidence["load_rate"]["old"] or {}).get("false_activation_rate")
     if new_false is not None and old_false is not None and new_false > old_false:
         reasons.append(f"false activation rose {old_false:.0%} -> {new_false:.0%}")
+    check = evidence["grader_check"]
+    if check and (check["disagreement_rate"] or check["grader_failures"]):
+        reasons.append(f"grader check: {check['false_pass']} false passes, {check['false_fail']} false fails in "
+                       f"{check['criterion_judgments']} labelled judgments, {check['grader_failures']} grader failures")
     if missing:
         reasons.append("missing evidence: " + ", ".join(missing))
 
@@ -135,7 +153,7 @@ def build_update_report(
 
 def _apply_policy(rules: dict[str, Any], diff: dict[str, Any], evidence: dict[str, Any]) -> tuple[str, list[str]]:
     """Policy keys (all optional): block_categories, review_categories (or "any"), min_load_rate,
-    max_false_activation_rate, min_lift_percentage_points, min_kappa, require_evidence (list of column names)."""
+    max_false_activation_rate, min_lift_percentage_points, min_kappa, max_grader_disagreement_rate."""
     applied: list[str] = []
     level = 0  # 0 accept, 1 review, 2 block
 
@@ -168,4 +186,8 @@ def _apply_policy(rules: dict[str, Any], diff: dict[str, Any], evidence: dict[st
         kappa = (evidence["grader_agreement"] or {}).get("cohen_kappa")
         if kappa is None or kappa < rules["min_kappa"]:
             raise_to(1, f"grader kappa {kappa} below {rules['min_kappa']}")
+    if "max_grader_disagreement_rate" in rules:
+        rate = (evidence["grader_check"] or {}).get("disagreement_rate")
+        if rate is None or rate > rules["max_grader_disagreement_rate"]:
+            raise_to(1, f"grader check disagreement {rate} above {rules['max_grader_disagreement_rate']}")
     return DECISIONS[level], applied

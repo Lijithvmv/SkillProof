@@ -46,3 +46,19 @@ def test_policy_turns_evidence_into_a_decision(tmp_path):
     policy.write_text(json.dumps({"review_categories": "any", "min_load_rate": 0.8}), encoding="utf-8")
     new_load = activation(tmp_path / "a.json", 0.9, 0.0)
     assert main(["update-report", str(old), str(same), "--new-activation", str(new_load), "--policy", str(policy), "--output", str(out)]) == 0
+
+
+def test_grader_check_is_its_own_column_and_can_drive_a_policy(tmp_path):
+    old = skill(tmp_path / "old", "Summarize notes. Use when asked.")
+    new = skill(tmp_path / "new", "Summarize notes. Use when asked.")
+    check = tmp_path / "check.json"
+    check.write_text(json.dumps({"disagreement_rate": 0.125, "criterion_judgments": 64, "false_pass": 5, "false_fail": 3, "grader_failures": []}), encoding="utf-8")
+    report = build_update_report(old, new, grader_check=check)
+    assert report["evidence"]["grader_check"]["disagreement_rate"] == 0.125
+    assert "grader check: 5 false passes, 3 false fails in 64 labelled judgments, 0 grader failures" in report["reasons"]
+    assert "grader agreement with humans" in report["missing_evidence"]  # the check does not stand in for people
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps({"max_grader_disagreement_rate": 0.1}), encoding="utf-8")
+    out = tmp_path / "r.json"
+    assert main(["update-report", str(old), str(new), "--grader-check", str(check), "--policy", str(policy), "--output", str(out)]) == 1
+    assert json.loads(out.read_text(encoding="utf-8"))["policy_rules_applied"] == ["review: grader check disagreement 0.125 above 0.1"]

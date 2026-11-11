@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     update.add_argument("--old-pilot", help="Pilot report JSON for the old version.")
     update.add_argument("--new-pilot", help="Pilot report JSON for the new version.")
     update.add_argument("--agreement", help="grader-agreement report JSON.")
+    update.add_argument("--grader-check", help="grader-check report JSON (labelled answers; not a substitute for --agreement).")
     update.add_argument("--policy", help="Your decision rules (JSON). Without it no decision is made.")
     update.add_argument("--output", default="-", help="Destination; use - for stdout.")
 
@@ -180,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             result = build_update_report(
                 args.old, args.new, old_activation=args.old_activation, new_activation=args.new_activation,
                 old_pilot=args.old_pilot, new_pilot=args.new_pilot, agreement=args.agreement, policy=args.policy,
+                grader_check=args.grader_check,
             )
             exit_code = {"block": 2, "review": 1, "reviewer_decision_required": 1, "accept": 0}[result["decision"]]
         except (OSError, ValueError, KeyError, PackageError, json.JSONDecodeError) as exc:

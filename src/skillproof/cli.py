@@ -20,6 +20,7 @@ from skillproof.monitoring import monitor_skill_history
 from skillproof.pilot import load_benchmark, read_manifest
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
 from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
+from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
 from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
@@ -83,6 +84,15 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("archive", help="Path to skill package ZIP.")
     scan.add_argument("--output", default="-", help="Report destination; use - for stdout.")
 
+    manifest = commands.add_parser("manifest", help="List what a skill (directory or ZIP) can reach or change, after decoding hidden content.")
+    manifest.add_argument("package", help="Skill directory or ZIP.")
+    manifest.add_argument("--output", default="-", help="Manifest destination; use - for stdout.")
+
+    diff = commands.add_parser("diff", help="Report capabilities a new skill version adds over an old one. Exit 1 when it adds any.")
+    diff.add_argument("old", help="Old skill directory or ZIP.")
+    diff.add_argument("new", help="New skill directory or ZIP.")
+    diff.add_argument("--output", default="-", help="Diff destination; use - for stdout.")
+
     gate = commands.add_parser("assurance-gate", help="Evaluate an evidence/policy JSON file for CI.")
     gate.add_argument("input", help="JSON object with evidence and optional policy fields.")
     gate.add_argument("--output", default="-", help="Decision report destination; use - for stdout.")
@@ -131,6 +141,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "scan":
         result, exit_code = scan_archive(args.archive)
+    elif args.command == "manifest":
+        try:
+            result, exit_code = build_manifest(read_package_bytes(args.package)), 0
+        except (OSError, PackageError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "diff":
+        try:
+            old_manifest = build_manifest(read_package_bytes(args.old))
+            new_manifest = build_manifest(read_package_bytes(args.new))
+            result = diff_manifests(old_manifest, new_manifest)
+            result["new_decode_trail"] = new_manifest["decode_trail"]
+            exit_code = 1 if result["status"] == "new_capabilities" else 0
+        except (OSError, PackageError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command == "assurance-gate":
         try:
             document = json.loads(Path(args.input).read_text(encoding="utf-8"))

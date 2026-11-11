@@ -22,6 +22,7 @@ from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesR
 from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
 from skillproof.security import record_validation
 from skillproof.inventory import inventory
+from skillproof.update_report import build_update_report
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
@@ -85,6 +86,17 @@ def main(argv: list[str] | None = None) -> int:
     scan = commands.add_parser("scan", help="Analyze a skill ZIP and emit a JSON report.")
     scan.add_argument("archive", help="Path to skill package ZIP.")
     scan.add_argument("--output", default="-", help="Report destination; use - for stdout.")
+
+    update = commands.add_parser("update-report", help="Join capability diff, load rate, lift and grader agreement for one skill update. Exit 2 block, 1 review or no decision, 0 accept.")
+    update.add_argument("old", help="Old skill directory or ZIP.")
+    update.add_argument("new", help="New skill directory or ZIP.")
+    update.add_argument("--old-activation", help="Load-rate JSON (activation section or file) for the old version.")
+    update.add_argument("--new-activation", help="Load-rate JSON for the new version.")
+    update.add_argument("--old-pilot", help="Pilot report JSON for the old version.")
+    update.add_argument("--new-pilot", help="Pilot report JSON for the new version.")
+    update.add_argument("--agreement", help="grader-agreement report JSON.")
+    update.add_argument("--policy", help="Your decision rules (JSON). Without it no decision is made.")
+    update.add_argument("--output", default="-", help="Destination; use - for stdout.")
 
     inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
     inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
@@ -153,6 +165,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "scan":
         result, exit_code = scan_archive(args.archive)
+    elif args.command == "update-report":
+        try:
+            result = build_update_report(
+                args.old, args.new, old_activation=args.old_activation, new_activation=args.new_activation,
+                old_pilot=args.old_pilot, new_pilot=args.new_pilot, agreement=args.agreement, policy=args.policy,
+            )
+            exit_code = {"block": 2, "review": 1, "reviewer_decision_required": 1, "accept": 0}[result["decision"]]
+        except (OSError, ValueError, KeyError, PackageError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command == "inventory":
         try:
             result = inventory(args.roots, overlap_threshold=args.overlap_threshold)

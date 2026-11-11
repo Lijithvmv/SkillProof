@@ -41,6 +41,16 @@ For a local pilot with no API key, run Ollama and pass `--provider ollama` (see 
 
 Install the package to get the `skillproof` command. `skillproof scan skill.zip --output report.json` runs structural and security triage, exiting nonzero for structural errors or critical/high security findings. `skillproof assurance-gate assurance-input.json --output decision.json` applies the supplied policy and emits a machine-readable decision. `skillproof monitor --history-db history.db --skill-key my-skill --output monitor.json` checks evaluation freshness, negative lift, regressions, model coverage, failure rate, and cost overhead; it is suitable for an external scheduled job. Monitor exits `0` when healthy, `1` when attention or an alert is required, and `4` for invalid configuration. Assurance gate exits `0` when eligible for human approval, `1` when human review is required, `2` when blocked/not ready, `3` when evidence is insufficient, and `4` for invalid input. A zero exit code never means approved or certified.
 
+### Deciding on a skill update
+
+SkillProof's main question is whether to replace one version of a skill with another.
+
+- `skillproof manifest PKG` lists what a skill directory or ZIP can reach or change (network hosts and clients, process execution, writes to agent configuration such as `CLAUDE.md` or `.claude/settings.json`, persistence, credential access, package installs, destructive operations, bundled binaries). It decodes hidden content first (Base64, hex, character codes, split strings, escapes, zero-width and lookalike characters) and records each step. Nothing is executed and nothing is a verdict.
+- `skillproof diff OLD NEW` reports only the capabilities the new version adds; it exits `1` when it adds any.
+- `skillproof update-report OLD NEW` joins the capability diff with load rate (`--old-activation`, `--new-activation`), measured lift (`--old-pilot`, `--new-pilot`) and grader-human agreement (`--agreement`). Missing evidence is listed. Without `--policy` it makes no decision; a policy file you write (for example `{"block_categories": ["agent_config_writes", "persistence"], "review_categories": "any", "min_load_rate": 0.8}`) turns the evidence into accept, review or block (exit `0`, `1`, `2`).
+- `skillproof inventory ROOT...` checks every installed skill together: duplicate names (identical copies, or divergent versions where the copy an agent loads may not be the one you reviewed) and descriptions that compete for the same requests.
+- `skillproof validate-findings REPORT DECISIONS` records confirmed or rejected decisions, each with a reviewer and a reason, on security findings, which all start as `needs_validation`.
+
 `POST /api/v1/evaluations/tasks/validate` checks a proposed task against skill instructions for obvious phrase leakage, criteria wording exposure, unclear task action, ambiguity cues, and missing target behavior declarations. These checks are lexical signals and cannot certify task quality.
 
 `POST /api/v1/evaluations/compare` accepts baseline and skill-enabled run scores on a 0–1 scale and reports mean score, population standard deviation, pass rate, absolute percentage-point lift, relative improvement, and negative lift.

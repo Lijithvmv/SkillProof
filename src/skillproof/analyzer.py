@@ -39,6 +39,13 @@ UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, 
 FRONTMATTER = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---(?:\s*\r?\n|\Z)", re.DOTALL)
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)|!?\[[^\]]*\]\[([^\]]*)\]", re.MULTILINE)
 REF_DEF = re.compile(r"^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?", re.MULTILINE)
+# Authoring rules from Anthropic's skill best-practices guide.
+RESERVED = re.compile(r"anthropic|claude", re.I)
+XML_TAG = re.compile(r"</?[A-Za-z][\w:-]*(?:\s[^<>]*)?/?>")
+WHEN_CUE = re.compile(r"\b(use (?:it |this |this skill )?(?:when|for|if|to)|when (?:the )?user|whenever|triggers? (?:on|when)|invoke (?:when|for)|for (?:tasks|requests|questions) (?:that|about|involving))\b", re.I)
+FIRST_PERSON = re.compile(r"\b(I can|I will|I'll|I help|I am|I'm|you can use (?:me|this)|this helps you)\b", re.I)
+TOC = re.compile(r"^#{1,3}\s*(table of )?contents\b|^\s*[-*]\s*\[[^\]]+\]\(#", re.I | re.M)
+WINDOWS_PATH = re.compile(r"\b[\w.-]+(?:\\[\w.-]+)+\.(?:md|py|sh|js|ts|json|ya?ml|txt)\b")
 
 
 def _finding(code: str, severity: str, message: str, evidence: str) -> dict[str, str]:
@@ -98,6 +105,18 @@ def analyze_files(files: dict[str, str]) -> dict[str, Any]:
         description = metadata.get("description")
         if isinstance(description, str) and len(description) > 1024:
             findings.append(_finding("DESCRIPTION_TOO_LONG", "error", "Description exceeds 1024 characters.", f"Length: {len(description)}"))
+        if isinstance(name, str) and RESERVED.search(name):
+            findings.append(_finding("NAME_RESERVED_WORD", "error", "Skill name contains a reserved word ('anthropic' or 'claude').", name))
+        for key, value in (("name", name), ("description", description)):
+            if isinstance(value, str) and XML_TAG.search(value):
+                findings.append(_finding("METADATA_XML_TAG", "error", f"Metadata '{key}' contains an XML tag.", XML_TAG.search(value).group(0)))
+        if isinstance(description, str) and description.strip():
+            # The description is what an agent reads when deciding to load the skill; one that says what the skill
+            # does but not when to use it was picked less often in a local load-rate test.
+            if not WHEN_CUE.search(description):
+                findings.append(_finding("DESCRIPTION_NO_WHEN", "warning", "Description does not say when to use the skill (e.g. 'Use when ...').", description[:200]))
+            if FIRST_PERSON.search(description):
+                findings.append(_finding("DESCRIPTION_NOT_THIRD_PERSON", "warning", "Write the description in the third person ('Processes files...', not 'I can help...').", FIRST_PERSON.search(description).group(0)))
 
     references: dict[str, list[str]] = defaultdict(list)
     for source_path, content in normalized.items():
@@ -128,6 +147,21 @@ def analyze_files(files: dict[str, str]) -> dict[str, Any]:
     orphans = sorted(path for path in normalized if path.lower().endswith(".md") and path != main_path and path not in referenced)
     for orphan in orphans:
         findings.append(_finding("ORPHAN_REFERENCE_FILE", "info", f"Markdown file '{orphan}' is not referenced by another Markdown file.", orphan))
+
+    if main_path:
+        # Keep references one level deep: files linked from SKILL.md should not need further hops to reach content.
+        first_level = [target for target in references.get(main_path, []) if target in normalized]
+        for parent in first_level:
+            deeper = [t for t in references.get(parent, []) if t in normalized and t != main_path and t not in first_level and t.lower().endswith(".md")]
+            if deeper:
+                findings.append(_finding("REFERENCE_TOO_DEEP", "warning", "A file linked from SKILL.md links to further Markdown files; keep references one level deep.", f"{parent} -> {', '.join(deeper[:3])}"))
+        for target in first_level:
+            content = normalized[target]
+            if target.lower().endswith(".md") and len(content.splitlines()) > 100 and not TOC.search("\n".join(content.splitlines()[:40])):
+                findings.append(_finding("REFERENCE_NO_TOC", "info", "Reference file over 100 lines has no table of contents near the top.", f"{target} ({len(content.splitlines())} lines)"))
+        windows_paths = sorted(set(WINDOWS_PATH.findall(normalized[main_path])))
+        if windows_paths:
+            findings.append(_finding("WINDOWS_PATH", "warning", "Use forward slashes in file paths, even on Windows.", ", ".join(windows_paths[:3])))
 
     main_lines = len(normalized.get(main_path, "").splitlines()) if main_path else 0
     if main_path and main_lines > 500:

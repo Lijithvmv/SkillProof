@@ -3,7 +3,7 @@ from skillproof.analyzer import analyze_files
 
 VALID = """---
 name: demo-skill
-description: A small demonstration skill.
+description: A small demonstration skill. Use when testing the analyzer.
 ---
 # Instructions
 Read [the guide](references/guide.md).
@@ -37,3 +37,30 @@ def test_invalid_metadata_type_and_broken_reference_are_reported():
 def test_missing_skill_file_is_reported():
     report = analyze_files({"notes.md": "Nothing here."})
     assert report["findings"][0]["code"] == "SKILL_MISSING"
+
+
+def _skill(frontmatter: str, body: str = "Do the thing.\n", extra=None):
+    from skillproof.analyzer import analyze_files
+    files = {"demo/SKILL.md": f"---\n{frontmatter}\n---\n{body}"}
+    files.update(extra or {})
+    return {f["code"] for f in analyze_files(files)["findings"]}
+
+
+def test_anthropic_metadata_rules():
+    codes = _skill("name: claude-helper\ndescription: I can help you with <b>files</b>.")
+    assert {"NAME_RESERVED_WORD", "METADATA_XML_TAG", "DESCRIPTION_NO_WHEN", "DESCRIPTION_NOT_THIRD_PERSON"} <= codes
+    good = _skill("name: demo\ndescription: Processes CSV files into reports. Use when the user supplies a CSV.")
+    assert not {"NAME_RESERVED_WORD", "METADATA_XML_TAG", "DESCRIPTION_NO_WHEN", "DESCRIPTION_NOT_THIRD_PERSON"} & good
+
+
+def test_reference_depth_toc_and_windows_paths():
+    long_ref = "# Guide\n" + "line\n" * 120 + "See [more](deeper.md).\n"
+    codes = _skill(
+        "name: demo\ndescription: Does a thing. Use when asked.",
+        body=r"Read [guide](guide.md). Run scripts\build.py." + "\n",
+        extra={"demo/guide.md": long_ref, "demo/deeper.md": "# Deeper\n"},
+    )
+    assert {"REFERENCE_TOO_DEEP", "REFERENCE_NO_TOC", "WINDOWS_PATH"} <= codes
+    with_toc = "# Guide\n## Contents\n- [A](#a)\n" + "line\n" * 120
+    codes = _skill("name: demo\ndescription: Does a thing. Use when asked.", body="Read [guide](guide.md).\n", extra={"demo/guide.md": with_toc})
+    assert not {"REFERENCE_TOO_DEEP", "REFERENCE_NO_TOC", "WINDOWS_PATH"} & codes

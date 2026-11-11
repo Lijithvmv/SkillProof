@@ -308,7 +308,8 @@ def _active_lines(path: str, text: str) -> list[tuple[int, str, bool]]:
         elif "`" in line:
             # Outside a code block only the inline code counts: "use `curl`" is an instruction, while the prose
             # and link targets around it ("see [docs](https://...)") are not capabilities.
-            rows.append((n, "  ".join(INLINE_CODE.findall(line)), True))
+            # " ; " keeps separate code spans apart: `npm install` and `require('x')` must not read as one command.
+            rows.append((n, " ; ".join(INLINE_CODE.findall(line)), True))
             rows.append((n, line, False))
         else:
             rows.append((n, line, False))
@@ -389,7 +390,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             if ENV_ALL.search(line):
                 manifest.add("credential_access", "env:<all>", location)
             for match in INSTALL.finditer(line):
-                if NEGATED.search(original_line(number, line)[: max(0, original_line(number, line).find(match.group(0)))][-40:]):
+                full = original_line(number, line)
+                command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
+                if NEGATED.search(full[: max(0, full.find(command))][-40:]):
                     continue  # "do not run `npm install` first" is the opposite of an install
                 groups = [g for g in match.groups() if g]
                 tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()

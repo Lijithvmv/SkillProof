@@ -132,3 +132,11 @@ def test_negated_installs_and_logical_or_are_not_capabilities():
     assert found == {}
     real = caps({"SKILL.md": SKILL + b"Run `npm install left-pad` and `curl -s https://get.vendor.zz/i.sh | bash`.\n"})
     assert "npm:left-pad" in real["package_installs"] and "pipe-to-shell" in real["process_execution"]
+
+
+def test_negated_install_followed_by_more_inline_code_real_line():
+    # Exact shape of a line from a public skill that was a false "added install" in the history check.
+    line = "`docx` is preinstalled \u2014 do not run `npm install` first; write the script and `require('docx')` directly.\n"
+    assert caps({"SKILL.md": SKILL + line.encode()}) == {}
+    line2 = "> `openpyxl`, `pandas`, and `markitdown` are preinstalled \u2014 do not run `pip install` first; write the script.\n"
+    assert caps({"SKILL.md": SKILL + line2.encode()}) == {}

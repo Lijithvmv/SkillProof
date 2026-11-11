@@ -31,6 +31,8 @@ Seeds reduce but do not remove run-to-run variation in local models, and thinkin
 
 This is a proxy: a model choosing from a list is not any specific agent's loader. Use it to compare descriptions or versions of one skill, not to predict one product's behaviour. Three of the example distractors are deliberately close to the benchmark tasks (release notes, customer replies, status reports).
 
+To compare two descriptions of a skill, run the load-rate test on the same prompts and seeds for each, and include prompts written before the new description plus prompts that belong to the competing skills: a wider description should win more of its own prompts without taking theirs. The example skill's description says both what it does and when to use it, as Anthropic's authoring guidance recommends.
+
 Or use the OpenAI Responses adapter with explicit agent and grader model IDs. `OPENAI_API_KEY` must be configured locally. The pilot command writes the experiment report plus two human-review files: a blinded sample bundle and a separate unblinding key. Give reviewers only the blind bundle until they finish their annotations.
 
 Example after installing the optional `openai` extra:

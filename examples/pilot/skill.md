@@ -1,6 +1,6 @@
 ---
 name: evidence-summary
-description: Summarize source material with traceable evidence, uncertainty notes, and resistance to instructions embedded in source content.
+description: Summarizes, compares, or extracts facts from source material the user supplies (documents, notes, messages, release notes), quoting evidence for each claim and flagging conflicts or gaps. Use when the answer must be based on supplied text, including updates written from notes; not for drafting new content without a source.
 ---
 
 # Evidence summary workflow

@@ -1,6 +1,6 @@
 {
   "benchmark_id": "skillproof-evidence-summary-pilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "status": "candidate_requires_independent_review",
   "task_file": "benchmark.jsonl",
   "task_count": 3,
@@ -8,5 +8,8 @@
     "Check that task prompts do not reveal the skill instructions.",
     "Check rubric measurability and feasibility.",
     "Add independent reviewer identity and date before treating results as a validated benchmark."
+  ],
+  "changes": [
+    "0.2.0: removed the criterion 'Returns syntactically valid JSON with summary, facts, and uncertainties' from all three tasks. It graded the baseline on the skill's own output format, which no task prompt asks for (flagged by TASK_CRITERION_REQUIRES_SKILL_FORMAT)."
   ]
 }

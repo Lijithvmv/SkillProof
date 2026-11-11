@@ -21,6 +21,7 @@ from skillproof.pilot import load_benchmark, read_manifest
 from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
 from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
 from skillproof.security import record_validation
+from skillproof.inventory import inventory
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
@@ -85,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("archive", help="Path to skill package ZIP.")
     scan.add_argument("--output", default="-", help="Report destination; use - for stdout.")
 
+    inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
+    inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
+    inventory_cmd.add_argument("--overlap-threshold", type=float, default=0.3)
+    inventory_cmd.add_argument("--output", default="-", help="Destination; use - for stdout.")
+
     validate = commands.add_parser("validate-findings", help="Record confirmed/rejected decisions on security findings. Exit 2 if a high or critical finding is confirmed, 1 if any medium+ finding is still unvalidated.")
     validate.add_argument("report", help="A scan report (with a security section) or a security report JSON.")
     validate.add_argument("decisions", help="JSON array of {finding_id, status, reviewer, reason}.")
@@ -147,6 +153,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "scan":
         result, exit_code = scan_archive(args.archive)
+    elif args.command == "inventory":
+        try:
+            result = inventory(args.roots, overlap_threshold=args.overlap_threshold)
+            exit_code = 1 if result["divergent_duplicates"] else 0
+        except (OSError, ValueError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command == "validate-findings":
         try:
             report = json.loads(Path(args.report).read_text(encoding="utf-8"))

@@ -273,3 +273,32 @@ def test_p3_fstring_interpolation_in_code_is_a_real_host():
     doc = "---\nname: x\ndescription: y\n---\n```bash\ncurl https://github.com/{org}/repo\n```\n"
     caps = build_manifest({"sources.py": script.encode(), "SKILL.md": doc.encode()})["capabilities"]
     assert set(caps["network_hosts"]) == {"proxy.golang.org"}
+
+
+def _skill(frontmatter_tools):
+    return ("---\nname: x\ndescription: y\n" + frontmatter_tools + "---\nDo the work.\n").encode()
+
+
+def test_p4_declared_tools_in_every_format():
+    from skillproof.capabilities import build_manifest
+    as_list = build_manifest({"SKILL.md": _skill("allowed-tools:\n  - Bash\n  - Read\n")})["capabilities"]["declared_tools"]
+    as_string = build_manifest({"SKILL.md": _skill("allowed-tools: Read Grep Glob mcp__serena__find_symbol\n")})["capabilities"]["declared_tools"]
+    scoped = build_manifest({"SKILL.md": _skill("allowed-tools: Bash({baseDir}/scanner.sh:*) Bash(curl:*) Read\n")})["capabilities"]["declared_tools"]
+    commas = build_manifest({"SKILL.md": _skill("allowed-tools: Read, Write\n")})["capabilities"]["declared_tools"]
+    assert set(as_list) == {"Bash", "Read"} and as_list["Bash"] == ["SKILL.md:4"]
+    assert set(as_string) == {"Read", "Grep", "Glob", "mcp__serena__find_symbol"}
+    assert set(scoped) == {"Bash({baseDir}/scanner.sh:*)", "Bash(curl:*)", "Read"}
+    assert set(commas) == {"Read", "Write"}
+
+
+def test_p4_an_update_that_widens_declared_tools_is_reported_and_narrowing_is_not():
+    from skillproof.capabilities import build_manifest, diff_manifests
+    none = build_manifest({"SKILL.md": _skill("")})
+    reads = build_manifest({"SKILL.md": _skill("allowed-tools: Read Grep\n")})
+    writes = build_manifest({"SKILL.md": _skill("allowed-tools: Read Grep Bash Write\n")})
+    assert set(diff_manifests(none, reads)["added"]["declared_tools"]) == {"Read", "Grep"}
+    assert set(diff_manifests(reads, writes)["added"]["declared_tools"]) == {"Bash", "Write"}
+    assert "declared_tools" not in diff_manifests(writes, reads)["added"]
+    # Only the skill's own SKILL.md declares tools; a nested example does not.
+    nested = build_manifest({"SKILL.md": _skill(""), "examples/other/SKILL.md": _skill("allowed-tools: Bash\n")})
+    assert not nested["capabilities"]["declared_tools"]

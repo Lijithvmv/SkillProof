@@ -26,6 +26,8 @@ import re
 import stat
 import unicodedata
 import zipfile
+
+import yaml
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -137,7 +139,40 @@ WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|
 CATEGORIES = (
     "network_hosts", "network_clients", "process_execution", "agent_config_writes", "persistence",
     "credential_access", "package_installs", "destructive_operations", "bundled_binaries", "hiding_techniques",
+    "declared_tools",
 )
+FRONTMATTER = re.compile(r"\A﻿?---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
+TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*(?:\([^)]*\))?")
+TOOL_KEYS = ("allowed-tools", "allowed_tools", "tools")
+
+
+def _declared_tools(text: str) -> tuple[list[str], int]:
+    """Tools a SKILL.md pre-approves in its frontmatter (`allowed-tools`), and the line the key is on.
+
+    Declaring a tool lets the agent use it without asking, so a new declaration widens what the skill may do even
+    when no other file changes. Accepts a YAML list, a space- or comma-separated string, and scoped entries such
+    as `Bash(apktool:*)` or `mcp__serena__find_symbol`. Returns ([], 0) when nothing is declared."""
+    match = FRONTMATTER.match(text)
+    if not match:
+        return [], 0
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        data = None
+    if not isinstance(data, dict):
+        return [], 0
+    for key in TOOL_KEYS:
+        value = data.get(key)
+        if value is None:
+            continue
+        items = value if isinstance(value, list) else [value]
+        tools = []
+        for item in items:
+            tools += TOOL_TOKEN.findall(str(item))
+        offset = text.find(key + ":")
+        line = text.count("\n", 0, offset) + 1 if offset >= 0 else 1
+        return sorted(set(tools)), line
+    return [], 0
 
 
 @dataclass
@@ -417,6 +452,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
         except UnicodeDecodeError:
             manifest.add("bundled_binaries", path, path)
             continue
+        if path == "SKILL.md":  # only the skill's own manifest declares its tools
+            tools, key_line = _declared_tools(text)
+            for tool in tools:
+                manifest.add("declared_tools", tool, f"SKILL.md:{key_line}")
         trail_start = len(manifest.decode_trail)
         if suffix == ".py":
             text = _mask_python(text)

@@ -106,6 +106,7 @@ INSTALL = re.compile(
     r"|\b(npx|pnpm\s+dlx|bunx)\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
     r"|\b(pnpm|yarn|bun)\s+add\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
     r"|\b(go)\s+(?:install|get)\s+([A-Za-z0-9_.\-/@]+)"
+    r"|\b(cargo)\s+install\s+(?:-[\w-]+\s+)*?--git\s+(https?://[A-Za-z0-9_.\-/@:]+)"  # the --git URL is what gets installed
     r"|\b(cargo|gem|brew)\s+install\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-/@]+)"
     r"|\b(apt(?:-get)?|yum|dnf|apk)\s+(?:install|add)\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-+]+)",
     re.I,

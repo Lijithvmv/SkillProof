@@ -23,6 +23,7 @@ from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, Ol
 from skillproof.security import record_validation
 from skillproof.inventory import inventory
 from skillproof.installed import default_roots, scan_installed
+from skillproof.apm_lock import check_lockfile
 from skillproof.update_report import build_update_report
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
@@ -100,6 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     update.add_argument("--grader-check", help="grader-check report JSON (labelled answers; not a substitute for --agreement).")
     update.add_argument("--policy", help="Your decision rules (JSON). Without it no decision is made.")
     update.add_argument("--output", default="-", help="Destination; use - for stdout.")
+
+    lock = commands.add_parser("lock-check", help="For each git dependency in an apm.lock.yaml, report what updating from the locked commit would add. Exit 1 when an update adds capabilities.")
+    lock.add_argument("lockfile")
+    lock.add_argument("--cache", default=str(Path.home() / ".skillproof" / "repos"), help="Where bare clones are kept (nothing is checked out).")
+    lock.add_argument("--to", help="Commit, tag or branch to compare against. Default: tip of the locked branch, or newest semver tag for a locked tag.")
+    lock.add_argument("--output", default="-")
 
     watch = commands.add_parser("watch-installed", help="Diff installed skills against the last scan and report what each update adds. Exit 1 when an update adds capabilities.")
     watch.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
@@ -191,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             exit_code = {"block": 2, "review": 1, "reviewer_decision_required": 1, "accept": 0}[result["decision"]]
         except (OSError, ValueError, KeyError, PackageError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "lock-check":
+        try:
+            result = check_lockfile(args.lockfile, cache=args.cache, to=args.to)
+            exit_code = 1 if result["updates_adding_capabilities"] else 0
+        except (OSError, ValueError, RuntimeError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "watch-installed":
         try:

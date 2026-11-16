@@ -190,3 +190,10 @@ def test_real_capabilities_next_to_those_groups_are_still_found():
     assert "curl" in caps["network_clients"] and "api.real-host.zz" in caps["network_hosts"]
     assert "AGENTS.md" in caps["agent_config_writes"]
     assert "env:GITHUB_TOKEN" in caps["credential_access"]
+
+
+def test_cargo_install_from_git_records_the_url():
+    from skillproof.capabilities import build_manifest
+    skill = "---\nname: x\ndescription: y\n---\n`cargo install --git https://github.com/crytic/caracal --profile release --force`\n"
+    installs = build_manifest({"SKILL.md": skill.encode()})["capabilities"]["package_installs"]
+    assert list(installs) == ["cargo:https://github.com/crytic/caracal"]

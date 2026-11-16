@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import base64
 import binascii
+import ipaddress
 import re
 import stat
 import unicodedata
@@ -35,7 +36,7 @@ from typing import Any
 
 from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, MAX_TOTAL_SIZE, PackageError
 
-MANIFEST_VERSION = "0.1.0"
+MANIFEST_VERSION = "0.2.0"  # 0.2.0: agent_spawning category; secret-only env reads; vendored folders as one item
 
 SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".psm1", ".rb", ".pl", ".bat", ".cmd", ".php", ".lua", ".go"}
 BINARY_SUFFIXES = {".exe", ".dll", ".so", ".dylib", ".bin", ".elf", ".msi", ".app", ".jar", ".class", ".pyc", ".node", ".wasm"}
@@ -105,6 +106,25 @@ CREDENTIALS = [
 ]
 ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|(?:os\.)?getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
 SECRETISH_ENV = re.compile(r"KEY|SECRET|TOKEN|PASS|AUTH|CRED|PRIVATE|COOKIE|SESSION", re.I)
+# Reading a variable is a credential access only when the variable holds a secret. Most variables a skill reads are
+# configuration (PORT, NODE_ENV, PROJECT_ENDPOINT, MODEL_DEPLOYMENT_NAME, DISPLAY), and listing them buried the
+# real secret reads (held-out test 2026-11-16: 37 of 93 false items). Whole-word parts for short words so that
+# KEY_VAULT or AUTHOR do not count; substrings for words that do not occur by accident.
+SECRET_ENV_SUBSTR = re.compile(r"SECRET|TOKEN|PASSW|CRED|PRIVATE|COOKIE|APIKEY|ACCESSKEY|CONNECTION_?STRING|CONNSTR|DATABASE_URL|WEBHOOK_URL", re.I)
+SECRET_ENV_PARTS = {"KEY", "KEYS", "PASS", "PWD", "AUTH", "SESSION", "PAT", "SAS", "DSN", "SIGNATURE"}
+# Values made for the browser are public by design (bundlers inline them into client code); site and publishable
+# keys are the public halves of key pairs.
+PUBLIC_ENV = re.compile(r"^(?:NEXT_PUBLIC_|VITE_|REACT_APP_|EXPO_PUBLIC_|GATSBY_|PUBLIC_|NUXT_PUBLIC_)|(?:SITE_KEY|SITEKEY|PUBLISHABLE_KEY|PUBLIC_KEY)$", re.I)
+
+
+def is_secret_env(name: str) -> bool:
+    name = name.upper()
+    if PUBLIC_ENV.search(name) or LOCATION_ENV.match(name):
+        return False
+    parts = name.split("_")
+    if "KEY" in parts and parts.index("KEY") + 1 < len(parts) and parts[parts.index("KEY") + 1] in {"VAULT", "VAULTS"}:
+        parts = [p for i, p in enumerate(parts) if not (p == "KEY" and i + 1 < len(parts) and parts[i + 1] in {"VAULT", "VAULTS"})]
+    return bool(SECRET_ENV_SUBSTR.search(name)) or any(p in SECRET_ENV_PARTS for p in parts)
 ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
 DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
 STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
@@ -118,9 +138,62 @@ INSTALL = re.compile(
     r"|\b(go)\s+(?:install|get)\s+([A-Za-z0-9_.\-/@]+)"
     r"|\b(cargo)\s+install\s+(?:-[\w-]+\s+)*?--git\s+(https?://[A-Za-z0-9_.\-/@:]+)"  # the --git URL is what gets installed
     r"|\b(cargo|gem|brew)\s+install\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-/@]+)"
-    r"|\b(apt(?:-get)?|yum|dnf|apk)\s+(?:install|add)\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-+]+)",
+    r"|\b(apt(?:-get)?|yum|dnf|apk)\s+(?:install|add)\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-+]+)"
+    r"|\b(cargo)\s+add\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-@]+)"
+    r"|\b(dotnet)\s+add\s+(?:\S+\s+)?package\s+([A-Za-z0-9_.\-]+)"
+    r"|\b(composer)\s+(?:global\s+)?require\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-/]+)"
+    r"|\b(Install-Module|Install-Package)\s+(?:-Name\s+)?([A-Za-z0-9_.\-]+)",
     re.I,
 )
+# One install command often names several packages ("cargo add a b tokio"); every one is a separate install. Not for
+# runners (npx, dlx, bunx), whose later words are arguments to the tool, and not for one-package commands.
+MULTI_INSTALL_TOOLS = {"pip", "pip3", "uv pip", "python -m pip", "python3 -m pip", "uv", "npm", "pnpm", "yarn", "bun", "go", "cargo", "gem", "brew", "apt", "apt-get", "yum", "dnf", "apk", "composer"}
+VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "--version", "--features", "-F", "--registry", "--target", "-t", "--path", "--git", "--branch", "--tag", "--rev"}
+PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^]+$")
+EXTRA_STOP_WORDS = {"for", "on", "in", "if", "via", "using", "first", "before", "after", "so", "as", "into", "when", "—", "install", "add",
+                    "apt", "apt-get", "brew", "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "gem", "go", "uv", "dnf", "yum", "apk", "sudo", "retry", "run"}
+TOOL_ALIASES = {"install-module": "psgallery", "install-package": "psgallery"}
+
+
+def _more_packages(rest: str) -> list[str]:
+    """The further package names after the first one in an install command, up to the end of that command."""
+    packages, skip_next = [], False
+    for token in rest.split():
+        token = token.strip("\"'`")
+        if token in {"&&", "||", "|", ";", "\\"} or token.startswith(("#", ">", "2>", "&&", "||", ";", "|")):
+            break
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            skip_next = token in VALUE_FLAGS
+            continue
+        clean = token.rstrip(".,;:)")
+        if not clean or not PACKAGE_TOKEN.match(clean) or "://" in clean or not re.search(r"[A-Za-z0-9]", clean):
+            break  # "brew install jq / apt install jq": the slash ends the first command
+        if clean.lower() in STOP_PACKAGES or clean.lower() in EXTRA_STOP_WORDS:
+            break  # "brew install tesseract for the binary": prose after the package
+        packages.append(clean)
+    return packages
+# Starting another agent from a command: a headless agent run carries its own tool permissions, and a bypass flag
+# removes the user's approval step for everything it does. Only commands are matched; prose such as "dispatch a
+# subagent" is not (that needs the prose channel, P7).
+AGENT_SPAWNING = [
+    ("claude headless", r"\bclaude\s+(?:-{1,2}[\w-]+(?:\s+[\w.:/-]+)?\s+)*?(?:-p|--print)\b"),
+    ("codex exec", r"\bcodex\s+(?:-{1,2}[\w-]+\s+)*exec\b"), ("gemini headless", r"\bgemini\s+(?:-p|--prompt)\b"),
+    ("copilot headless", r"\bcopilot\s+(?:-p|--prompt)\b"),
+    ("agent sdk", r"\bclaude_agent_sdk\b|@anthropic-ai/claude-agent-sdk|\bclaude_code_sdk\b|@anthropic-ai/claude-code\b"),
+    ("permission bypass", r"--dangerously-skip-permissions|--permission-mode[\s=]+bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--yolo\b|--full-auto\b"),
+]
+# The same launches written as an argument list in code (subprocess.run(["claude", "-p", ...])), often over several
+# lines, which a line pattern cannot see.
+_Q = r"[\"'`]"
+ARGV_AGENT = [
+    ("claude headless", re.compile(_Q + r"claude" + _Q + r"\s*,\s*(?:" + _Q + r"[^\"'`\n]*" + _Q + r"\s*,\s*){0,6}?" + _Q + r"(?:-p|--print)" + _Q)),
+    ("codex exec", re.compile(_Q + r"codex" + _Q + r"\s*,\s*" + _Q + r"exec" + _Q)),
+    ("gemini headless", re.compile(_Q + r"gemini" + _Q + r"\s*,\s*(?:" + _Q + r"[^\"'`\n]*" + _Q + r"\s*,\s*){0,6}?" + _Q + r"(?:-p|--prompt)" + _Q)),
+    ("permission bypass", re.compile(_Q + r"(?:--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox|--yolo|--full-auto)" + _Q)),
+]
 DESTRUCTIVE = [
     ("rm -rf", r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"), ("rmtree", r"\bshutil\.rmtree\("),
     ("find -delete", r"\bfind\b[^\n|;]*\s-delete\b"), ("Remove-Item -Recurse", r"Remove-Item\b[^\n]*-Recurse"),
@@ -133,13 +206,19 @@ DESTRUCTIVE = [
 PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
 ALTERNATION = re.compile(r"(?<![\w|])[\w.-]+(?:\|[\w.-]+)+(?![\w|])")
 LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP|\w*_BASE_URL)$", re.I)
+# Third-party code copied into the skill. Its own READMEs and changelogs are full of install lines, example hosts and
+# addresses that describe that library, not the skill (held-out test: 20 of 93 false items came from one
+# node_modules folder). The folder itself is reported once, as shipped third-party code; its contents are not listed.
+VENDORED = re.compile(r"^(.*?(?:^|/)(?:node_modules|bower_components|site-packages|vendor|third_party|\.venv|venv))/")
+# Placeholder hosts in examples: "my-vault.vault.azure.net", "your-resource.openai.azure.com", "x.example.workers.dev".
+PLACEHOLDER_HOST = re.compile(r"^(?:my|your)[-_]|(?:^|\.)example(?:\.|$)|\.(?:internal|lan|home\.arpa)$", re.I)
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")  # a Markdown table row starts and ends with |; a pipe continuation does not
 WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
 
 CATEGORIES = (
     "network_hosts", "network_clients", "process_execution", "agent_config_writes", "persistence",
     "credential_access", "package_installs", "destructive_operations", "bundled_binaries", "hiding_techniques",
-    "declared_tools",
+    "declared_tools", "agent_spawning",
 )
 FRONTMATTER = re.compile(r"\A﻿?---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
 TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*(?:\([^)]*\))?")
@@ -377,13 +456,14 @@ def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, 
 def _reveals_capability(text: str) -> bool:
     if URL.search(text) or INSTALL.search(text) or ENV_READ.search(text):
         return True
-    groups = (NETWORK_CLIENTS, PROCESS_EXEC, PERSISTENCE, CREDENTIALS, DESTRUCTIVE, AGENT_CONFIG)
+    groups = (NETWORK_CLIENTS, PROCESS_EXEC, PERSISTENCE, CREDENTIALS, DESTRUCTIVE, AGENT_CONFIG, AGENT_SPAWNING)
     return any(re.search(pattern, text, re.I) for group in groups for _, pattern in group)
 
 
 MESSAGE_CALLS = {"print", "debug", "info", "warning", "warn", "error", "exception", "critical", "fail", "echo", "secho", "write", "log", "skip", "xfail"}
 REGEX_CALLS = {"compile", "search", "match", "fullmatch", "sub", "subn", "findall", "finditer", "split"}
 COMPARE_CALLS = {"startswith", "endswith", "removeprefix", "removesuffix"}
+HELP_KEYWORDS = {"help", "description", "epilog", "usage", "metavar", "short_help"}
 
 
 def _string_role(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
@@ -395,6 +475,8 @@ def _string_role(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
         return "docstring"
     if isinstance(parent, ast.Compare):
         return "compare"
+    if isinstance(parent, ast.keyword) and parent.arg in HELP_KEYWORDS:
+        return "message"  # argparse/click help text describes an option; it does not run it
     if isinstance(parent, ast.Call) and node is not parent.func:
         func = parent.func
         name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
@@ -438,6 +520,27 @@ def _mask_python(text: str) -> str:
     return "".join(chars)
 
 
+def _not_a_target_ip(address: str, in_doc: bool) -> bool:
+    """Addresses that are not a place a skill connects to: network ranges and masks (x.x.x.0, 255.x), documentation
+    ranges (RFC 5737), multicast and reserved space, and private or link-local examples in documentation. Private
+    addresses in shipped scripts are kept (a script that talks to 10.0.0.5 does reach the local network), and so is
+    the cloud metadata address everywhere: an instruction to query it is a credential-theft shape."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if address in METADATA_ADDRESSES:
+        return False
+    if ip.version == 4 and (address.endswith(".0") or address.startswith("255.")):
+        return True
+    documentation = any(ip in net for net in DOC_NETS)
+    return documentation or ip.is_multicast or ip.is_reserved or ip.is_unspecified or (in_doc and (ip.is_private or ip.is_link_local))
+
+
+DOC_NETS = [ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")]
+METADATA_ADDRESSES = {"169.254.169.254", "fd00:ec2::254", "100.100.100.200"}
+
+
 def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
     manifest = Manifest(files=len(files))
     for path in sorted(files):
@@ -446,6 +549,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
         is_binary = suffix in BINARY_SUFFIXES or raw[:4] in {b"\x7fELF", b"MZ\x90\x00"} or raw[:2] == b"MZ" or b"\x00" in raw[:4096]
         if is_binary and suffix not in TEXT_SUFFIXES:
             manifest.add("bundled_binaries", path, path)
+            continue
+        vendored = VENDORED.match(path)
+        if vendored:
+            manifest.add("package_installs", "vendored:" + vendored.group(1), vendored.group(1))
             continue
         try:
             text = raw.decode("utf-8-sig")
@@ -468,6 +575,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 step["revealed_capability"] = "yes"
                 manifest.add("hiding_techniques", step["technique"], path)
         original_lines = len(text.splitlines())
+        if suffix in SCRIPT_SUFFIXES and not is_test:
+            for name, pattern in ARGV_AGENT:
+                for match in pattern.finditer(text):
+                    manifest.add("agent_spawning", name, f"{path}:{text.count(chr(10), 0, match.start()) + 1}")
         lines = _active_lines(path, decoded)
         source_lines = decoded.splitlines()
 
@@ -491,6 +602,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     host = match.group(1).lower().strip("[]")
                     if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                         continue
+                    if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES):
+                        continue
                     if host.endswith("."):
                         continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
                     rest = line[match.end():]
@@ -499,7 +612,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     manifest.add("network_hosts", host, location)
                 if is_code:
                     for ip in IPV4.findall(line):
-                        if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")):
+                        if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
                             manifest.add("network_hosts", ip, location)
             if not is_code:
                 # Prose still matters for the two most specific attacks: an instruction to write to agent
@@ -526,13 +639,14 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
             _scan_patterns(manifest, "credential_access", CREDENTIALS, command_line, location)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
+            _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)
             window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
             if WRITE_CUE.search(window) and not TABLE_ROW.match(full_line):
                 _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, command_line, location)
             for match in ENV_READ.finditer(all_spans):
                 name = next(g for g in match.groups() if g).upper()
-                if LOCATION_ENV.match(name) or (name.endswith("_ID") and not SECRETISH_ENV.search(name)):
-                    continue  # $env:APPDATA is a folder and AGENT_ID an identifier, not secrets
+                if not is_secret_env(name):
+                    continue  # $env:APPDATA is a folder, AGENT_ID an identifier, PORT configuration: not secrets
                 manifest.add("credential_access", "env:" + name, location)
             if ENV_ALL.search(command_line):
                 manifest.add("credential_access", "env:<all>", location)
@@ -545,9 +659,13 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     continue  # "do not run `npm install` first" is the opposite of an install
                 groups = [g for g in match.groups() if g]
                 tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
+                tool = TOOL_ALIASES.get(tool, tool)
                 package = groups[-1].strip(".,;:)\"'`")
                 if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES:
                     manifest.add("package_installs", f"{tool}:{package}", location)
+                    if tool in MULTI_INSTALL_TOOLS and "://" not in package:
+                        for extra in _more_packages(line[match.end():]):
+                            manifest.add("package_installs", f"{tool}:{extra}", location)
     return manifest.to_dict()
 
 

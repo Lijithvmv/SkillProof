@@ -302,3 +302,67 @@ def test_p4_an_update_that_widens_declared_tools_is_reported_and_narrowing_is_no
     # Only the skill's own SKILL.md declares tools; a nested example does not.
     nested = build_manifest({"SKILL.md": _skill(""), "examples/other/SKILL.md": _skill("allowed-tools: Bash\n")})
     assert not nested["capabilities"]["declared_tools"]
+
+
+def _caps(files):
+    return build_manifest({k: v.encode() for k, v in files.items()})["capabilities"]
+
+
+def test_p5_every_package_in_one_install_command_is_reported():
+    caps = _caps({"SKILL.md": "# s\n```bash\ncargo add azure_storage_blob azure_identity tokio\npip install -r req.txt httpx  # note\n"
+                               "npm install --save-dev wrangler zod && npm test\ndotnet add package Azure.Identity --version 1.0\n```\n"})
+    installs = set(caps["package_installs"])
+    assert {"cargo:azure_storage_blob", "cargo:azure_identity", "cargo:tokio"} <= installs
+    assert {"pip:req.txt", "pip:httpx", "npm:wrangler", "npm:zod", "dotnet:Azure.Identity"} <= installs
+    assert not any(v.endswith((":test", ":1.0", ":note", ":#")) for v in installs)
+    # A runner's later words are arguments, not packages.
+    runner = _caps({"SKILL.md": "```bash\nnpx --yes @expo/agent-cli@latest feedback --category skills\n```\n"})["package_installs"]
+    assert set(runner) == {"npx:@expo/agent-cli@latest"}
+
+
+def test_p5_only_secret_env_reads_count_as_credential_access():
+    code = ("import os\na = os.environ['PORT']\nb = os.getenv('PROJECT_ENDPOINT')\nc = os.environ['OPENAI_API_KEY']\n"
+            "d = os.getenv('AZURE_KEY_VAULT_NAME')\ne = os.environ['DB_CONNECTION_STRING']\nf = os.getenv('GITHUB_PAT')\n"
+            "g = os.environ['NEXT_PUBLIC_CF_ANALYTICS_TOKEN']\nh = os.getenv('TURNSTILE_SITE_KEY')\ni = os.getenv('MODEL_DEPLOYMENT_NAME')\n")
+    creds = set(_caps({"SKILL.md": "# s\n", "run.py": code})["credential_access"])
+    assert creds == {"env:OPENAI_API_KEY", "env:DB_CONNECTION_STRING", "env:GITHUB_PAT"}
+
+
+def test_p5_vendored_dependencies_are_one_item_not_their_readmes():
+    caps = _caps({"SKILL.md": "# s\n", "scripts/server.js": "require('express')\n",
+                  "scripts/node_modules/ws/README.md": "```\nnpm install ws\ncurl https://websocket-echo.com\n```\n",
+                  "scripts/node_modules/express/lib/response.js": "fetch('https://dub.sh/x')\n"})
+    assert set(caps["package_installs"]) == {"vendored:scripts/node_modules"}
+    assert not caps["network_hosts"] and not caps["network_clients"]
+
+
+def test_p5_placeholder_hosts_and_non_target_addresses_are_skipped():
+    doc = ("# s\n```bash\ncurl https://my-vault.vault.azure.net/secrets\ncurl https://your-app.azurewebsites.net/api\n"
+           "curl https://producer.example.workers.dev\ncurl http://db-mcp.internal/x\nping 10.0.1.5\nroute 255.255.0.0\n"
+           "curl http://203.0.113.1/a\ncurl http://192.168.3.0/24\ncurl http://169.254.169.254/latest/meta-data\n"
+           "curl https://api.real-service.com/v1\n```\n")
+    hosts = set(_caps({"SKILL.md": doc})["network_hosts"])
+    assert hosts == {"169.254.169.254", "api.real-service.com"}
+    # A private address in a shipped script is a real local-network target.
+    assert "10.0.1.5" in _caps({"SKILL.md": "# s\n", "probe.sh": "curl http://10.0.1.5:8080/\n"})["network_hosts"]
+
+
+def test_p5_headless_agent_launches_and_permission_bypass_are_reported():
+    caps = _caps({"SKILL.md": "# s\n", "run.sh": "claude --model opus -p \"review\" --dangerously-skip-permissions\ncodex exec 'fix'\n"})
+    assert set(caps["agent_spawning"]) == {"claude headless", "permission bypass", "codex exec"}
+    prose = _caps({"SKILL.md": "# s\nDispatch a subagent with the `claude` tool. Run `codex` if needed.\n"})
+    assert not prose["agent_spawning"]
+
+
+def test_p5_agent_launch_written_as_an_argument_list_is_found_and_help_text_is_not():
+    code = ('import subprocess, argparse\np = argparse.ArgumentParser()\n'
+            'p.add_argument("--model", help="Model to use for claude -p --dangerously-skip-permissions")\n'
+            'subprocess.run([\n    "claude",\n    "--model", "opus",\n    "-p", prompt,\n])\n')
+    caps = _caps({"SKILL.md": "# s\n", "scripts/run_eval.py": code})
+    assert caps["agent_spawning"] == {"claude headless": ["scripts/run_eval.py:5"]}
+
+
+def test_p5_install_lists_stop_at_alternatives_and_prose():
+    caps = _caps({"SKILL.md": "# s\n```bash\necho \"need jq (brew install jq / apt install jq)\"\nbrew install llvm make — then retry\n```\n",
+                  "x.py": 'cmd = "brew install tesseract for the binary"\n'})
+    assert set(caps["package_installs"]) == {"brew:jq", "apt:jq", "brew:llvm", "brew:make", "brew:tesseract"}

@@ -99,3 +99,13 @@ def test_an_empty_state_file_gives_a_clear_error(tmp_path):
     state.write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="empty or damaged"):
         scan_installed([root], state)
+
+
+def test_previous_good_state_is_kept_as_a_backup(tmp_path):
+    root, state = tmp_path / "skills", tmp_path / "s.json"
+    write_skill(root / "a", "Plain.")
+    scan_installed([root], state)
+    first = state.read_text(encoding="utf-8")
+    write_skill(root / "b", "Also plain.")
+    scan_installed([root], state)
+    assert (tmp_path / "s.json.bak").read_text(encoding="utf-8") == first and state.read_text(encoding="utf-8") != first

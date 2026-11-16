@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,9 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
     temp = state_file.with_name(state_file.name + ".tmp")
     try:
         temp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        if state_file.exists() and state_file.stat().st_size:
+            # Keep the previous good state one step back, so a bad scan (or a later bug) can be undone.
+            shutil.copy2(state_file, state_file.with_name(state_file.name + ".bak"))
         os.replace(temp, state_file)
     finally:
         temp.unlink(missing_ok=True)

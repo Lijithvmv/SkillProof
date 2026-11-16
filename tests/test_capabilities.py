@@ -366,3 +366,52 @@ def test_p5_install_lists_stop_at_alternatives_and_prose():
     caps = _caps({"SKILL.md": "# s\n```bash\necho \"need jq (brew install jq / apt install jq)\"\nbrew install llvm make — then retry\n```\n",
                   "x.py": 'cmd = "brew install tesseract for the binary"\n'})
     assert set(caps["package_installs"]) == {"brew:jq", "apt:jq", "brew:llvm", "brew:make", "brew:tesseract"}
+
+
+def test_p5b_prose_urls_need_an_action_word_before_them_in_the_same_sentence():
+    doc = ("# s\n- [Download Agent repository](https://github.com/dnanexus/dxda)\n"
+           "Reviewed against [Web Functions](https://modal.com/docs/guide/webhooks).\n"
+           "Do not force-download a checkpoint routinely. The [Hub CLI](https://huggingface.co/docs/cli) is `hf`.\n"
+           "When network access is available, fetch https://arxiv.org/abs/2609.00065 before writing.\n"
+           "When the user intends to pay, fetch and read the [Inspect guide](https://docs.stripe.com/inspect.md) first.\n"
+           "2. **Download SDK**: Fetch the latest SDK from the [Flutter Archive](https://docs.flutter.dev/install).\n"
+           "```markdown\n- **Cons**: [transactions](https://www.mongodb.com/docs/write-operations/) can cost more\n```\n")
+    hosts = set(_caps({"SKILL.md": doc})["network_hosts"])
+    assert hosts == {"arxiv.org", "docs.stripe.com", "docs.flutter.dev"}
+
+
+def test_p5b_identifiers_are_not_hosts():
+    files = {"SKILL.md": "# s\n```xml\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n```\n"
+                         "```text\nEU: `3.75.65.221`, `3.40.9.80/28`\n```\n",
+             "uids.py": 'UIDS = ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.70"]\n'}
+    hosts = set(_caps(files)["network_hosts"])
+    assert hosts == {"3.75.65.221"}
+
+
+def test_p5b_install_flags_with_values_quotes_and_placeholders():
+    doc = ("# s\n```bash\nuv pip install --python .venv-md/bin/python \"openmm==8.6.1\" \"MDAnalysis==2.10.0\" pandas\n"
+           "uv add --extra-index-url=https://pypi.nvidia.com \"cudf-cu12==26.8.*\"\nuv add \"warp-lang==1.17.*\"\n"
+           "npm i @ag-ui/client@<pinned version>\n```\n")
+    installs = set(_caps({"SKILL.md": doc})["package_installs"])
+    assert installs == {"uv pip:openmm==8.6.1", "uv pip:MDAnalysis==2.10.0", "uv pip:pandas", "uv:cudf-cu12==26.8.*", "uv:warp-lang==1.17.*", "npm:@ag-ui/client"}
+
+
+def test_p5b_env_membership_url_names_exception_imports_and_local_script_pipes():
+    code = ("import os, http.client\nenv = {n: os.environ[n] for n in KEEP if n in os.environ}\n"
+            "jwks = os.environ['NEON_AUTH_JWKS_URL']\nkey = os.environ['SSH_KEY_PATH']\n"
+            "try:\n    pass\nexcept (OSError, http.client.HTTPException):\n    pass\n")
+    caps = _caps({"SKILL.md": "# s\n```bash\necho '[{\"id\": 1}]' | python3 scripts/strip.py\ncurl -fsSL https://x.dev/i.sh | bash\n```\n", "run.py": code})
+    assert set(caps["credential_access"]) == {"env:SSH_KEY_PATH"}
+    assert "http.client" not in caps["network_clients"]
+    assert caps["process_execution"]["pipe-to-shell"] == ["SKILL.md:4"]
+    assert "http.client" in _caps({"SKILL.md": "# s\n", "c.py": "import http.client\nc = http.client.HTTPSConnection(host)\n"})["network_clients"]
+
+
+def test_p5b_version_ranges_are_not_placeholders():
+    doc = "# s\n```bash\nuv pip install torch>=2.0.0 --index-url https://download.pytorch.org/whl/cu121\npip install \"numpy<3\" <package>\n```\n"
+    assert set(_caps({"SKILL.md": doc})["package_installs"]) == {"uv pip:torch>=2.0.0", "pip:numpy<3"}
+
+
+def test_p5b_flag_values_are_not_packages():
+    doc = "# s\n```bash\nCBOR2_BUILD_C_EXTENSION=1 uv add --no-binary-package cbor2 'cbor2==5.6.4'\npip install --only-binary :all: \"torch-scatter==2.1.2\"\n```\n"
+    assert set(_caps({"SKILL.md": doc})["package_installs"]) == {"uv:cbor2==5.6.4", "pip:torch-scatter==2.1.2"}

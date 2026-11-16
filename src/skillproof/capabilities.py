@@ -58,8 +58,24 @@ BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0
 HEX_RUN = re.compile(r"(?<![0-9a-fA-F])(?:[0-9a-fA-F]{2}){16,}(?![0-9a-fA-F])")
 
 URL = re.compile(r"\b(?:https?|ftp|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?::\d+)?", re.I)
-IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests?\.\w+|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
+# Not part of a longer dotted number: "1.2.840.10008.1.2.4.201" is a DICOM identifier, not an address.
+IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.\d)")
+PROSE_FENCES = {"markdown", "md"}
+MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
+ANY_URL = re.compile(r"\S+://\S+")
+SENTENCE_END = re.compile(r"[.!?](?:\*\*)?\s+")
+
+
+def _prose_cue(line: str, start: int) -> bool:
+    """In prose, a URL is a place the skill reaches only when an action word comes before it in the same sentence
+    ("fetch https://...", "fetch and read the [guide](https://...)"). A cue word inside link text ("[Download
+    Agent](...)"), inside a URL (".../guide/webhooks"), or in another sentence does not count (held-out test 2:
+    14 of 29 false items)."""
+    before = SENTENCE_END.split(line[:start])[-1]
+    before = ANY_URL.sub(" ", MD_LINK.sub(" ", before))
+    before = re.sub(r"\[[^\]]*(?:\]\()?$", " ", before)  # the URL's own link text: "[Download Agent](" + URL
+    return bool(FETCH_CUE.search(before))
+FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests\.(?:get|post|put|patch|delete|request|Session)|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
 # A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
 NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS|\b\w*issuer\w*|\biss\b)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
 # Registries of identifiers (XML namespaces, schemas), not services a skill talks to.
@@ -73,7 +89,7 @@ NOT_EXTERNAL = re.compile(r"^(?:[^a-z0-9]*|localhost|127\.\d+\.\d+\.\d+|0\.0\.0\
 NETWORK_CLIENTS = [
     ("curl", r"\bcurl\b"), ("wget", r"\bwget\b"), ("python-requests", r"\brequests\.(?:get|post|put|patch|delete|request|Session)\b"),
     ("httpx", r"\bhttpx\.(?:get|post|put|Client|AsyncClient)\b"), ("urllib", r"\burllib\.request\b|\burlopen\("),
-    ("fetch", r"\bfetch\(\s*['\"`]?https?:"), ("axios", r"\baxios\b"), ("http.client", r"\bhttp\.client\b"),
+    ("fetch", r"\bfetch\(\s*['\"`]?https?:"), ("axios", r"\baxios\b"), ("http.client", r"\bhttp\.client\.HTTPS?Connection\b"),  # not "except http.client.HTTPException"
     ("socket", r"\bsocket\.(?:socket|create_connection)\b(?![^\n]*AF_UNIX)"),  # AF_UNIX is a local socket, not network
     ("netcat", r"(?<![-\w])(?:nc|ncat|netcat)\s+-"),  # not the "-nc" in "jq -nc"
     ("invoke-webrequest", r"\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b"),
@@ -81,7 +97,8 @@ NETWORK_CLIENTS = [
 PROCESS_EXEC = [
     ("subprocess", r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\b"), ("os.system", r"\bos\.(?:system|popen|exec\w*)\("),
     ("eval", r"(?<![\w.])eval\("), ("exec", r"(?<![\w.])exec\("), ("child_process", r"\bchild_process\b|\bexecSync\(|\bspawnSync?\("),
-    ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"),
+    ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"
+                      r"(?!\s+(?:-\S+\s+)*[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b)"),  # data piped into a local script is not code
     ("powershell", r"\bpowershell(?:\.exe)?\b|\bpwsh\b"), ("cmd /c", r"\bcmd(?:\.exe)?\s+/c\b"),
 ]
 AGENT_CONFIG = [
@@ -117,6 +134,10 @@ SECRET_ENV_PARTS = {"KEY", "KEYS", "PASS", "PWD", "AUTH", "SESSION", "PAT", "SAS
 PUBLIC_ENV = re.compile(r"^(?:NEXT_PUBLIC_|VITE_|REACT_APP_|EXPO_PUBLIC_|GATSBY_|PUBLIC_|NUXT_PUBLIC_)|(?:SITE_KEY|SITEKEY|PUBLISHABLE_KEY|PUBLIC_KEY)$", re.I)
 
 
+# Kept narrow on purpose: SSH_KEY_PATH or AZURE_AUTH_LOCATION point at a secret file and stay credential reads.
+LOCATOR_ENV = re.compile(r"_(?:URL|URI|ENDPOINT|HOST|DOMAIN|ISSUER|REGION)$", re.I)
+
+
 def is_secret_env(name: str) -> bool:
     name = name.upper()
     if PUBLIC_ENV.search(name) or LOCATION_ENV.match(name):
@@ -124,14 +145,18 @@ def is_secret_env(name: str) -> bool:
     parts = name.split("_")
     if "KEY" in parts and parts.index("KEY") + 1 < len(parts) and parts[parts.index("KEY") + 1] in {"VAULT", "VAULTS"}:
         parts = [p for i, p in enumerate(parts) if not (p == "KEY" and i + 1 < len(parts) and parts[i + 1] in {"VAULT", "VAULTS"})]
-    return bool(SECRET_ENV_SUBSTR.search(name)) or any(p in SECRET_ENV_PARTS for p in parts)
+    if SECRET_ENV_SUBSTR.search(name):
+        return True
+    if LOCATOR_ENV.search(name):
+        return False  # NEON_AUTH_JWKS_URL, AUTH_ISSUER: where to find something, not a secret
+    return any(p in SECRET_ENV_PARTS for p in parts)
 ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
 DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
 STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
-ENV_ALL = re.compile(r"\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
+ENV_ALL = re.compile(r"(?<!in )\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
 INSTALL = re.compile(
-    r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-\[\]=<>~!+:/@]+)"
-    r"|\buv\s+add\s+([A-Za-z0-9_.\-]+)"
+    r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
+    r"|\buv\s+add\s+" + r"(?:" + r"(?:--python|--index-url|--extra-index-url|--index|-r|--requirements|--no-binary-package|--no-build-package|--package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!*]+)"
     r"|\b(npm)\s+(?:install|i|add)\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
     r"|\b(npx|pnpm\s+dlx|bunx)\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
     r"|\b(pnpm|yarn|bun)\s+add\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
@@ -149,7 +174,9 @@ INSTALL = re.compile(
 # runners (npx, dlx, bunx), whose later words are arguments to the tool, and not for one-package commands.
 MULTI_INSTALL_TOOLS = {"pip", "pip3", "uv pip", "python -m pip", "python3 -m pip", "uv", "npm", "pnpm", "yarn", "bun", "go", "cargo", "gem", "brew", "apt", "apt-get", "yum", "dnf", "apk", "composer"}
 VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "--version", "--features", "-F", "--registry", "--target", "-t", "--path", "--git", "--branch", "--tag", "--rev"}
-PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^]+$")
+PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^*]+$")
+# "<pinned version>", "<package>", "version>" are placeholders; "torch>=2.0.0" or "pkg<3" are version ranges.
+PLACEHOLDER_TOKEN = re.compile(r"^<|<[A-Za-z]|^[A-Za-z_-]+>$")
 EXTRA_STOP_WORDS = {"for", "on", "in", "if", "via", "using", "first", "before", "after", "so", "as", "into", "when", "—", "install", "add",
                     "apt", "apt-get", "brew", "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "gem", "go", "uv", "dnf", "yum", "apk", "sudo", "retry", "run"}
 TOOL_ALIASES = {"install-module": "psgallery", "install-package": "psgallery"}
@@ -160,6 +187,8 @@ def _more_packages(rest: str) -> list[str]:
     packages, skip_next = [], False
     for token in rest.split():
         token = token.strip("\"'`")
+        if not token:
+            continue  # the closing quote of the first package: "openmm==8.6.1" "MDAnalysis==2.10.0"
         if token in {"&&", "||", "|", ";", "\\"} or token.startswith(("#", ">", "2>", "&&", "||", ";", "|")):
             break
         if skip_next:
@@ -169,7 +198,7 @@ def _more_packages(rest: str) -> list[str]:
             skip_next = token in VALUE_FLAGS
             continue
         clean = token.rstrip(".,;:)")
-        if not clean or not PACKAGE_TOKEN.match(clean) or "://" in clean or not re.search(r"[A-Za-z0-9]", clean):
+        if not clean or not PACKAGE_TOKEN.match(clean) or "://" in clean or not re.search(r"[A-Za-z0-9]", clean) or PLACEHOLDER_TOKEN.search(clean):
             break  # "brew install jq / apt install jq": the slash ends the first command
         if clean.lower() in STOP_PACKAGES or clean.lower() in EXTRA_STOP_WORDS:
             break  # "brew install tesseract for the binary": prose after the package
@@ -429,12 +458,15 @@ def _active_lines(path: str, text: str) -> list[tuple[int, str, bool]]:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in SCRIPT_SUFFIXES or text.startswith("#!"):
         return [(n, line, True) for n, line in enumerate(text.splitlines(), 1)]
-    rows, fenced = [], False
+    # A ```markdown block is a document template (an ADR, a runbook); its links are prose, not commands.
+    rows, fenced, prose_fence = [], False, False
     for n, line in enumerate(text.splitlines(), 1):
         if line.lstrip().startswith(("```", "~~~")):
             fenced = not fenced
+            words = line.strip()[3:].split()
+            prose_fence = fenced and bool(words) and words[0].lower() in PROSE_FENCES
             continue
-        if fenced:
+        if fenced and not prose_fence:
             rows.append((n, line, True))
         elif "`" in line:
             # Outside a code block only the inline code counts: "use `curl`" is an instruction, while the prose
@@ -604,6 +636,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         continue
                     if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES):
                         continue
+                    if not is_code and not _prose_cue(line, match.start()):
+                        continue
+                    if "<!DOCTYPE" in line[: match.start()].upper():
+                        continue  # a DTD reference names a document type; nothing is fetched
                     if host.endswith("."):
                         continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
                     rest = line[match.end():]
@@ -611,7 +647,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
                     manifest.add("network_hosts", host, location)
                 if is_code:
-                    for ip in IPV4.findall(line):
+                    for ip_match in IPV4.finditer(line):
+                        ip = ip_match.group(0)
+                        if re.match(r"/\d{1,2}\b", line[ip_match.end():]):
+                            continue  # "3.40.9.80/28" is an address range (an allowlist entry), not a target
                         if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
                             manifest.add("network_hosts", ip, location)
             if not is_code:
@@ -660,8 +699,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 groups = [g for g in match.groups() if g]
                 tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
                 tool = TOOL_ALIASES.get(tool, tool)
-                package = groups[-1].strip(".,;:)\"'`")
-                if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES:
+                package = groups[-1].strip(".,;:)\"'`").rstrip("@")  # "@ag-ui/client@<pinned version>" -> the name
+                if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES and not PLACEHOLDER_TOKEN.search(package):
                     manifest.add("package_installs", f"{tool}:{package}", location)
                     if tool in MULTI_INSTALL_TOOLS and "://" not in package:
                         for extra in _more_packages(line[match.end():]):

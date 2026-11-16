@@ -19,6 +19,7 @@ locations. Deciding whether an added capability is acceptable is left to a revie
 """
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import re
@@ -57,7 +58,7 @@ URL = re.compile(r"\b(?:https?|ftp|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests?\.\w+|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
 # A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
-NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
+NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS|\b\w*issuer\w*|\biss\b)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
 # Registries of identifiers (XML namespaces, schemas), not services a skill talks to.
 IDENTIFIER_HOSTS = {"www.w3.org", "schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "ns.adobe.com", "json-schema.org", "json.schemastore.org", "xmlns.com"}
 LOCKFILES = {"uv.lock", "poetry.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "go.sum", "pipfile.lock", "composer.lock", "gemfile.lock"}
@@ -70,7 +71,8 @@ NETWORK_CLIENTS = [
     ("curl", r"\bcurl\b"), ("wget", r"\bwget\b"), ("python-requests", r"\brequests\.(?:get|post|put|patch|delete|request|Session)\b"),
     ("httpx", r"\bhttpx\.(?:get|post|put|Client|AsyncClient)\b"), ("urllib", r"\burllib\.request\b|\burlopen\("),
     ("fetch", r"\bfetch\(\s*['\"`]?https?:"), ("axios", r"\baxios\b"), ("http.client", r"\bhttp\.client\b"),
-    ("socket", r"\bsocket\.(?:socket|create_connection)\b"), ("netcat", r"\b(?:nc|ncat|netcat)\s+-"),
+    ("socket", r"\bsocket\.(?:socket|create_connection)\b(?![^\n]*AF_UNIX)"),  # AF_UNIX is a local socket, not network
+    ("netcat", r"(?<![-\w])(?:nc|ncat|netcat)\s+-"),  # not the "-nc" in "jq -nc"
     ("invoke-webrequest", r"\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b"),
 ]
 PROCESS_EXEC = [
@@ -87,7 +89,9 @@ AGENT_CONFIG = [
 ]
 PERSISTENCE = [
     ("shell rc", r"\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b"), ("cron", r"\bcrontab\b|/etc/cron"),
-    ("systemd", r"\bsystemctl\s+(?:enable|start)\b|/etc/systemd|\.service\b"), ("launchd", r"\blaunchctl\b|LaunchAgents|LaunchDaemons"),
+    ("systemd", r"\bsystemctl\s+(?:--user\s+)?(?:enable|start)\b|/etc/systemd|\.config/systemd"), ("launchd", r"\blaunchctl\b|LaunchAgents|LaunchDaemons"),
+    # A schedule handed to an API ("expression": "0 20 * * 5") runs an agent on a timer just like crontab does.
+    ("cron schedule", r"[\"']?(?:expression|cron|schedule)[\"']?\s*[:=]\s*[\"'][0-9*/,\- ]{9,}[\"']"),
     ("windows run key", r"CurrentVersion\\+Run\b"), ("scheduled task", r"\bschtasks\b|Register-ScheduledTask"),
     ("startup folder", r"Start Menu\\+Programs\\+Startup"),
 ]
@@ -97,7 +101,11 @@ CREDENTIALS = [
     ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"Login Data|cookies\.sqlite|Local State"),
     (".env file", r"(?<![\w.}\])])\.env\b(?!\.example)"),  # "{path}.env" is attribute access, not a .env file
 ]
-ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|os\.getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
+ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|(?:os\.)?getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
+SECRETISH_ENV = re.compile(r"KEY|SECRET|TOKEN|PASS|AUTH|CRED|PRIVATE|COOKIE|SESSION", re.I)
+ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
+DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
+STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
 ENV_ALL = re.compile(r"\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
 INSTALL = re.compile(
     r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-\[\]=<>~!+:/@]+)"
@@ -112,7 +120,8 @@ INSTALL = re.compile(
     re.I,
 )
 DESTRUCTIVE = [
-    ("rm -rf", r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"), ("rmtree", r"\bshutil\.rmtree\("), ("Remove-Item -Recurse", r"Remove-Item\b[^\n]*-Recurse"),
+    ("rm -rf", r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"), ("rmtree", r"\bshutil\.rmtree\("),
+    ("find -delete", r"\bfind\b[^\n|;]*\s-delete\b"), ("Remove-Item -Recurse", r"Remove-Item\b[^\n]*-Recurse"),
     ("format/mkfs", r"\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:"), ("git push --force", r"\bgit\s+push\b[^\n]*(?:--force|-f)\b"),
     ("dd", r"\bdd\s+if="),
 ]
@@ -337,6 +346,63 @@ def _reveals_capability(text: str) -> bool:
     return any(re.search(pattern, text, re.I) for group in groups for _, pattern in group)
 
 
+MESSAGE_CALLS = {"print", "debug", "info", "warning", "warn", "error", "exception", "critical", "fail", "echo", "secho", "write", "log", "skip", "xfail"}
+REGEX_CALLS = {"compile", "search", "match", "fullmatch", "sub", "subn", "findall", "finditer", "split"}
+COMPARE_CALLS = {"startswith", "endswith", "removeprefix", "removesuffix"}
+
+
+def _string_role(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    """Why a Python string literal is there: 'docstring', 'message', 'regex', 'compare' (mentions) or 'data'."""
+    parent = parents.get(node)
+    while isinstance(parent, (ast.JoinedStr, ast.FormattedValue, ast.BinOp)):  # f-string parts and "a" + "b"
+        node, parent = parent, parents.get(parent)
+    if isinstance(parent, ast.Expr):
+        return "docstring"
+    if isinstance(parent, ast.Compare):
+        return "compare"
+    if isinstance(parent, ast.Call) and node is not parent.func:
+        func = parent.func
+        name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+        if name in MESSAGE_CALLS or name.endswith(("Error", "Exception", "Warning")):
+            return "message"
+        if name in COMPARE_CALLS:
+            return "compare"
+        if name in REGEX_CALLS and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in {"re", "regex"}:
+            return "regex"
+    return "data"
+
+
+def _mask_python(text: str) -> str:
+    """Blank (with spaces, keeping line breaks) Python string literals that only describe things: docstrings,
+    log/error messages, comparison operands and regex patterns. "PowerShell redirection is UTF-16" in a message,
+    a docstring about removed `npx` behaviour, or os\\.environ inside a regex is not the skill doing it. Strings
+    handed to other calls (subprocess, os.system, requests, b64decode...) stay, so payloads are still scanned."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return text
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    lines = text.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def char_offset(lineno: int, col_bytes: int) -> int:
+        line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+        return starts[lineno - 1] + len(line.encode("utf-8")[:col_bytes].decode("utf-8", "ignore"))
+    chars = list(text)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)) or getattr(node, "end_lineno", None) is None:
+            continue
+        if _string_role(node, parents) == "data":
+            continue
+        start, end = char_offset(node.lineno, node.col_offset), char_offset(node.end_lineno, node.end_col_offset)
+        for i in range(start, min(end, len(chars))):
+            if chars[i] not in "\r\n":
+                chars[i] = " "
+    return "".join(chars)
+
+
 def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
     manifest = Manifest(files=len(files))
     for path in sorted(files):
@@ -352,6 +418,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             manifest.add("bundled_binaries", path, path)
             continue
         trail_start = len(manifest.decode_trail)
+        if suffix == ".py":
+            text = _mask_python(text)
+        is_test = bool(TEST_PATH.search(path) or TEST_NAME.match(PurePosixPath(path).name))
         decoded = decode_text(text, path, manifest.decode_trail)
         for step in manifest.decode_trail[trail_start:]:
             # Hiding matters when it hides something: count a technique only if what it revealed is itself a
@@ -372,14 +441,22 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             in_comment = is_code and number <= original_lines and bool(COMMENT_LINE.match(line)) and suffix in SCRIPT_SUFFIXES
             if in_comment:
                 continue  # a comment describes code; it does not run (license headers, notes about attacks)
+            full_line = original_line(number, line)
+            inline_row = suffix in DOC_SUFFIXES and is_code and line != full_line
+            if suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines and DOC_COMMENT.match(line):
+                continue  # a comment inside a fenced example ("# Available at: https://...")
             cue = is_code or bool(FETCH_CUE.search(line))
-            if cue and PurePosixPath(path).name.lower() not in LOCKFILES:
+            hosts_apply = not is_test and not ECHO_LINE.match(line) and not (suffix in DOC_SUFFIXES and TABLE_ROW.match(full_line))
+            if cue and hosts_apply and PurePosixPath(path).name.lower() not in LOCKFILES:
                 for match in URL.finditer(line):
                     host = match.group(1).lower().strip("[]")
                     if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                         continue
-                    if PLACEHOLDER_PATH.match(line[match.end():]):
-                        continue  # a template link such as https://github.com/owner/repo/pull/123
+                    if host.endswith("."):
+                        continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
+                    rest = line[match.end():]
+                    if PLACEHOLDER_PATH.match(rest) and not (suffix in SCRIPT_SUFFIXES and re.match(r"^/(?:\{|\$\{)", rest)):
+                        continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
                     manifest.add("network_hosts", host, location)
                 if is_code:
                     for ip in IPV4.findall(line):
@@ -394,26 +471,34 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
                     _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
                 continue
-            command_line = line
-            if suffix in DOC_SUFFIXES and line != original_line(number, line):
-                # An inline-code row from Markdown prose: drop spans the sentence negates ("Never run its setup
-                # scripts or `curl | sh`"), as is already done for installs.
-                full = original_line(number, line)
-                command_line = " ; ".join(m.group(1) for m in INLINE_CODE.finditer(full) if not NEGATED.search(full[: m.start()][-60:]))
-            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, ALTERNATION.sub(" ", command_line), location)
-            _scan_patterns(manifest, "process_execution", PROCESS_EXEC, command_line, location)
-            _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
-            _scan_patterns(manifest, "credential_access", CREDENTIALS, line, location)
-            _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, line, location)
+            command_line = all_spans = line
+            if inline_row:
+                # An inline-code row from Markdown prose. Drop spans the sentence negates ("Never run its setup
+                # scripts or `curl | sh`"), and treat a single bare word (`curl`, `os.environ`, `httpx.Client`,
+                # `~/Library/LaunchAgents` listed as an indicator) as a mention: a command has arguments.
+                spans = [m.group(1) for m in INLINE_CODE.finditer(full_line) if not NEGATED.search(full_line[: m.start()][-60:])]
+                all_spans = " ; ".join(spans)
+                command_line = " ; ".join(s for s in spans if len(s.split()) > 1)
+            alternation_free = ALTERNATION.sub(" ", command_line)  # "curl|wget|nc", "{zsh|bash|powershell}" are lists
+            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, alternation_free, location)
+            for name, pattern in PROCESS_EXEC:
+                if re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I):
+                    manifest.add("process_execution", name, location)
+            _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
+            _scan_patterns(manifest, "credential_access", CREDENTIALS, command_line, location)
+            _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
             window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
-            if WRITE_CUE.search(window) and not TABLE_ROW.match(original_line(number, line)):
-                _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
-            for match in ENV_READ.finditer(line):
+            if WRITE_CUE.search(window) and not TABLE_ROW.match(full_line):
+                _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, command_line, location)
+            for match in ENV_READ.finditer(all_spans):
                 name = next(g for g in match.groups() if g).upper()
-                if not LOCATION_ENV.match(name):  # $env:APPDATA is a folder, not a secret
-                    manifest.add("credential_access", "env:" + name, location)
-            if ENV_ALL.search(line):
+                if LOCATION_ENV.match(name) or (name.endswith("_ID") and not SECRETISH_ENV.search(name)):
+                    continue  # $env:APPDATA is a folder and AGENT_ID an identifier, not secrets
+                manifest.add("credential_access", "env:" + name, location)
+            if ENV_ALL.search(command_line):
                 manifest.add("credential_access", "env:<all>", location)
+            if is_test:
+                continue  # an install command inside a test's string data is test input, not something run
             for match in INSTALL.finditer(line):
                 full = original_line(number, line)
                 command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
@@ -422,7 +507,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 groups = [g for g in match.groups() if g]
                 tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
                 package = groups[-1].strip(".,;:)\"'`")
-                if package and not package.startswith("-"):
+                if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES:
                     manifest.add("package_installs", f"{tool}:{package}", location)
     return manifest.to_dict()
 

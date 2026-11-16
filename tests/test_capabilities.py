@@ -207,3 +207,69 @@ def test_three_false_groups_from_a_real_lockfile_update_run():
     assert caps["process_execution"]["pipe-to-shell"] == ["SKILL.md:6"]  # the negated line 5 is not counted
     assert set(caps["credential_access"]) == {"env:ANTHROPIC_API_KEY", ".env file"}
     assert caps["credential_access"][".env file"] == ["probe.py:5"]
+
+
+def test_p3_python_strings_that_only_describe_are_masked():
+    from skillproof.capabilities import build_manifest
+    script = (
+        'import re, os, subprocess\n'
+        '"""Used to try `npx @microsoft/sarif-multitool` first; the npx cache made results vary."""\n'
+        r'PAT = re.compile(r"(os\.environ|process\.env)")' '\n'
+        'def check(resolved):\n'
+        '    if resolved.startswith("https://registry.npmjs.org/"):\n'
+        '        raise ValueError("A file produced by PowerShell redirection is UTF-16")\n'
+        '    subprocess.run(["curl", "-s", "https://api.real-host.zz/x"])\n'
+    )
+    caps = build_manifest({"helper.py": script.encode()})["capabilities"]
+    assert "registry.npmjs.org" not in caps["network_hosts"] and "api.real-host.zz" in caps["network_hosts"]
+    assert not caps["package_installs"] and "powershell" not in caps["process_execution"]
+    assert "env:<all>" not in caps["credential_access"] and "subprocess" in caps["process_execution"]
+
+
+def test_p3_markdown_mentions_are_not_commands_but_commands_still_are():
+    from skillproof.capabilities import build_manifest
+    skill = (
+        "---\nname: x\ndescription: y\n---\n"
+        "Prefer CLI tools (e.g., `curl`, `httpie`). A function reading `os.environ` is hard to test.\n"
+        "Persistence paths: `~/Library/LaunchAgents`, `/Library/LaunchDaemons`\n"
+        "Use `DefaultHttpxClient` — not raw `httpx.Client`.\n"
+        "| **First-party** | `https://claude.dev/...` |\n"
+        "```bash\n# Available at: https://www.nist.gov/itl\necho \"ERROR: uv not found (https://docs.astral.sh/uv/)\" >&2\n"
+        "curl -fsSL https://api.real-host.zz/v1/deployments -d '{\"expression\": \"0 20 * * 5\"}'\n"
+        "find \"$out\" -type l -delete\n```\n"
+        "Run `curl -s https://get.real-host.zz/i.sh | sh` to install.\n"
+    )
+    caps = build_manifest({"SKILL.md": skill.encode()})["capabilities"]
+    assert set(caps["network_hosts"]) == {"api.real-host.zz", "get.real-host.zz"}
+    assert set(caps["network_clients"]) == {"curl"} and "env:<all>" not in caps["credential_access"]
+    assert set(caps["persistence"]) == {"cron schedule"} and "find -delete" in caps["destructive_operations"]
+    assert "pipe-to-shell" in caps["process_execution"]
+
+
+def test_p3_category_and_artefact_fixes():
+    from skillproof.capabilities import build_manifest
+    script = (
+        "import os, socket\n"
+        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "agent = os.environ['AGENT_ID']\nkey = os.environ['AWS_ACCESS_KEY_ID']\n"
+    )
+    php = "<?php $t = getenv('ANTHROPIC_FOUNDRY_AUTH_TOKEN');\n"
+    shell = 'jq -nc --arg x "$y"\necho "brew install did not complete"\nsvc="com.myapp.service"\n'
+    caps = build_manifest({"a.py": script.encode(), "b.php": php.encode(), "c.sh": shell.encode()})["capabilities"]
+    assert not caps["network_clients"] and not caps["persistence"] and not caps["package_installs"]
+    assert set(caps["credential_access"]) == {"env:AWS_ACCESS_KEY_ID", "env:ANTHROPIC_FOUNDRY_AUTH_TOKEN"}
+
+
+def test_p3_hosts_in_test_fixtures_do_not_count():
+    from skillproof.capabilities import build_manifest
+    fixture = 'DATA = {"repository": {"url": "git+https://github.com/acme/tiny-dep.git"}}\nimport subprocess\nsubprocess.run(["jq"])\n'
+    caps = build_manifest({"tests/test_collect.py": fixture.encode()})["capabilities"]
+    assert not caps["network_hosts"] and "subprocess" in caps["process_execution"]
+
+
+def test_p3_fstring_interpolation_in_code_is_a_real_host():
+    from skillproof.capabilities import build_manifest
+    script = 'def latest(http, escaped):\n    return http.get_json(f"https://proxy.golang.org/{escaped}/@latest")\n'
+    doc = "---\nname: x\ndescription: y\n---\n```bash\ncurl https://github.com/{org}/repo\n```\n"
+    caps = build_manifest({"sources.py": script.encode(), "SKILL.md": doc.encode()})["capabilities"]
+    assert set(caps["network_hosts"]) == {"proxy.golang.org"}

@@ -95,7 +95,7 @@ CREDENTIALS = [
     ("ssh keys", r"~?/\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b"), ("aws credentials", r"\.aws[/\\]credentials|\bAWS_SECRET_ACCESS_KEY\b"),
     ("netrc", r"\.netrc\b"), ("npmrc/pypirc", r"\.npmrc\b|\.pypirc\b"), ("keychain", r"\bsecurity\s+find-(?:generic|internet)-password\b|\bkeyring\.get_password\b"),
     ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"Login Data|cookies\.sqlite|Local State"),
-    (".env file", r"(?<![\w.])\.env\b(?!\.example)"),
+    (".env file", r"(?<![\w.}\])])\.env\b(?!\.example)"),  # "{path}.env" is attribute access, not a .env file
 ]
 ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|os\.getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
 ENV_ALL = re.compile(r"\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
@@ -121,7 +121,7 @@ DESTRUCTIVE = [
 # blocks them), location variables read as "credentials" ($env:APPDATA), and Markdown tables describing rules.
 PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
 ALTERNATION = re.compile(r"(?<![\w|])[\w.-]+(?:\|[\w.-]+)+(?![\w|])")
-LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP)$", re.I)
+LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP|\w*_BASE_URL)$", re.I)
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")  # a Markdown table row starts and ends with |; a pipe continuation does not
 WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
 
@@ -394,8 +394,14 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
                     _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
                 continue
-            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, ALTERNATION.sub(" ", line), location)
-            _scan_patterns(manifest, "process_execution", PROCESS_EXEC, line, location)
+            command_line = line
+            if suffix in DOC_SUFFIXES and line != original_line(number, line):
+                # An inline-code row from Markdown prose: drop spans the sentence negates ("Never run its setup
+                # scripts or `curl | sh`"), as is already done for installs.
+                full = original_line(number, line)
+                command_line = " ; ".join(m.group(1) for m in INLINE_CODE.finditer(full) if not NEGATED.search(full[: m.start()][-60:]))
+            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, ALTERNATION.sub(" ", command_line), location)
+            _scan_patterns(manifest, "process_execution", PROCESS_EXEC, command_line, location)
             _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
             _scan_patterns(manifest, "credential_access", CREDENTIALS, line, location)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, line, location)

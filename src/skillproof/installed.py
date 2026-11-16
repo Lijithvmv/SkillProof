@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -105,7 +106,10 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
 
 def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str, Any]:
     state_file = Path(state_path)
-    state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {"version": STATE_VERSION, "skills": {}}
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {"version": STATE_VERSION, "skills": {}}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"state file {state_file} is empty or damaged ({exc}); restore a copy or delete it to start a new baseline") from exc
     if state.get("version") != STATE_VERSION:
         raise ValueError(f"unsupported state file version: {state.get('version')}")
     known: dict[str, dict[str, Any]] = state["skills"]
@@ -143,7 +147,14 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
 
     missing = sorted(known[k]["path"] for k in known if k not in families)
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    # Write to a temp file and replace: a full disk once left the state file empty mid-write, and every later
+    # scheduled run then failed. With replace, a failed write leaves the previous state intact.
+    temp = state_file.with_name(state_file.name + ".tmp")
+    try:
+        temp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, state_file)
+    finally:
+        temp.unlink(missing_ok=True)
     flagged = [c for c in changes if c["status"] == "new_capabilities"]
     return {
         "method": "installed_skill_watch",

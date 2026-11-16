@@ -71,3 +71,31 @@ def test_an_oversized_file_is_listed_not_scanned_and_the_rest_is_still_scanned(t
     manifest = json.loads(state.read_text(encoding="utf-8"))["skills"]
     entry = next(iter(manifest.values()))["manifest"]
     assert entry["not_scanned"] == ["assets/deck.pptx"] and "api.real-host.zz" in entry["capabilities"]["network_hosts"]
+
+
+def test_a_failed_state_write_keeps_the_previous_state(tmp_path, monkeypatch):
+    from pathlib import Path
+    import pytest
+    root, state = tmp_path / "skills", tmp_path / "s.json"
+    write_skill(root / "a", "Plain.")
+    scan_installed([root], state)
+    before = state.read_text(encoding="utf-8")
+    real_write = Path.write_text
+
+    def disk_full(self, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            raise OSError(28, "No space left on device")
+        return real_write(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "write_text", disk_full)
+    with pytest.raises(OSError):
+        scan_installed([root], state)
+    assert state.read_text(encoding="utf-8") == before and not (tmp_path / "s.json.tmp").exists()
+
+
+def test_an_empty_state_file_gives_a_clear_error(tmp_path):
+    import pytest
+    root, state = tmp_path / "skills", tmp_path / "s.json"
+    write_skill(root / "a", "Plain.")
+    state.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="empty or damaged"):
+        scan_installed([root], state)

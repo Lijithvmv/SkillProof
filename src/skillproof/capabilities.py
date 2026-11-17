@@ -60,7 +60,7 @@ HEX_RUN = re.compile(r"(?<![0-9a-fA-F])(?:[0-9a-fA-F]{2}){16,}(?![0-9a-fA-F])")
 
 URL = re.compile(r"\b(?:https?|ftp|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?::\d+)?", re.I)
 # Not part of a longer dotted number: "1.2.840.10008.1.2.4.201" is a DICOM identifier, not an address.
-IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.\d)")
+IPV4 = re.compile(r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\dA-Za-z]|\.\d)")
 PROSE_FENCES = {"markdown", "md"}
 MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 ANY_URL = re.compile(r"\S+://\S+")
@@ -77,6 +77,13 @@ def _prose_cue(line: str, start: int) -> bool:
     before = re.sub(r"\[[^\]]*(?:\]\()?$", " ", before)  # the URL's own link text: "[Download Agent](" + URL
     return bool(FETCH_CUE.search(before))
 FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests\.(?:get|post|put|patch|delete|request|Session)|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
+# Held-out 4: a URL in an error or log message ("Get one from https://..."), a signup/docs link constant, a
+# postMessage origin check and a CSS attribute selector name a place; the skill does not connect to it.
+NOT_CONTACTED_CONTEXT = re.compile(
+    r"(?:\bthrow\s+new\s+\w*Error\s*\(|\bconsole\.(?:log|error|warn|info)\s*\(|\braise\s+\w+\s*\(|\blogger?\.\w+\s*\()[^)]*$"
+    r"|\b\w*(?:SIGNUP|DOCS?|HELP|HOMEPAGE|WEBSITE|REPO|LICENSE|SUPPORT|ORIGIN)_?(?:URL|URI|LINK|PAGE)?\s*[:=]\s*[\"'`]$"
+    r"|\borigin[\"']?\s*[:=]\s*[\"'`]$|\^=\s*\\?[\"']$", re.I)
+PROVENANCE = re.compile(r"\b(?:adapted from|based on|derived from|inspired by|credits?:|provenance|original source)\b", re.I)
 # A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
 NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS|\b\w*issuer\w*|\biss\b)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
 # Registries of identifiers (XML namespaces, schemas), not services a skill talks to.
@@ -99,14 +106,14 @@ PROCESS_EXEC = [
     ("subprocess", r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\b"), ("os.system", r"\bos\.(?:system|popen|exec\w*)\("),
     ("eval", r"(?<![\w.])eval\("), ("exec", r"(?<![\w.])exec\("), ("child_process", r"\bchild_process\b|\bexecSync\(|\bspawnSync?\("),
     ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"
-                      r"(?!\s+(?:-\S+\s+)*[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b)"),  # data piped into a local script is not code
+                      r"(?!\s+(?:-\S+\s+)*(?:[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b|[\"']?\$\{?\w+\}?[\"']?(?:\s|$)))"),  # data piped into a local script is not code
     ("powershell", r"\bpowershell(?:\.exe)?\b|\bpwsh\b"), ("cmd /c", r"\bcmd(?:\.exe)?\s+/c\b"),
 ]
 AGENT_CONFIG = [
     ("CLAUDE.md", r"CLAUDE\.md"), ("AGENTS.md", r"AGENTS\.md"), (".claude/settings", r"\.claude[/\\]settings(?:\.local)?\.json"),
     (".claude/hooks", r"\.claude[/\\]hooks"), (".claude/commands", r"\.claude[/\\](?:commands|agents|skills)"),
     (".mcp.json", r"(?<![\w-])\.?mcp\.json"), (".cursorrules", r"\.cursorrules|\.cursor[/\\]rules"),
-    ("copilot-instructions", r"copilot-instructions\.md"), (".codex", r"\.codex[/\\]"), ("GEMINI.md", r"GEMINI\.md"),
+    ("copilot-instructions", r"copilot-instructions\.md"), (".codex", r"\.codex[/\\](?!sessions|skills|log|cache|history|archived)"), ("GEMINI.md", r"GEMINI\.md"),
 ]
 # Held-out 3: "shell rc" matched Kotlin `user?.profile`, Python `cProfile.Profile()` and SOQL `Owner.Profile.Name`
 # (0 of 4 true), and `source ~/.bashrc` (a read). The file must be named as a path, and a write must be nearby.
@@ -153,11 +160,13 @@ def is_secret_env(name: str) -> bool:
         return True
     if LOCATOR_ENV.search(name):
         return False  # NEON_AUTH_JWKS_URL, AUTH_ISSUER: where to find something, not a secret
+    if "PWD" in parts and parts and {"SHELL", "DIR", "CWD", "OLD", "WORKING", "PATH", "WORKDIR"} & set(parts):
+        parts = [part for part in parts if part != "PWD"]  # PWF_SHELL_PWD: the shell's working directory
     return any(p in SECRET_ENV_PARTS for p in parts)
 ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
 DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
 STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
-ENV_ALL = re.compile(r"(?<!in )(?<!dict\()\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
+ENV_ALL = re.compile(r"(?<!in )(?<!dict\()(?<!dict\(\")(?<!dict\(')\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
 INSTALL = re.compile(
     r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
     r"|\buv\s+add\s+" + r"(?:" + r"(?:--python|--index-url|--extra-index-url|--index|-r|--requirements|--no-binary-package|--no-build-package|--package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!*]+)"
@@ -182,7 +191,7 @@ PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^*]+$")
 # "<pinned version>", "<package>", "version>" are placeholders; "torch>=2.0.0" or "pkg<3" are version ranges.
 # Placeholder packages: "npm install x", "package@fixed-version", "pip install /wheels/*" (a local path), "npx 0".
 PLACEHOLDER_TOKEN = re.compile(r"^<|<[A-Za-z]|^[A-Za-z_-]+>$|^(?:x|y|z|foo|bar|pkg|package|package-name|my-package|your-package)(?:@|$)"
-                               r"|@[\w-]*version$|^\d+$|^(?:/|\./|\.\./|~/)")
+                               r"|@[\w-]*version$|^\d+$|^(?:/|\./|\.\./|~/)|^\[")
 EXTRA_STOP_WORDS = {"for", "on", "in", "if", "via", "using", "first", "before", "after", "so", "as", "into", "when", "—", "install", "add",
                     "apt", "apt-get", "brew", "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "gem", "go", "uv", "dnf", "yum", "apk", "sudo", "retry", "run"}
 TOOL_ALIASES = {"install-module": "psgallery", "install-package": "psgallery"}
@@ -217,7 +226,7 @@ AGENT_SPAWNING = [
     ("claude headless", r"\bclaude\s+(?:-{1,2}[\w-]+(?:\s+[\w.:/-]+)?\s+)*?(?:-p|--print)\b"),
     ("codex exec", r"\bcodex\s+(?:-{1,2}[\w-]+\s+)*exec\b"), ("gemini headless", r"\bgemini\s+(?:-p|--prompt)\b"),
     ("copilot headless", r"\bcopilot\s+(?:-p|--prompt)\b"),
-    ("agent sdk", r"\bclaude_agent_sdk\b|@anthropic-ai/claude-agent-sdk|\bclaude_code_sdk\b|@anthropic-ai/claude-code\b"),
+    ("agent sdk", r"\bclaude_agent_sdk\b|@anthropic-ai/claude-agent-sdk|\bclaude_code_sdk\b|(?<!install )(?<!-g )(?<!add )@anthropic-ai/claude-code\b"),
     ("permission bypass", r"--dangerously-skip-permissions|--permission-mode[\s=]+bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--yolo\b|--full-auto\b"),
 ]
 # The same launches written as an argument list in code (subprocess.run(["claude", "-p", ...])), often over several
@@ -832,6 +841,13 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     host = match.group(1).lower().strip("[]")
                     if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                         continue
+                    if NOT_CONTACTED_CONTEXT.search(line[: match.start()]):
+                        continue
+                    if inline_row and PROVENANCE.search(full_line):
+                        # "Adapted from `x.md` in the `https://github.com/x/y` repo" credits a source. Only provenance
+                        # lines: a bare URL span is otherwise often a real API base ("Base: `https://api.x/v1`"),
+                        # and a broader rule lost 9 true hosts on held-out 2.
+                        continue
                     if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES) or CSP_LINE.search(line):
                         continue
                     if not is_code and not _prose_cue(line, match.start()):
@@ -914,7 +930,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
 
 
 TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec)/", re.I)
-TEST_NAME = re.compile(r"^(?:test_.*|.*_test\.\w+|.*\.(?:test|spec)\.\w+|conftest\.py)$", re.I)
+TEST_NAME = re.compile(r"^(?:test_.*|.*_test\.\w+|.*\.(?:test|spec)\.\w+|conftest\.py|self_?test\.\w+)$", re.I)
 DOC_SUFFIXES = {".md", ".txt", ".rst"}
 
 

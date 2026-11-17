@@ -539,3 +539,26 @@ def test_placeholder_packages_and_patched_environment_are_not_facts():
                            "tests/test_a.py": b"from unittest import mock\nimport os\nwith mock.patch.dict(os.environ, {'A': '1'}, clear=True):\n    pass\n"})["capabilities"]
     assert set(caps["package_installs"]) == {"npm:zod"}
     assert "env:<all>" not in caps["credential_access"]
+
+
+def test_heldout4_false_groups_are_gone_and_real_facts_stay():
+    from skillproof.capabilities import is_secret_env
+    caps = lambda files: build_manifest({k: v.encode() for k, v in files.items()})["capabilities"]
+    hook = caps({"SKILL.md": "# s\n", "hook.sh": 'printf "%s" "$PAYLOAD" | sh "$GATE_STOP" 2>/dev/null || :\ncurl -fsSL https://get.x.dev/i.sh | sh\n'})
+    assert hook["process_execution"]["pipe-to-shell"] == ["hook.sh:2"]
+    ts = caps({"SKILL.md": "# s\n", "p.ts": 'if (!k) throw new Error("KEY is required. Get one from https://platform.minimax.io/");\n'
+               'const SIGNUP_URL = "https://pixfaro.com";\nconst CAL = { origin: "https://app.cal.com" };\n'
+               'const base = process.env.BASE || "https://api.minimax.io";\nconst v = "18.3.0.22D5054f";\n'})
+    assert set(ts["network_hosts"]) == {"api.minimax.io"}
+    assert not is_secret_env("PWF_SHELL_PWD") and is_secret_env("DB_PWD")
+    test_env = caps({"SKILL.md": "# s\n", "tests/test_b.py": 'from unittest import mock\nwith mock.patch.dict("os.environ", {}, clear=True):\n    pass\n'})
+    assert "env:<all>" not in test_env["credential_access"]
+    doc = caps({"SKILL.md": "# s\n```bash\npip install -e \".[dev]\"\nnpm install -g @anthropic-ai/claude-code@latest\n```\n"
+                "Adapted from `prompts/x.md` in the `https://github.com/someone/prompts` repo.\n"
+                "Fetch `https://api.example-svc.io/v1/schema` before starting.\n"})
+    assert doc["package_installs"] == {"npm:@anthropic-ai/claude-code@latest": ["SKILL.md:4"]}
+    assert doc["agent_spawning"] == {} and "github.com" not in doc["network_hosts"] and "api.example-svc.io" in doc["network_hosts"]
+    codex = caps({"SKILL.md": "# s\n", "s.py": "import os\nd = os.path.expanduser(os.getenv('CODEX_SESSIONS_DIR', '~/.codex/sessions'))\n"})
+    assert codex["agent_config_writes"] == {}
+    from skillproof.capabilities import source_kind
+    assert source_kind("scripts/selftest.py:5") == "test"

@@ -144,6 +144,16 @@ class SQLiteApprovalStore:
             ).fetchall()
         return {**dict(row), "events": [dict(event) for event in events]}
 
+    def list_for_report(self, report: dict[str, Any], *, tenant_id: str = "default") -> list[dict[str, Any]]:
+        """Every approval request in the tenant for exactly this report, newest first."""
+        digest = self._hash_report(report)
+        with self._lock:
+            ids = [row["request_id"] for row in self._connection.execute(
+                "SELECT request_id FROM approval_requests WHERE tenant_id = ? AND report_hash = ? ORDER BY created_at DESC, rowid DESC",
+                (tenant_id, digest),
+            ).fetchall()]
+        return [self.get_request(request_id, tenant_id=tenant_id) for request_id in ids]
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()

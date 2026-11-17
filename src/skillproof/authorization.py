@@ -99,6 +99,11 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "skill.read")
         return self.registry.catalogue(principal.tenant_id)
 
+    def version_approvals(self, principal: Principal, version_id: str) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        assurance = self.registry.get_assurance(principal.tenant_id, version_id)
+        return self.approvals.list_for_report(assurance, tenant_id=principal.tenant_id)
+
     def submit_version_for_approval(self, principal: Principal, version_id: str) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "approval.submit")
         assurance = self.registry.get_assurance(principal.tenant_id, version_id)

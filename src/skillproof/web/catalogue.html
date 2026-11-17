@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkillProof Catalogue</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5d6673; --line: #dde1e6;
+  --accent: #2456c7; --accent-ink: #ffffff;
+  --block: #b42318; --block-bg: #fde8e6; --ask: #8a5a00; --ask-bg: #fdf1d8; --note: #3d5a80; --note-bg: #e6eef8;
+  --ok: #1e7a46; --ok-bg: #e2f4ea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151a; --panel: #1a1e25; --ink: #e7eaee; --muted: #9aa3ae; --line: #2c323b;
+    --accent: #6d95f0; --accent-ink: #0d1117;
+    --block: #ff8a80; --block-bg: #3a1c1a; --ask: #f2c46b; --ask-bg: #33290f; --note: #9cbcec; --note-bg: #1c2840;
+    --ok: #7fd3a1; --ok-bg: #15301f;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; }
+header .who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); }
+input, select, button, textarea { font: inherit; color: inherit; }
+input[type=text], input[type=password], select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.danger { background: var(--block); color: #fff; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 16px; padding: 16px; max-width: 1280px; margin: 0 auto; }
+@media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+h3 { font-size: 13px; margin: 16px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.skill { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.skill strong { display: block; overflow-wrap: anywhere; }
+.ver { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 4px 6px; margin: 2px -6px; border-radius: 4px; cursor: pointer; }
+.ver:hover, .ver.sel { background: var(--bg); }
+.ver code { font-size: 12px; color: var(--muted); }
+.badge { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.b-block { color: var(--block); background: var(--block-bg); }
+.b-ask { color: var(--ask); background: var(--ask-bg); }
+.b-note, .b-none { color: var(--note); background: var(--note-bg); }
+.b-active, .b-pass, .b-approved { color: var(--ok); background: var(--ok-bg); }
+.b-state { color: var(--muted); background: var(--bg); border: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+td code { overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.msg { padding: 8px 10px; border-radius: 6px; margin: 8px 0; overflow-wrap: anywhere; }
+.msg.err { background: var(--block-bg); color: var(--block); }
+.msg.ok { background: var(--ok-bg); color: var(--ok); }
+.ack { border: 1px solid var(--block); background: var(--block-bg); border-radius: 6px; padding: 10px; margin: 10px 0; }
+.ack label { display: flex; gap: 8px; align-items: flex-start; }
+.scroll { overflow-x: auto; }
+ol.events { padding-left: 18px; margin: 0; }
+ol.events li { margin: 2px 0; }
+.empty { color: var(--muted); padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SkillProof Catalogue</h1>
+  <div class="who" id="who"></div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Add a version</h2>
+    <form id="upload">
+      <input type="file" id="zip" accept=".zip" required>
+      <h3>Run evidence (optional)</h3>
+      <div class="row">
+        <label>Lift (pp) <input type="text" id="lift" size="5" inputmode="decimal"></label>
+        <label>Paired runs <input type="text" id="runs" size="4" inputmode="numeric"></label>
+        <label>Models <input type="text" id="models" size="3" inputmode="numeric"></label>
+        <label>Cost overhead % <input type="text" id="cost" size="5" inputmode="decimal"></label>
+      </div>
+      <p class="row"><button type="submit">Upload and compare</button></p>
+    </form>
+    <div id="uploadMsg"></div>
+    <h2 style="margin-top:18px">Skills</h2>
+    <div id="skills"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="panel" id="detail"><div class="empty">Pick a version to see what it adds and to approve or promote it.</div></section>
+</main>
+<script>
+"use strict";
+const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+const state = { selected: null, dev: true };
+
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function badge(text, kind) { return `<span class="badge b-${esc(kind || text)}">${esc(text)}</span>`; }
+function short(id) { return esc(String(id || "").slice(0, 8)); }
+
+function headers(extra) {
+  const h = Object.assign({}, extra || {});
+  const token = store.get("sp-token");
+  if (token) h["Authorization"] = "Bearer " + token;
+  else { h["X-SkillProof-Dev-User"] = store.get("sp-user") || "local-dev"; h["X-SkillProof-Dev-Role"] = store.get("sp-role") || "tenant_admin"; }
+  return h;
+}
+async function api(path, options) {
+  options = options || {};
+  const response = await fetch(path, Object.assign({}, options, { headers: headers(options.headers) }));
+  let body = null;
+  try { body = await response.json(); } catch (e) {}
+  if (!response.ok) throw new Error((body && (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail))) || response.statusText);
+  return body;
+}
+
+async function renderWho() {
+  const who = document.getElementById("who");
+  let me = null;
+  try { me = await api("/api/v1/whoami"); } catch (e) { who.innerHTML = `<span class="msg err">${esc(e.message)}</span>`; }
+  const roles = ["tenant_admin", "evaluator", "approver", "viewer"];
+  const dev = !me || me.dev_identity;
+  state.dev = dev;
+  who.innerHTML = dev
+    ? `<span>Local development identity</span>
+       <input type="text" id="user" size="10" value="${esc(store.get("sp-user") || "local-dev")}" aria-label="User">
+       <select id="role" aria-label="Role">${roles.map(r => `<option ${r === (store.get("sp-role") || "tenant_admin") ? "selected" : ""}>${r}</option>`).join("")}</select>
+       <button class="secondary" id="switch">Switch</button>
+       <button class="secondary" id="tok">Use a token</button>`
+    : `<span>${esc(me.user_id)} · ${esc(me.role)} · tenant ${esc(me.tenant_id)}</span><button class="secondary" id="signout">Forget token</button>`;
+  if (dev) {
+    document.getElementById("switch").onclick = () => { store.set("sp-user", document.getElementById("user").value.trim() || "local-dev"); store.set("sp-role", document.getElementById("role").value); refresh(); };
+    document.getElementById("tok").onclick = () => { const t = prompt("Bearer access token"); if (t) { store.set("sp-token", t.trim()); refresh(); } };
+  } else {
+    document.getElementById("signout").onclick = () => { try { localStorage.removeItem("sp-token"); } catch (e) {} refresh(); };
+  }
+}
+
+async function renderSkills() {
+  const box = document.getElementById("skills");
+  try {
+    const data = await api("/api/v1/registry/catalogue");
+    if (!data.skills.length) { box.innerHTML = `<div class="empty">No skills yet. Upload a skill ZIP to start.</div>`; return; }
+    box.innerHTML = data.skills.map(skill => {
+      const rows = [];
+      if (skill.active) rows.push(verRow(skill.active, "active"));
+      skill.waiting.forEach(v => rows.push(verRow(v, v.state)));
+      return `<div class="skill"><strong>${esc(skill.skill_name)}</strong>
+        <span class="muted">${skill.versions} version${skill.versions === 1 ? "" : "s"}${skill.active ? "" : " · nothing active"}</span>${rows.join("")}</div>`;
+    }).join("");
+    box.querySelectorAll(".ver").forEach(el => el.onclick = () => select(el.dataset.id));
+  } catch (e) { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+}
+function verRow(v, label) {
+  const level = v.capability_decision;
+  return `<div class="ver ${state.selected === v.version_id ? "sel" : ""}" data-id="${esc(v.version_id)}" role="button" tabindex="0">
+    <span><code>${short(v.version_id)}</code> ${badge(label.replace("_", " "), label === "active" ? "active" : "state")}</span>
+    ${level ? badge(level === "none" ? "nothing new" : level, level) : ""}</div>`;
+}
+
+async function select(id) {
+  state.selected = id;
+  document.querySelectorAll(".ver").forEach(el => el.classList.toggle("sel", el.dataset.id === id));
+  const box = document.getElementById("detail");
+  box.innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const [v, approvals] = await Promise.all([api(`/api/v1/registry/versions/${encodeURIComponent(id)}`),
+      api(`/api/v1/registry/versions/${encodeURIComponent(id)}/approval-requests`).catch(() => ({ requests: [] }))]);
+    box.innerHTML = detailHtml(v, approvals.requests);
+    wireDetail(v, approvals.requests);
+  } catch (e) { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+}
+
+function detailHtml(v, requests) {
+  const change = v.capability_change;
+  const against = change ? { nothing_active: "nothing active yet, so every capability counts as added",
+    active_version: `the active version ${short(change.against_version_id)}`,
+    active_version_without_manifest: "an active version that has no capability manifest" }[change.against] : "";
+  const items = change ? change.items : [];
+  const gates = (v.assurance && v.assurance.gates) || [];
+  const s = v.summary || {};
+  const latest = requests[0];
+  return `
+  <h2>${esc(v.skill_name)} <code class="muted">${short(v.version_id)}</code> ${badge(v.state.replace("_", " "), v.state === "active" ? "active" : "state")}</h2>
+  <div class="muted">Package ${esc(String(v.package_fingerprint).slice(0, 16))}… · registered by ${esc(v.registered_by)} · ${esc(v.created_at)}</div>
+  <div id="actionMsg"></div>
+  <h3>What this version adds</h3>
+  ${change ? `<p class="muted">Compared with ${esc(against)}. ${esc(change.meaning)}</p>
+    ${items.length ? `<div class="scroll"><table><thead><tr><th>Level</th><th>Capability</th><th>Why</th><th>Where</th></tr></thead><tbody>
+      ${items.map(i => `<tr><td>${badge(i.level)}</td><td>${esc(i.category.replace(/_/g, " "))}<br><code>${esc(i.value)}</code>${i.widened ? `<br><span class="muted">reach ${esc(i.widened.before)} → ${esc(i.widened.after)}</span>` : ""}</td>
+        <td>${i.reasons.map(esc).join("<br>")}</td><td>${i.locations.map(l => `<code>${esc(l)}</code>`).join("<br>")}</td></tr>`).join("")}
+      </tbody></table></div>${change.items_total > items.length ? `<p class="muted">Showing ${items.length} of ${change.items_total}.</p>` : ""}`
+      : `<p>${badge("nothing new", "none")} No capability this version has is missing from what it is compared with.</p>`}
+    ${Object.keys(change.removed || {}).length ? `<p class="muted">Removed: ${Object.entries(change.removed).map(([c, vals]) => esc(c.replace(/_/g, " ")) + " " + vals.map(x => `<code>${esc(x)}</code>`).join(", ")).join("; ")}</p>` : ""}`
+    : `<p class="muted">This version was registered without a capability manifest.</p>`}
+  <h3>Assurance · ${esc(s.assurance_decision || "")}</h3>
+  <div class="scroll"><table><tbody>${gates.map(g => `<tr><td>${badge(g.status.replace(/_/g, " "), g.status === "pass" ? "pass" : (g.status === "blocked" || g.status === "fail") ? "block" : "ask")}</td><td>${esc(g.message)}</td></tr>`).join("")}</tbody></table></div>
+  <h3>Approval</h3>
+  ${latest ? `<p>Request <code>${short(latest.request_id)}</code> ${badge(latest.state.replace(/_/g, " "), latest.state === "approved" ? "approved" : "state")} · submitted by ${esc(latest.submitter_id)}</p>` : `<p class="muted">No approval request yet.</p>`}
+  <div class="row" id="actions"></div>
+  <h3>Audit trail</h3>
+  <ol class="events">${(v.events || []).map(e => `<li><span class="muted">${esc(e.occurred_at)}</span> · ${esc(e.actor_id)} · <strong>${esc(e.action)}</strong> ${e.detail ? `<code>${esc(e.detail)}</code>` : ""}</li>`).join("")}</ol>`;
+}
+
+function wireDetail(v, requests) {
+  const actions = document.getElementById("actions");
+  const latest = requests[0];
+  const change = v.capability_change;
+  const msg = (text, ok) => { document.getElementById("actionMsg").innerHTML = `<div class="msg ${ok ? "ok" : "err"}">${esc(text)}</div>`; };
+  const run = async (fn, okText) => { try { await fn(); await renderSkills(); await select(v.version_id); msg(okText, true); } catch (e) { msg(e.message, false); } };
+  const buttons = [];
+  if (v.state === "pending_review" && (!latest || latest.state !== "pending_review" && latest.state !== "approved")) buttons.push(["Request approval", "", () =>
+    run(() => api(`/api/v1/registry/versions/${encodeURIComponent(v.version_id)}/approval-requests`, { method: "POST" }), "Sent for approval.")]);
+  if (latest && latest.state === "pending_review") {
+    const decide = action => run(() => api(`/api/v1/approvals/${encodeURIComponent(latest.request_id)}/decision`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, comment: document.getElementById("comment").value }) }), "Decision recorded.");
+    actions.insertAdjacentHTML("beforeend", `<input type="text" id="comment" placeholder="Comment (optional)" size="28">`);
+    buttons.push(["Approve", "", () => decide("approve")], ["Request changes", "secondary", () => decide("request_changes")], ["Reject", "danger", () => decide("reject")]);
+  }
+  if (v.state === "pending_review" && latest && latest.state === "approved") {
+    const blocking = change && change.decision === "block";
+    if (blocking) actions.insertAdjacentHTML("beforebegin", `<div class="ack"><label><input type="checkbox" id="ack">
+      <span>I have read the ${change.counts.block} block-level line${change.counts.block === 1 ? "" : "s"} above and accept change <code>${esc(change.change_hash.slice(0, 12))}</code>.</span></label></div>`);
+    buttons.push(["Promote to active", "", () => run(() => api(`/api/v1/registry/versions/${encodeURIComponent(v.version_id)}/promote`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approval_request_id: latest.request_id, capability_ack: blocking && document.getElementById("ack").checked ? change.change_hash : null }) }), "Promoted.")]);
+  }
+  buttons.forEach(([label, cls, fn]) => { const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls; b.onclick = fn; actions.appendChild(b); });
+  if (!buttons.length) actions.innerHTML = `<span class="muted">${v.state === "not_eligible" ? "Not eligible: fix the failing assurance gates and upload a new version." : "No action available."}</span>`;
+}
+
+document.getElementById("upload").onsubmit = async event => {
+  event.preventDefault();
+  const out = document.getElementById("uploadMsg");
+  const file = document.getElementById("zip").files[0];
+  if (!file) return;
+  const evidence = {};
+  [["lift", "behavioral_lift_pp", parseFloat], ["runs", "paired_runs", v => parseInt(v, 10)], ["models", "measured_models", v => parseInt(v, 10)], ["cost", "cost_overhead_percent", parseFloat]]
+    .forEach(([id, key, parse]) => { const raw = document.getElementById(id).value.trim(); if (raw) evidence[key] = parse(raw); });
+  const form = new FormData();
+  form.append("file", file);
+  if (Object.keys(evidence).length) form.append("evidence_json", JSON.stringify(evidence));
+  out.innerHTML = `<div class="muted">Analysing…</div>`;
+  try {
+    const result = await api("/api/v1/registry/versions", { method: "POST", body: form });
+    out.innerHTML = `<div class="msg ok">Registered ${esc(result.version.skill_name)} ${short(result.version.version_id)}.</div>`;
+    await renderSkills();
+    select(result.version.version_id);
+  } catch (e) { out.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+};
+
+async function refresh() { await renderWho(); await renderSkills(); if (state.selected) select(state.selected); }
+refresh();
+</script>
+</body>
+</html>

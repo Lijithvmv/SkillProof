@@ -184,3 +184,23 @@ def test_old_registry_database_gains_the_new_columns(tmp_path):
     old = registry.get_version("t", "v1")
     assert old["capabilities"] is None and old["assurance"] is None and old["capability_change"] is None
     registry.close()
+
+
+def test_version_approval_requests_are_listed(client):
+    version = upload(client, SKILL)
+    assert client.get(f"/api/v1/registry/versions/{version['version_id']}/approval-requests", headers=as_user("carol", "viewer")).json()["requests"] == []
+    request_id = approve(client, version["version_id"])
+    other = upload(client, SKILL + "\nKeep the notes under 300 words.\n")
+    listed = client.get(f"/api/v1/registry/versions/{version['version_id']}/approval-requests", headers=as_user("carol", "viewer")).json()["requests"]
+    assert [r["request_id"] for r in listed] == [request_id] and listed[0]["state"] == "approved"
+    assert client.get(f"/api/v1/registry/versions/{other['version_id']}/approval-requests", headers=as_user("carol", "viewer")).json()["requests"] == []
+
+
+def test_catalogue_page_is_served_and_escapes_skill_text(client):
+    assert client.get("/", follow_redirects=False).headers["location"] == "/catalogue"
+    page = client.get("/catalogue")
+    assert page.status_code == 200 and "SkillProof Catalogue" in page.text
+    # Values from uploaded skills are untrusted: the page must only insert them through esc().
+    assert "function esc(" in page.text and "innerHTML = v." not in page.text
+    me = client.get("/api/v1/whoami", headers=as_user("bob", "approver")).json()
+    assert me == {"user_id": "bob", "tenant_id": "local", "role": "approver", "dev_identity": True}

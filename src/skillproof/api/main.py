@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from skillproof.analyzer import analyze_files
 from skillproof.approvals import ApprovalError, SQLiteApprovalStore
@@ -24,6 +24,7 @@ from skillproof.oidc import AuthenticationError, verifier_from_environment
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
+CATALOGUE_PAGE = Path(__file__).resolve().parent.parent / "web" / "catalogue.html"
 
 
 def require_roles(*roles: str):
@@ -241,6 +242,30 @@ def registry_request_approval(version_id: str, request: Request) -> dict[str, An
     principal = _principal(request)
     governance = _governance(request)
     return _guarded(lambda: governance.submit_version_for_approval(principal, version_id))
+
+
+@app.get("/api/v1/registry/versions/{version_id}/approval-requests")
+def registry_version_approvals(version_id: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"version_id": version_id, "requests": _guarded(lambda: governance.version_approvals(principal, version_id))}
+
+
+@app.get("/api/v1/whoami")
+def whoami(request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    return {"user_id": principal.user_id, "tenant_id": principal.tenant_id, "role": principal.role,
+            "dev_identity": getattr(request.state, "principal", None) is None}
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse("/catalogue")
+
+
+@app.get("/catalogue", response_class=HTMLResponse, include_in_schema=False)
+def catalogue_page() -> HTMLResponse:
+    return HTMLResponse(CATALOGUE_PAGE.read_text(encoding="utf-8"))
 
 
 class DecisionRequest(BaseModel):

@@ -82,3 +82,13 @@ def test_the_destination_already_in_the_old_version_still_counts_for_the_own_ser
     new_manifest = build_manifest({k: v.encode() for k, v in new.items()})
     result = triage(_diff(old, new), RATES, new_manifest=new_manifest)
     assert [c["shape"] for c in result["combinations"]] == ["secret to its own service"]
+
+
+def test_delete_reach_sets_the_level_and_a_widening_is_an_item():
+    clean = triage(_diff({"SKILL.md": "# s\n"}, {"SKILL.md": "# s\n", "c.sh": "rm -rf node_modules dist\n"}), RATES)
+    assert clean["decision"] == "note" and "recursive delete of a temporary or build folder" in clean["items"][0]["reasons"]
+    home = triage(_diff({"SKILL.md": "# s\n"}, {"SKILL.md": "# s\n", "c.sh": "rm -rf ~/\n"}), RATES)
+    assert home["decision"] == "block"
+    grown = triage(_diff({"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/a\n"}, {"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/a\nrm -rf /\n"}), RATES)
+    assert grown["decision"] == "block" and grown["items"][0]["widened"] == {"before": "temp", "after": "root"}
+    assert not any("real public skill updates" in r for r in grown["items"][0]["reasons"])

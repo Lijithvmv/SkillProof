@@ -108,8 +108,11 @@ AGENT_CONFIG = [
     (".mcp.json", r"(?<![\w-])\.?mcp\.json"), (".cursorrules", r"\.cursorrules|\.cursor[/\\]rules"),
     ("copilot-instructions", r"copilot-instructions\.md"), (".codex", r"\.codex[/\\]"), ("GEMINI.md", r"GEMINI\.md"),
 ]
+# Held-out 3: "shell rc" matched Kotlin `user?.profile`, Python `cProfile.Profile()` and SOQL `Owner.Profile.Name`
+# (0 of 4 true), and `source ~/.bashrc` (a read). The file must be named as a path, and a write must be nearby.
+SHELL_RC = [("shell rc", r"(?<![\w?)\]])\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b(?!\s*[(.]\w)")]
 PERSISTENCE = [
-    ("shell rc", r"\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b"), ("cron", r"\bcrontab\b|/etc/cron"),
+    ("cron", r"\bcrontab\b|/etc/cron"),
     ("systemd", r"\bsystemctl\s+(?:--user\s+)?(?:enable|start)\b|/etc/systemd|\.config/systemd"), ("launchd", r"\blaunchctl\b|LaunchAgents|LaunchDaemons"),
     # A schedule handed to an API ("expression": "0 20 * * 5") runs an agent on a timer just like crontab does.
     ("cron schedule", r"[\"']?(?:expression|cron|schedule)[\"']?\s*[:=]\s*[\"'][0-9*/,\- ]{9,}[\"']"),
@@ -154,7 +157,7 @@ def is_secret_env(name: str) -> bool:
 ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
 DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
 STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
-ENV_ALL = re.compile(r"(?<!in )\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
+ENV_ALL = re.compile(r"(?<!in )(?<!dict\()\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
 INSTALL = re.compile(
     r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
     r"|\buv\s+add\s+" + r"(?:" + r"(?:--python|--index-url|--extra-index-url|--index|-r|--requirements|--no-binary-package|--no-build-package|--package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!*]+)"
@@ -177,7 +180,9 @@ MULTI_INSTALL_TOOLS = {"pip", "pip3", "uv pip", "python -m pip", "python3 -m pip
 VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "--version", "--features", "-F", "--registry", "--target", "-t", "--path", "--git", "--branch", "--tag", "--rev"}
 PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^*]+$")
 # "<pinned version>", "<package>", "version>" are placeholders; "torch>=2.0.0" or "pkg<3" are version ranges.
-PLACEHOLDER_TOKEN = re.compile(r"^<|<[A-Za-z]|^[A-Za-z_-]+>$")
+# Placeholder packages: "npm install x", "package@fixed-version", "pip install /wheels/*" (a local path), "npx 0".
+PLACEHOLDER_TOKEN = re.compile(r"^<|<[A-Za-z]|^[A-Za-z_-]+>$|^(?:x|y|z|foo|bar|pkg|package|package-name|my-package|your-package)(?:@|$)"
+                               r"|@[\w-]*version$|^\d+$|^(?:/|\./|\.\./|~/)")
 EXTRA_STOP_WORDS = {"for", "on", "in", "if", "via", "using", "first", "before", "after", "so", "as", "into", "when", "—", "install", "add",
                     "apt", "apt-get", "brew", "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "gem", "go", "uv", "dnf", "yum", "apk", "sudo", "retry", "run"}
 TOOL_ALIASES = {"install-module": "psgallery", "install-package": "psgallery"}
@@ -230,6 +235,55 @@ DESTRUCTIVE = [
     ("format/mkfs", r"\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:"), ("git push --force", r"\bgit\s+push\b[^\n]*(?:--force|-f)\b"),
     ("dd", r"\bdd\s+if="),
 ]
+# Reach of a destructive command: what it would delete. The fact "rm -rf" is the same in a build-cleanup step and in
+# a line that deletes the home folder; the diff reports when the reach grows, even though the fact is not new.
+SCOPE_RANK = {"temp": 0, "path": 1, "some": 1, "cwd": 2, "variable": 2, "all": 3, "home": 3, "root": 4}
+DELETE_TARGETS = re.compile(r"\brm\s+((?:-{1,2}[\w-]+\s+)+)([^;&|\n)`]*)|Remove-Item\b([^;|\n]*-Recurse[^;|\n]*)", re.I)
+ROOT_TARGET = re.compile(r"^(?:/(?:usr|etc|bin|sbin|lib|boot|var|opt|System|Library|Users|home)?/?\*?|[A-Za-z]:[\\/]?\*?|[A-Za-z]:[\\/](?:Windows|Users|Program Files)[\\/]?\*?)$", re.I)
+HOME_TARGET = re.compile(r"^(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE|\$env:HOME)[\\/]?\*?$", re.I)
+TEMP_TARGET = re.compile(r"(?:^|[\\/$%{])(?:tmp|temp|TMPDIR|tmpdir|temp_?dir|tmp_?dir)\b|mktemp|tempfile|node_modules|__pycache__|\.pytest_cache|\.cache\b|\bdist\b|\bbuild\b|\btarget\b|\.next\b|coverage|\*\.pyc|\.egg-info", re.I)
+VARIABLE_TARGET = re.compile(r"^\$\{?\w+\}?(?:[\\/]\*?)?$|^\$\d$")
+CWD_TARGET = re.compile(r"^(?:\.|\./|\*|\./\*|\.\*)$")
+REDIRECTS = re.compile(r"^(?:\d?>|&>|\|\||&&)")
+
+
+def delete_scope(text: str) -> str | None:
+    """Widest target of a recursive rm or Remove-Item in a command line: temp < path < cwd/variable < home < root."""
+    best = None
+    for match in DELETE_TARGETS.finditer(text):
+        if match.group(1) is not None:
+            flags = match.group(1)
+            if not re.search(r"--recursive|(?:^|\s)-[a-zA-Z]*[rR]", flags):
+                continue  # rm -f file: not recursive
+            rest = match.group(2)
+        else:
+            rest = re.sub(r"-(?:Recurse|Force|Confirm(?::\$\w+)?|WhatIf|Path|LiteralPath)\b|-ErrorAction\s+\w+", " ", match.group(3), flags=re.I)
+        for token in rest.split():
+            target = token.strip("\"'")
+            if not target or target.startswith("-") or REDIRECTS.match(target):
+                continue
+            if ROOT_TARGET.match(target):
+                scope = "root"
+            elif HOME_TARGET.match(target):
+                scope = "home"
+            elif TEMP_TARGET.search(target):
+                scope = "temp"
+            elif VARIABLE_TARGET.match(target):
+                scope = "variable"
+            elif CWD_TARGET.match(target):
+                scope = "cwd"
+            else:
+                scope = "path"
+            if best is None or SCOPE_RANK[scope] > SCOPE_RANK[best]:
+                best = scope
+    return best
+
+
+def matcher_scope(matcher: str) -> str:
+    """A hook matcher that matches every tool or source ("*", ".*", empty) reaches more than a named one."""
+    return "all" if matcher.strip() in {"", "*", ".*", ".+", "*.*"} else "some"
+
+
 # Real local skill files showed four more harmless groups (VS Code / Copilot, Codex, Kimi and Claude skill copies):
 # placeholder links ("github.com/owner/repo"), tool names inside a match pattern ("curl|wget|nc" in a hook that
 # blocks them), location variables read as "credentials" ($env:APPDATA), and Markdown tables describing rules.
@@ -241,7 +295,18 @@ LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDAT
 # node_modules folder). The folder itself is reported once, as shipped third-party code; its contents are not listed.
 VENDORED = re.compile(r"^(.*?(?:^|/)(?:node_modules|bower_components|site-packages|vendor|third_party|\.venv|venv))/")
 # Placeholder hosts in examples: "my-vault.vault.azure.net", "your-resource.openai.azure.com", "x.example.workers.dev".
-PLACEHOLDER_HOST = re.compile(r"^(?:my|your)[-_]|(?:^|\.)example(?:\.|$)|\.(?:internal|lan|home\.arpa)$", re.I)
+PLACEHOLDER_HOST = re.compile(r"^(?:my|your)[-_]|(?:^|\.)example(?:\.|$)|\.(?:internal|lan|home\.arpa)$"
+                              # held-out 3: api.ourapp.com, jira.internal.company.com, target.com, provider.com,
+                              # third-party.com, sandbox-api.external-system.com in reference code
+                              r"|(?:^|\.)(?:company|yourcompany|mycompany|ourcompany|ourapp|myapp|yourapp|yourdomain|mydomain|"
+                              r"acme|acmecorp|contoso|fabrikam|third-party|external-system|external-service|other-service|provider|"
+                              r"target|victim|attacker|evil|somehost|somedomain)\.(?:com|net|org|io|dev|app)$|\.internal\.", re.I)
+# Addresses in sample data: {"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"} describes a log record.
+IP_DATA_KEY = re.compile(r"[\"']?\w*(?:src|source|dst|dest|destination|remote|client|user|peer|origin|caller)_?(?:ip|addr|address)[\"']?\s*[:=]\s*[\"']?$", re.I)
+# A Content-Security-Policy lists hosts a browser may load from; nothing is fetched by the skill.
+CSP_LINE = re.compile(r"\b(?:default|script|style|font|img|connect|frame|media|object|worker|manifest)-src\b", re.I)
+# A link template with a [placeholder] segment anywhere: https://npmjs.com/package/[name], github.com/[org]/[repo].
+BRACKET_SEGMENT = re.compile(r"^/[^\s\"'`)>]*\[[A-Za-z_ -]+\]")
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")  # a Markdown table row starts and ends with |; a pipe continuation does not
 WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
 
@@ -289,11 +354,16 @@ class Manifest:
     capabilities: dict[str, dict[str, list[str]]] = field(default_factory=lambda: {c: {} for c in CATEGORIES})
     decode_trail: list[dict[str, str]] = field(default_factory=list)
     files: int = 0
+    scopes: dict[str, set[str]] = field(default_factory=dict)  # "category|value" -> reach seen (see SCOPE_RANK)
 
     def add(self, category: str, value: str, location: str) -> None:
         locations = self.capabilities[category].setdefault(value, [])
         if location not in locations and len(locations) < 20:
             locations.append(location)
+
+    def scope(self, category: str, value: str, scope: str | None) -> None:
+        if scope and value in self.capabilities[category]:
+            self.scopes.setdefault(f"{category}|{value}", set()).add(scope)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -301,6 +371,7 @@ class Manifest:
             "method": "decode_then_extract_facts",
             "files": self.files,
             "capabilities": {c: {v: sorted(locs) for v, locs in sorted(values.items())} for c, values in self.capabilities.items()},
+            "scopes": {key: sorted(values) for key, values in sorted(self.scopes.items())},
             "decode_trail": self.decode_trail[:200],
             "limitations": (
                 "Facts from static text after reversing common hiding techniques. Content that is fetched at run time, "
@@ -480,6 +551,13 @@ def _active_lines(path: str, text: str) -> list[tuple[int, str, bool]]:
     return rows
 
 
+def _add_delete_scope(manifest: Manifest, line: str) -> None:
+    scope = delete_scope(line)
+    if scope:
+        for name in ("rm -rf", "Remove-Item -Recurse"):
+            manifest.scope("destructive_operations", name, scope)
+
+
 def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, str]], line: str, location: str) -> None:
     for name, pattern in patterns:
         if re.search(pattern, line, re.I if category != "agent_config_writes" else 0):
@@ -489,7 +567,7 @@ def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, 
 def _reveals_capability(text: str) -> bool:
     if URL.search(text) or INSTALL.search(text) or ENV_READ.search(text):
         return True
-    groups = (NETWORK_CLIENTS, PROCESS_EXEC, PERSISTENCE, CREDENTIALS, DESTRUCTIVE, AGENT_CONFIG, AGENT_SPAWNING)
+    groups = (NETWORK_CLIENTS, PROCESS_EXEC, PERSISTENCE, SHELL_RC, CREDENTIALS, DESTRUCTIVE, AGENT_CONFIG, AGENT_SPAWNING)
     return any(re.search(pattern, text, re.I) for group in groups for _, pattern in group)
 
 
@@ -587,7 +665,7 @@ METADATA_ADDRESSES = {"169.254.169.254", "fd00:ec2::254", "100.100.100.200"}
 HOOK_COMMAND_KEYS = ("command", "bash", "powershell", "windows", "linux", "osx", "cmd")
 SCRIPT_TOKEN = re.compile(r"([\w.-]+\.(?:sh|bash|ps1|psm1|cmd|bat|py|js|mjs|cjs|ts|rb|pl))\b", re.I)
 INTERPRETERS = {"bash", "sh", "zsh", "node", "python", "python3", "pwsh", "powershell", "&", "uv", "run", "uvx", "exec", "cmd", "/c"}
-HOOK_TEXT_GROUPS = (("network_clients", NETWORK_CLIENTS), ("process_execution", PROCESS_EXEC), ("persistence", PERSISTENCE),
+HOOK_TEXT_GROUPS = (("network_clients", NETWORK_CLIENTS), ("process_execution", PROCESS_EXEC), ("persistence", PERSISTENCE + SHELL_RC),
                     ("credential_access", CREDENTIALS), ("destructive_operations", DESTRUCTIVE), ("agent_spawning", AGENT_SPAWNING))
 
 
@@ -674,12 +752,14 @@ def _add_hooks(manifest: Manifest, path: str, suffix: str, text: str) -> None:
         # hook, not a new one (seen in obra/superpowers history). Known limit: a narrow-to-wide matcher change
         # ("Bash" -> ".*") is therefore not reported either; that belongs to the scope work in P5.
         manifest.add("hooks", f"{event} {kind}: {target}", location)
+        manifest.scope("hooks", f"{event} {kind}: {target}", matcher_scope(matcher))
         for value in [command, str(handler.get("url", ""))]:
             if not value:
                 continue
             # The hook's own command line runs unattended, so it is read as code.
             for category, patterns in HOOK_TEXT_GROUPS:
                 _scan_patterns(manifest, category, patterns, value, location)
+            _add_delete_scope(manifest, value)
             for host in URL.finditer(value):
                 name = host.group(1).lower()
                 if not NOT_EXTERNAL.match(name) and not PLACEHOLDER_HOST.search(name):
@@ -752,7 +832,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     host = match.group(1).lower().strip("[]")
                     if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                         continue
-                    if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES):
+                    if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES) or CSP_LINE.search(line):
                         continue
                     if not is_code and not _prose_cue(line, match.start()):
                         continue
@@ -761,6 +841,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     if host.endswith("."):
                         continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
                     rest = line[match.end():]
+                    if BRACKET_SEGMENT.match(rest):
+                        continue
                     if PLACEHOLDER_PATH.match(rest) and not (suffix in SCRIPT_SUFFIXES and re.match(r"^/(?:\{|\$\{)", rest)):
                         continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
                     manifest.add("network_hosts", host, location)
@@ -769,6 +851,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         ip = ip_match.group(0)
                         if re.match(r"/\d{1,2}\b", line[ip_match.end():]):
                             continue  # "3.40.9.80/28" is an address range (an allowlist entry), not a target
+                        if IP_DATA_KEY.search(line[: ip_match.start()]) or CSP_LINE.search(line):
+                            continue  # a field of a sample log record, or a browser allowlist
                         if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
                             manifest.add("network_hosts", ip, location)
             if not is_code:
@@ -778,7 +862,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 # of tools are common and harmless.
                 if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
                     _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
-                    _scan_patterns(manifest, "persistence", PERSISTENCE, line, location)
+                    _scan_patterns(manifest, "persistence", PERSISTENCE + SHELL_RC, line, location)
                 continue
             command_line = all_spans = line
             if inline_row:
@@ -794,8 +878,11 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 if re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I):
                     manifest.add("process_execution", name, location)
             _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
+            if WRITE_CUE.search(command_line):
+                _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
             _scan_patterns(manifest, "credential_access", CREDENTIALS, command_line, location)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
+            _add_delete_scope(manifest, command_line)
             _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)
             window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
             if WRITE_CUE.search(window) and not TABLE_ROW.match(full_line):
@@ -868,6 +955,36 @@ def _hook_additions(before: dict[str, list[str]], after: dict[str, list[str]], g
     return kept, sorted(repointed)
 
 
+def _widest(scopes: list[str]) -> str:
+    return max(scopes, key=lambda scope: SCOPE_RANK.get(scope, 0))
+
+
+def _widenings(old: dict[str, Any], new: dict[str, Any], added: dict[str, dict[str, list[str]]]) -> list[dict[str, Any]]:
+    """Facts both versions have whose reach grew: rm -rf from a temp folder to the home folder, a hook from named
+    tools to every tool, an allowed tool from `Bash(git:*)` to `Bash`. A manifest written before scopes were
+    recorded has no "scopes" key; then reach is unknown, not narrow, and nothing is reported."""
+    found = []
+    old_scopes, new_scopes = old.get("scopes"), new.get("scopes") or {}
+    if old_scopes is not None:
+        for key, scopes in sorted(new_scopes.items()):
+            before = old_scopes.get(key)
+            category, value = key.split("|", 1)
+            if not before or value in added.get(category, {}):
+                continue
+            wide, was = _widest(scopes), _widest(before)
+            if SCOPE_RANK.get(wide, 0) > SCOPE_RANK.get(was, 0):
+                found.append({"category": category, "value": value, "before": was, "after": wide,
+                              "locations": new["capabilities"].get(category, {}).get(value, [])[:5]})
+    before_tools = old["capabilities"].get("declared_tools", {})
+    after_tools = new["capabilities"].get("declared_tools", {})
+    for tool, locations in sorted(added.get("declared_tools", {}).items()):
+        narrower = sorted(t for t in before_tools if t.startswith(tool + "(") and t not in after_tools)
+        if "(" not in tool and narrower:
+            found.append({"category": "declared_tools", "value": tool, "before": ", ".join(narrower), "after": "all uses",
+                          "locations": locations[:5]})
+    return found
+
+
 def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Capabilities the new version has that the old one did not (and the reverse)."""
     added: dict[str, dict[str, list[str]]] = {}
@@ -883,6 +1000,7 @@ def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
             added[category] = gained
         if lost:
             removed[category] = lost
+    widened = _widenings(old, new, added)
     sources: dict[str, dict[str, list[str]]] = {}
     by_source = {"instructions": 0, "shipped": 0, "test": 0}
     for category, values in added.items():
@@ -893,12 +1011,15 @@ def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
             by_source[next(k for k in ("shipped", "instructions", "test") if k in kinds)] += 1
     return {
         "method": "capability_manifest_diff",
-        "status": "new_capabilities" if added else "no_new_capabilities",
+        "status": "new_capabilities" if added or widened else "no_new_capabilities",
         "added": added,
         "added_sources": sources,
         "added_by_source": by_source,
         "removed": removed,
         "hooks_repointed": repointed,
+        "widened": widened,
+        "added_scopes": {key: _widest(values) for key, values in (new.get("scopes") or {}).items()
+                         if key.split("|", 1)[1] in added.get(key.split("|", 1)[0], {})},
         "new_categories": sorted(c for c in added if not old["capabilities"].get(c)),
         "limitations": "Compares extracted facts, not code. A capability that both versions mention is not reported even if how it is used changed.",
     }

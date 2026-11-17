@@ -477,3 +477,65 @@ def test_hooks_a_ported_script_is_a_change_but_a_second_handler_or_new_event_is_
     assert set(diff_manifests(old, second)["added"]["hooks"]) == {"SessionStart command: setup-shims.sh"}
     new_event = _hooks_pkg({"SessionStart": ["track.js"], "PostToolUse": ["track.js"], "UserPromptSubmit": ["track.js"]})
     assert set(diff_manifests(old, new_event)["added"]["hooks"]) == {"UserPromptSubmit command: track.js"}
+
+
+def test_delete_scope_ranks_what_a_recursive_delete_reaches():
+    from skillproof.capabilities import delete_scope
+    cases = {
+        "rm -rf /tmp/x": "temp", "rm -rf build dist": "temp", "rm -rf node_modules 2>/dev/null || true": "temp",
+        "rm -rf ./out/report": "path", "rm -rf .": "cwd", 'rm -rf "$DIR"': "variable", "rm -rf ~": "home",
+        "rm -rf $HOME/": "home", "rm -rf /": "root", "sudo rm -rf /usr/*": "root", "rm -f file.txt": None,
+        "Remove-Item -Recurse -Force $env:USERPROFILE": "home", "Remove-Item C:/proj/x -Recurse": "path",
+    }
+    assert {text: delete_scope(text) for text in cases} == cases
+
+
+def test_reach_growth_is_reported_even_when_the_fact_is_not_new():
+    enc = lambda files: build_manifest({k: v.encode() for k, v in files.items()})
+    old = enc({"SKILL.md": "# s\n", "clean.sh": "rm -rf /tmp/skill-cache\n"})
+    new = enc({"SKILL.md": "# s\n", "clean.sh": "rm -rf /tmp/skill-cache\nrm -rf ~\n"})
+    diff = diff_manifests(old, new)
+    assert diff["added"] == {} and diff["status"] == "new_capabilities"
+    assert [(w["value"], w["before"], w["after"]) for w in diff["widened"]] == [("rm -rf", "temp", "home")]
+    # A manifest written before reach was recorded has no "scopes": unknown, so nothing is claimed.
+    old.pop("scopes")
+    assert diff_manifests(old, new)["widened"] == []
+
+
+def test_hook_matcher_widening_and_tool_unscoping_are_widenings():
+    enc = lambda files: build_manifest({k: v.encode() for k, v in files.items()})
+    hook = '{"hooks": {"PreToolUse": [{"matcher": "%s", "hooks": [{"type": "command", "command": "./hooks/check.sh"}]}]}}'
+    diff = diff_manifests(enc({"SKILL.md": "# s\n", "hooks/hooks.json": hook % "Bash"}),
+                          enc({"SKILL.md": "# s\n", "hooks/hooks.json": hook % "*"}))
+    assert diff["added"] == {} and [(w["category"], w["before"], w["after"]) for w in diff["widened"]] == [("hooks", "some", "all")]
+    skill = lambda tools: f"---\nname: x\ndescription: y\nallowed-tools: {tools}\n---\n# x\n"
+    tools = diff_manifests(enc({"SKILL.md": skill("Read Bash(git:*)")}), enc({"SKILL.md": skill("Read Bash")}))
+    assert [(w["value"], w["before"], w["after"]) for w in tools["widened"]] == [("Bash", "Bash(git:*)", "all uses")]
+
+
+def test_heldout3_false_groups_are_gone_and_real_facts_stay():
+    doc = lambda body: build_manifest({"SKILL.md": b"# s\n", "references/r.md": body.encode()})["capabilities"]
+    hosts = doc("```bash\ncurl -f https://api.ourapp.com/health\ncurl https://jira.internal.company.com/rest\n"
+                "sqlmap -u \"http://target.com/search?q=1\"\ncurl https://api.datadog.com/api/v1/query\n```\n")["network_hosts"]
+    assert set(hosts) == {"api.datadog.com"}
+    templates = doc("Fetch the docs:\n```\nhttps://github.com/[org]/[repo]\nhttps://npmjs.com/package/[name]\n```\n")["network_hosts"]
+    assert templates == {}
+    csp = doc("```php\n\"style-src 'self' https://fonts.googleapis.com; \" .\n```\n")["network_hosts"]
+    assert csp == {}
+    sample = build_manifest({"SKILL.md": b"# s\n", "t.py": b'EVENTS = [{"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"}]\nHOST = "10.0.0.5"\n'})
+    assert set(sample["capabilities"]["network_hosts"]) == {"10.0.0.5"}
+
+
+def test_startup_file_needs_a_path_and_a_write():
+    code = lambda body: build_manifest({"SKILL.md": b"# s\n", "x.md": body.encode()})["capabilities"]["persistence"]
+    assert code("```kotlin\nval n = user?.profile?.name ?: \"A\"\n```\n") == {}
+    assert code("```python\nprofiler = cProfile.Profile()\nprofiler.enable()\n```\n") == {}
+    assert code("```bash\nsource ~/.bashrc\ncat ~/.bashrc | grep KEY\n```\n") == {}
+    assert "shell rc" in code("```bash\necho 'export PATH=$PATH:~/bin' >> ~/.bashrc\n```\n")
+
+
+def test_placeholder_packages_and_patched_environment_are_not_facts():
+    caps = build_manifest({"SKILL.md": b"# s\n```bash\nnpm install x\nnpm install -g package@fixed-version\npip install /wheels/*\nnpm install zod\n```\n",
+                           "tests/test_a.py": b"from unittest import mock\nimport os\nwith mock.patch.dict(os.environ, {'A': '1'}, clear=True):\n    pass\n"})["capabilities"]
+    assert set(caps["package_installs"]) == {"npm:zod"}
+    assert "env:<all>" not in caps["credential_access"]

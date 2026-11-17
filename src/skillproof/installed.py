@@ -159,6 +159,7 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         "added_by_source": diff["added_by_source"],
         "removed": diff["removed"],
         "hooks_repointed": diff.get("hooks_repointed", []),
+        "widened": [{k: w[k] for k in ("category", "value", "before", "after")} for w in diff.get("widened", [])],
         "not_scanned": new["manifest"].get("not_scanned", []),
     }
     ranked = triage(diff, new_manifest=new["manifest"])
@@ -171,6 +172,7 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         # report it as re-baselined, list the differences as unverified, and do not raise an alert.
         change["status"] = "extractor_upgraded"
         change["unverified_added"], change["added"] = change["added"], {}
+        change["unverified_widened"], change["widened"] = change["widened"], []
         change["triage"] = {"decision": "none", "counts": {}, "combinations": [], "top": [], "note": "extractor upgraded; not ranked"}
     return change
 

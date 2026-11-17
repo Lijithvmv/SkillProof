@@ -13,6 +13,9 @@ twenty facts at once (packages, hosts, tools), and most are routine. Triage turn
 3. **Rarity.** How often the same fact was added across real public skill updates (base rates shipped with the
    package). Something added in 1 of 10,000 updates is worth a closer look than something added in 800.
 4. **Place.** A fact found only in test files is capped at ``note``.
+5. **Reach.** ``rm -rf`` on a build folder is routine (note); on the home folder or the filesystem root it is
+   ``block``. A fact both versions have whose reach grew (temp folder -> home folder, a hook on named tools -> every
+   tool, ``Bash(git:*)`` -> ``Bash``) is reported as a widening with its own level.
 
 Nothing here is a verdict on intent; ``block`` means "do not apply this update without reading these lines".
 """
@@ -44,6 +47,9 @@ EVERY_TURN_EVENTS = re.compile(r"^(?:UserPromptSubmit|PreToolUse|PostToolUse|pos
 UNPINNED_RUNNER = re.compile(r"^(?:npx|bunx|pnpm dlx|uvx):(?:.*@latest|[^@]+)$")
 SOURCE_INSTALL = re.compile(r"^[\w ]+:(?:https?://|git\+|github:)")
 NETWORK = ("network_hosts", "network_clients")
+REACH_WORDS = {"temp": "a temporary or build folder", "path": "a named path", "cwd": "the whole working folder",
+               "variable": "a path held in a variable (an empty variable can widen it)", "home": "the home folder",
+               "root": "the filesystem root or a system folder", "some": "named tools or sources", "all": "every tool or source"}
 EXECUTION_SHAPES = {"pipe-to-shell", "shell -c", "eval", "exec", "powershell", "cmd /c"}
 
 
@@ -86,6 +92,29 @@ def _base_level(category: str, value: str) -> tuple[str, str]:
     if category in ASK_CATEGORIES:
         return "ask", category.replace("_", " ")
     return "note", category.replace("_", " ")
+
+
+def _reach_level(category: str, value: str, level: str, reason: str, scope: str | None) -> tuple[str, str]:
+    """Adjust a fact's level by how far it reaches, when the extractor recorded that."""
+    if not scope:
+        return level, reason
+    if category == "destructive_operations":
+        if scope in {"home", "root"}:
+            return "block", f"recursive delete of {REACH_WORDS[scope]}"
+        if scope == "temp" and level == "ask":
+            return "note", f"recursive delete of {REACH_WORDS[scope]}"
+        return level, f"recursive delete of {REACH_WORDS[scope]}"
+    if category == "hooks" and scope == "all":
+        return level, reason + ", for every tool or source"
+    return level, reason
+
+
+def _widening_item(widening: dict[str, Any]) -> tuple[str, str]:
+    category, after = widening["category"], widening["after"]
+    if category == "declared_tools":
+        return "ask", f"pre-approval widened from {widening['before']} to every use of {widening['value']}"
+    level = "block" if category == "destructive_operations" and after in {"home", "root"} else "ask"
+    return level, f"reach grew from {REACH_WORDS.get(widening['before'], widening['before'])} to {REACH_WORDS.get(after, after)}"
 
 
 def _file(location: str) -> str:
@@ -164,27 +193,35 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
             if LEVELS[combo["level"]] > LEVELS[combo_level.get(key, "note")]:
                 combo_level[key] = combo["level"]
     items = []
-    for category, values in added.items():
-        for value, locations in values.items():
-            level, reason = _base_level(category, value)
-            reasons = [reason]
-            paired = combo_level.get((category, value))
-            if paired and LEVELS[paired] > LEVELS[level]:
-                level = paired
-                reasons.append("part of a dangerous combination (see combinations)")
-            kinds = sources.get(category, {}).get(value, [])
-            if kinds == ["test"]:
-                level = "note"
-                reasons.append("only in test files")
-            seen = rates.get("values", {}).get(f"{category}|{value}")
-            rarity_bits = None
-            if total:
-                count = int(seen or 0)
-                rarity_bits = round(-math.log2((count + 1) / (total + 2)), 1)
-                reasons.append(f"added in {count} of {total:,} real public skill updates" if count else f"never added in {total:,} real public skill updates")
-            score = LEVELS[level] * 100 + (rarity_bits or 0)
-            items.append({"category": category, "value": value, "level": level, "score": round(score, 1),
-                          "rarity_bits": rarity_bits, "reasons": reasons, "locations": locations[:5]})
+    scopes: dict[str, str] = diff.get("added_scopes", {}) or {}
+    entries = [(category, value, locations, None) for category, values in added.items() for value, locations in values.items()]
+    entries += [(w["category"], w["value"], w.get("locations", []), w) for w in diff.get("widened", []) or []]
+    for category, value, locations, widening in entries:
+        if widening:
+            level, reason = _widening_item(widening)
+        else:
+            level, reason = _reach_level(category, value, *_base_level(category, value), scopes.get(f"{category}|{value}"))
+        reasons = [reason]
+        paired = combo_level.get((category, value))
+        if paired and LEVELS[paired] > LEVELS[level]:
+            level = paired
+            reasons.append("part of a dangerous combination (see combinations)")
+        kinds = sources.get(category, {}).get(value, [])
+        if kinds == ["test"]:
+            level = "note"
+            reasons.append("only in test files")
+        seen = rates.get("values", {}).get(f"{category}|{value}")
+        rarity_bits = None
+        if total and not widening:
+            count = int(seen or 0)
+            rarity_bits = round(-math.log2((count + 1) / (total + 2)), 1)
+            reasons.append(f"added in {count} of {total:,} real public skill updates" if count else f"never added in {total:,} real public skill updates")
+        score = LEVELS[level] * 100 + (rarity_bits or 0)
+        item = {"category": category, "value": value, "level": level, "score": round(score, 1),
+                "rarity_bits": rarity_bits, "reasons": reasons, "locations": locations[:5]}
+        if widening:
+            item["widened"] = {"before": widening["before"], "after": widening["after"]}
+        items.append(item)
     items.sort(key=lambda item: (-item["score"], item["category"], item["value"]))
     decision = max((item["level"] for item in items), key=LEVELS.get, default="none")
     counts = {level: sum(item["level"] == level for item in items) for level in LEVELS}

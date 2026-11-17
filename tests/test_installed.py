@@ -170,3 +170,14 @@ def test_a_hook_script_outside_the_hooks_folder_is_scanned_but_nothing_outside_t
     (tmp_path / "outside.sh").write_text("rm -rf ~/\n", encoding="utf-8")
     caps = _plugin_snapshot(plugin)["manifest"]["capabilities"]
     assert "metrics.vendor.dev" in caps["network_hosts"] and not caps["destructive_operations"]
+
+
+def test_a_widening_reaches_the_watch_report(tmp_path):
+    from skillproof.installed import _change
+    from skillproof.capabilities import build_manifest
+    enc = lambda files: build_manifest({k: v.encode() for k, v in files.items()})
+    old = {"name": "s", "path": "a", "manifest": enc({"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/x\n"})}
+    new = {"name": "s", "path": "b", "manifest": enc({"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/x\nrm -rf ~/*\n"})}
+    change = _change(old, new, "since_last_scan")
+    assert change["status"] == "new_capabilities" and change["widened"][0]["after"] == "home"
+    assert change["triage"]["decision"] == "block"

@@ -114,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--state", default=str(Path.home() / ".skillproof" / "installed-state.json"), help="Local state file (manifests of the last scan, not skill contents).")
     watch.add_argument("--output", default="-")
 
+    feed = commands.add_parser("catalogue-import", help="Register the skills installed on this machine in the catalogue. Unchanged skills are skipped; a changed skill becomes a new version ranked block / ask / note against the one before. Exit 1 when an update has a block-level addition.")
+    feed.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
+    feed.add_argument("--tenant", default="local", help="Catalogue tenant to register into (the API's local development tenant is 'local').")
+    feed.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
+    feed.add_argument("--output", default="-")
+
     inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
     inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
     inventory_cmd.add_argument("--overlap-threshold", type=float, default=0.3)
@@ -214,6 +220,23 @@ def main(argv: list[str] | None = None) -> int:
             result = scan_installed(roots, args.state)
             exit_code = 1 if result["changes_adding_capabilities"] else 0
         except (OSError, ValueError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "catalogue-import":
+        try:
+
+            roots = [Path(r) for r in args.root] or default_roots()
+            if not roots:
+                raise ValueError("No skill folders found; pass --root.")
+            data = Path(args.data_dir)
+            governance = _catalogue_governance(data)
+            principal = _import_principal(args.tenant)
+            try:
+                result = _import_installed(governance, principal, roots)
+            finally:
+                governance.registry.close()
+                governance.approvals.close()
+            exit_code = 1 if result["updates_with_block"] else 0
+        except (OSError, ValueError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "inventory":
         try:
@@ -344,6 +367,31 @@ def main(argv: list[str] | None = None) -> int:
             result, exit_code = {"error": str(exc)}, 4
     _write_json(result, args.output)
     return exit_code
+
+
+
+
+def _catalogue_governance(data: Path):
+    from skillproof.approvals import SQLiteApprovalStore
+    from skillproof.authorization import GovernanceAccess
+    from skillproof.history import EvaluationHistoryStore as HistoryStore
+    from skillproof.registry import SQLiteSkillRegistry
+
+    return GovernanceAccess(registry=SQLiteSkillRegistry(data / "registry.db"),
+                            approvals=SQLiteApprovalStore(data / "approvals.db"),
+                            history=HistoryStore(data / "history.db"))
+
+
+def _import_principal(tenant: str):
+    from skillproof.authorization import Principal
+
+    return Principal(user_id="installed-skill-import", tenant_id=tenant, role="evaluator")
+
+
+def _import_installed(governance, principal, roots):
+    from skillproof.catalogue_import import import_installed
+
+    return import_installed(governance, principal, roots)
 
 
 if __name__ == "__main__":

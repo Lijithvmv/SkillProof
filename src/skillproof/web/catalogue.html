@@ -84,7 +84,13 @@ ol.events li { margin: 2px 0; }
       <p class="row"><button type="submit">Upload and compare</button></p>
     </form>
     <div id="uploadMsg"></div>
-    <h2 style="margin-top:18px">Skills</h2>
+    <h2 style="margin-top:18px">Skills <span class="muted" id="count"></span></h2>
+    <div class="row" style="margin-bottom:10px">
+      <input type="text" id="filter" placeholder="Search skills" aria-label="Search skills" style="flex:1;min-width:120px">
+      <select id="level" aria-label="Filter by level">
+        <option value="">All levels</option><option value="block">Block</option><option value="ask">Ask or worse</option><option value="waiting">Waiting for a decision</option>
+      </select>
+    </div>
     <div id="skills"><div class="empty">Loading…</div></div>
   </section>
   <section class="panel" id="detail"><div class="empty">Pick a version to see what it adds and to approve or promote it.</div></section>
@@ -143,8 +149,21 @@ async function renderSkills() {
   const box = document.getElementById("skills");
   try {
     const data = await api("/api/v1/registry/catalogue");
-    if (!data.skills.length) { box.innerHTML = `<div class="empty">No skills yet. Upload a skill ZIP to start.</div>`; return; }
-    box.innerHTML = data.skills.map(skill => {
+    if (!data.skills.length) { box.innerHTML = `<div class="empty">No skills yet. Upload a skill ZIP or run skillproof catalogue-import.</div>`; return; }
+    const query = document.getElementById("filter").value.trim().toLowerCase();
+    const level = document.getElementById("level").value;
+    const rank = { block: 3, ask: 2, note: 1, none: 0 };
+    const shown = data.skills.filter(skill => {
+      if (query && !skill.skill_name.toLowerCase().includes(query)) return false;
+      const all = (skill.active ? [skill.active] : []).concat(skill.waiting);
+      if (level === "block") return all.some(v => v.capability_decision === "block");
+      if (level === "ask") return all.some(v => (rank[v.capability_decision] || 0) >= 2);
+      if (level === "waiting") return skill.waiting.length > 0;
+      return true;
+    });
+    document.getElementById("count").textContent = shown.length === data.skills.length ? `(${data.skills.length})` : `(${shown.length} of ${data.skills.length})`;
+    if (!shown.length) { box.innerHTML = `<div class="empty">No skill matches.</div>`; return; }
+    box.innerHTML = shown.map(skill => {
       const rows = [];
       if (skill.active) rows.push(verRow(skill.active, "active"));
       skill.waiting.forEach(v => rows.push(verRow(v, v.state)));
@@ -166,6 +185,7 @@ async function select(id) {
   document.querySelectorAll(".ver").forEach(el => el.classList.toggle("sel", el.dataset.id === id));
   const box = document.getElementById("detail");
   box.innerHTML = `<div class="empty">Loading…</div>`;
+  if (window.matchMedia("(max-width: 820px)").matches) box.scrollIntoView({ block: "start" });
   try {
     const [v, approvals] = await Promise.all([api(`/api/v1/registry/versions/${encodeURIComponent(id)}`),
       api(`/api/v1/registry/versions/${encodeURIComponent(id)}/approval-requests`).catch(() => ({ requests: [] }))]);
@@ -178,7 +198,8 @@ function detailHtml(v, requests) {
   const change = v.capability_change;
   const against = change ? { nothing_active: "nothing active yet, so every capability counts as added",
     active_version: `the active version ${short(change.against_version_id)}`,
-    active_version_without_manifest: "an active version that has no capability manifest" }[change.against] : "";
+    active_version_without_manifest: "an active version that has no capability manifest",
+    previous_version_not_approved: `the previous version ${short(change.against_version_id)} (nothing approved yet)` }[change.against] : "";
   const items = change ? change.items : [];
   const gates = (v.assurance && v.assurance.gates) || [];
   const s = v.summary || {};
@@ -251,6 +272,9 @@ document.getElementById("upload").onsubmit = async event => {
     select(result.version.version_id);
   } catch (e) { out.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
 };
+
+document.getElementById("filter").oninput = () => renderSkills();
+document.getElementById("level").onchange = () => renderSkills();
 
 async function refresh() { await renderWho(); await renderSkills(); if (state.selected) select(state.selected); }
 refresh();

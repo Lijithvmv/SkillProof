@@ -129,7 +129,7 @@ class SQLiteSkillRegistry:
                     return self._decode(existing)
                 change = None
                 if capability_manifest is not None:
-                    change = self._change(tenant_id, name, capability_manifest)
+                    change = self._change(tenant_id, name, capability_manifest, fallback_previous=True)
                     summary["capability_decision"] = change["decision"]
                     summary["capability_counts"] = change["counts"]
                 self._connection.execute(
@@ -207,13 +207,26 @@ class SQLiteSkillRegistry:
                 raise
         return self.get_version(tenant_id, version_id)
 
-    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
-        """What this manifest adds over the tenant's active version of the skill, ranked by triage."""
+    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False) -> dict[str, Any]:
+        """What this manifest adds over the tenant's active version of the skill, ranked by triage.
+
+        With nothing active, registration (fallback_previous) compares with the latest registered version instead, so
+        an update to a skill nobody has approved yet still shows what the update itself added. Promotion never uses
+        the fallback: with nothing approved, everything the version can do is new to the approved set."""
         active = self._connection.execute(
             "SELECT version_id, capabilities_json FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'",
             (tenant_id, skill_name),
         ).fetchone()
-        if active is None:
+        previous = None
+        if active is None and fallback_previous:
+            previous = self._connection.execute(
+                "SELECT version_id, capabilities_json FROM skill_versions WHERE tenant_id=? AND skill_name=? "
+                "AND capabilities_json IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (tenant_id, skill_name),
+            ).fetchone()
+        if previous is not None:
+            against, against_id, old = "previous_version_not_approved", previous["version_id"], json.loads(previous["capabilities_json"])
+        elif active is None:
             against, against_id, old = "nothing_active", None, EMPTY_MANIFEST
         elif not active["capabilities_json"]:
             against, against_id, old = "active_version_without_manifest", active["version_id"], EMPTY_MANIFEST

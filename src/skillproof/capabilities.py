@@ -23,6 +23,7 @@ import ast
 import base64
 import binascii
 import ipaddress
+import json
 import re
 import stat
 import unicodedata
@@ -36,7 +37,7 @@ from typing import Any
 
 from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, MAX_TOTAL_SIZE, PackageError
 
-MANIFEST_VERSION = "0.2.0"  # 0.2.0: agent_spawning category; secret-only env reads; vendored folders as one item
+MANIFEST_VERSION = "0.3.0"  # 0.3.0: hooks category; 0.2.0: agent_spawning, secret-only env reads, vendored folders
 
 SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".psm1", ".rb", ".pl", ".bat", ".cmd", ".php", ".lua", ".go"}
 BINARY_SUFFIXES = {".exe", ".dll", ".so", ".dylib", ".bin", ".elf", ".msi", ".app", ".jar", ".class", ".pyc", ".node", ".wasm"}
@@ -247,7 +248,7 @@ WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|
 CATEGORIES = (
     "network_hosts", "network_clients", "process_execution", "agent_config_writes", "persistence",
     "credential_access", "package_installs", "destructive_operations", "bundled_binaries", "hiding_techniques",
-    "declared_tools", "agent_spawning",
+    "declared_tools", "agent_spawning", "hooks",
 )
 FRONTMATTER = re.compile(r"\A﻿?---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
 TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*(?:\([^)]*\))?")
@@ -573,6 +574,121 @@ DOC_NETS = [ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24",
 METADATA_ADDRESSES = {"169.254.169.254", "fd00:ec2::254", "100.100.100.200"}
 
 
+# --------------------------------------------------------------------------------------------- hooks
+#
+# A hook is code the agent runs by itself on an event (session start, before every tool call, on every prompt),
+# with no instruction and no approval step at the moment it runs. An update that registers a new hook gains
+# something no skill text can: it acts on every session whether or not the skill is used. Hooks live in
+# hooks.json files (Claude Code plugins nest handlers under matcher groups; GitHub Copilot puts handlers with
+# `bash`/`powershell` keys directly under the event), in `.claude/settings.json`, in plugin.json, and in
+# Markdown frontmatter. The parser goes by structure, not file name, so a renamed file (claude-hooks.json) is read.
+# Mechanism from the NVIDIA SkillEvaluator study (2026-11-17); written here from the file formats, no code taken.
+
+HOOK_COMMAND_KEYS = ("command", "bash", "powershell", "windows", "linux", "osx", "cmd")
+SCRIPT_TOKEN = re.compile(r"([\w.-]+\.(?:sh|bash|ps1|psm1|cmd|bat|py|js|mjs|cjs|ts|rb|pl))\b", re.I)
+INTERPRETERS = {"bash", "sh", "zsh", "node", "python", "python3", "pwsh", "powershell", "&", "uv", "run", "uvx", "exec", "cmd", "/c"}
+HOOK_TEXT_GROUPS = (("network_clients", NETWORK_CLIENTS), ("process_execution", PROCESS_EXEC), ("persistence", PERSISTENCE),
+                    ("credential_access", CREDENTIALS), ("destructive_operations", DESTRUCTIVE), ("agent_spawning", AGENT_SPAWNING))
+
+
+SHELL_WORDS = {"if", "then", "else", "elif", "fi", "for", "do", "done", "while", "[", "[[", "test", "exit", "true", "false", "case", "esac", "{", "}", "!"}
+RUNNERS = {"npx", "bunx", "uvx", "pipx", "dlx"}
+
+
+def _hook_target(command: str) -> str:
+    """What a command hook runs, stable across rewording: the script's file name, else the program (for a package
+    runner, the package without its version), skipping inline shell guards such as `if [ -f x ]; then exit 0; fi`."""
+    script = SCRIPT_TOKEN.search(command)
+    if script:
+        return script.group(1)
+    for segment in re.split(r";|&&|\|\||\n", command):
+        tokens = [t.strip("\"'`") for t in segment.split()]
+        tokens = [t for t in tokens if t]
+        if not tokens or tokens[0].lower() in SHELL_WORDS:
+            continue
+        for index, token in enumerate(tokens):
+            if token.lower() in INTERPRETERS or token.startswith("-"):
+                continue
+            if token.lower() in RUNNERS or (token.lower() in {"pnpm", "yarn"} and index + 1 < len(tokens) and tokens[index + 1] == "dlx"):
+                package = next((t for t in tokens[index + 1:] if not t.startswith("-") and t != "dlx"), "")
+                return f"{token.lower()} {re.sub(r'(?<=.)@[^/@]*$', '', package)}".strip()
+            return PurePosixPath(token.replace("\\", "/")).name or token
+    return command.strip()[:40]
+
+
+def _hook_handlers(events: Any) -> list[tuple[str, str, dict]]:
+    """(event, matcher, handler) for each handler in a `hooks` object, in either nesting style."""
+    found = []
+    if not isinstance(events, dict):
+        return found
+    for event, groups in events.items():
+        for group in groups if isinstance(groups, list) else [groups]:
+            if not isinstance(group, dict):
+                continue
+            matcher = str(group.get("matcher") or "*")
+            inner = group.get("hooks")
+            for handler in inner if isinstance(inner, list) else [group]:
+                if isinstance(handler, dict):
+                    found.append((str(event), matcher, handler))
+    return found
+
+
+def _add_hooks(manifest: Manifest, path: str, suffix: str, text: str) -> None:
+    events, base_line = None, 1
+    if suffix == ".json" and '"hooks"' in text:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            if "hook" in PurePosixPath(path).name.lower():
+                manifest.add("hooks", f"unreadable hooks file: {path}", path)  # a hooks file nobody can read is a finding
+            return
+        events = data.get("hooks") if isinstance(data, dict) else None
+    elif suffix == ".md":
+        match = FRONTMATTER.match(text)
+        if not match or "hooks" not in match.group(1):
+            return
+        try:
+            data = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            return
+        events = data.get("hooks") if isinstance(data, dict) else None
+        base_line = text.count("\n", 0, text.find("hooks:")) + 1 if "hooks:" in text else 1
+    for event, matcher, handler in _hook_handlers(events):
+        kind = str(handler.get("type") or "command")
+        command = next((str(handler[k]) for k in HOOK_COMMAND_KEYS if handler.get(k)), "")
+        if command and isinstance(handler.get("args"), list):
+            command = " ".join([command, *map(str, handler["args"])])  # {"command": "node", "args": ["hook.mjs"]}
+        if kind == "http" or handler.get("url"):
+            host = URL.search(str(handler.get("url", "")))
+            target = host.group(1).lower() if host else "url"
+        elif kind == "mcp_tool":
+            target = str(handler.get("tool") or handler.get("server") or "tool")
+        elif command:
+            target = _hook_target(command)
+        else:
+            target = kind
+        offset = text.find(command.replace('"', '\\"')[:60]) if command else -1
+        line = text.count("\n", 0, offset) + 1 if offset >= 0 else base_line
+        location = f"{path}:{line}"
+        # The matcher is left out of the identity: widening "startup|resume" to "startup|resume|clear" is the same
+        # hook, not a new one (seen in obra/superpowers history). Known limit: a narrow-to-wide matcher change
+        # ("Bash" -> ".*") is therefore not reported either; that belongs to the scope work in P5.
+        manifest.add("hooks", f"{event} {kind}: {target}", location)
+        for value in [command, str(handler.get("url", ""))]:
+            if not value:
+                continue
+            # The hook's own command line runs unattended, so it is read as code.
+            for category, patterns in HOOK_TEXT_GROUPS:
+                _scan_patterns(manifest, category, patterns, value, location)
+            for host in URL.finditer(value):
+                name = host.group(1).lower()
+                if not NOT_EXTERNAL.match(name) and not PLACEHOLDER_HOST.search(name):
+                    manifest.add("network_hosts", name, location)
+            for install in INSTALL.finditer(value):
+                groups = [g for g in install.groups() if g]
+                manifest.add("package_installs", f"{re.sub(chr(92) + 's+', ' ', groups[0]).lower()}:{groups[-1]}", location)
+
+
 def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
     manifest = Manifest(files=len(files))
     for path in sorted(files):
@@ -595,6 +711,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             tools, key_line = _declared_tools(text)
             for tool in tools:
                 manifest.add("declared_tools", tool, f"SKILL.md:{key_line}")
+        if not TEST_PATH.search(path):
+            _add_hooks(manifest, path, suffix, text)
         trail_start = len(manifest.decode_trail)
         if suffix == ".py":
             text = _mask_python(text)
@@ -726,14 +844,41 @@ def source_kind(location: str) -> str:
     return "shipped"
 
 
+def _hook_additions(before: dict[str, list[str]], after: dict[str, list[str]], gained: dict[str, list[str]]) -> tuple[dict[str, list[str]], list[str]]:
+    """Split new hook values into real additions and re-pointings. A hook is added when an event gains a handler
+    (a new event, a new client's event name, or one more handler on an event); a handler that only switches to
+    another script on an event that already had as many handlers is a change, not a new capability (real plugin
+    histories: 42 of 65 new hook values were .sh <-> .js ports or wrapper swaps). What the new script does is still
+    read, because the script itself is scanned like any other file."""
+    def count(values) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for value in values:
+            key = value.split(":", 1)[0]  # "SessionStart command"
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+    old_counts = count(before)
+    new_counts = count(after)
+    kept, repointed = {}, []
+    for value, locations in gained.items():
+        key = value.split(":", 1)[0]
+        if value.startswith("unreadable hooks file") or new_counts[key] > old_counts.get(key, 0):
+            kept[value] = locations
+        else:
+            repointed.append(value)
+    return kept, sorted(repointed)
+
+
 def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Capabilities the new version has that the old one did not (and the reverse)."""
     added: dict[str, dict[str, list[str]]] = {}
     removed: dict[str, list[str]] = {}
+    repointed: list[str] = []
     for category in CATEGORIES:
         before, after = old["capabilities"].get(category, {}), new["capabilities"].get(category, {})
         gained = {value: locations for value, locations in after.items() if value not in before}
         lost = sorted(value for value in before if value not in after)
+        if category == "hooks":
+            gained, repointed[:] = _hook_additions(before, after, gained)
         if gained:
             added[category] = gained
         if lost:
@@ -753,6 +898,7 @@ def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         "added_sources": sources,
         "added_by_source": by_source,
         "removed": removed,
+        "hooks_repointed": repointed,
         "new_categories": sorted(c for c in added if not old["capabilities"].get(c)),
         "limitations": "Compares extracted facts, not code. A capability that both versions mention is not reported even if how it is used changed.",
     }

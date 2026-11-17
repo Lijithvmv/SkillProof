@@ -161,7 +161,7 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         "hooks_repointed": diff.get("hooks_repointed", []),
         "not_scanned": new["manifest"].get("not_scanned", []),
     }
-    ranked = triage(diff)
+    ranked = triage(diff, new_manifest=new["manifest"])
     change["triage"] = {"decision": ranked["decision"], "counts": ranked["counts"], "combinations": ranked["combinations"],
                         "top": [{k: item[k] for k in ("level", "category", "value", "reasons", "locations")} for item in ranked["items"][:10]]}
     if old["manifest"].get("manifest_version") != new["manifest"].get("manifest_version"):

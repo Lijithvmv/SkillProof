@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             old_manifest = build_manifest(read_package_bytes(args.old))
             new_manifest = build_manifest(read_package_bytes(args.new))
             result = diff_manifests(old_manifest, new_manifest)
-            result["triage"] = triage(result)
+            result["triage"] = triage(result, new_manifest=new_manifest)
             result["new_decode_trail"] = new_manifest["decode_trail"]
             exit_code = 1 if result["status"] == "new_capabilities" else 0
         except (OSError, PackageError) as exc:

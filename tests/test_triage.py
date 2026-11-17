@@ -73,3 +73,12 @@ def test_a_key_sent_to_the_service_it_is_named_after_is_ask_not_exfiltration():
     new = {"SKILL.md": "# s\n", "gen.py": "import os, urllib.request\nk = os.environ.get('OPENROUTER_API_KEY')\nurllib.request.urlopen('https://openrouter.ai/api/v1/images')\n"}
     result = triage(_diff({"SKILL.md": "# s\n"}, new), RATES)
     assert [c["shape"] for c in result["combinations"]] == ["secret to its own service"] and result["decision"] == "ask"
+
+
+def test_the_destination_already_in_the_old_version_still_counts_for_the_own_service_check():
+    from skillproof.capabilities import build_manifest
+    old = {"SKILL.md": "# s\n", "gen.py": "URL = 'https://openrouter.ai/api/v1/models'\n"}
+    new = {"SKILL.md": "# s\n", "gen.py": "import os, urllib.request\nURL = 'https://openrouter.ai/api/v1/models'\nk = os.environ.get('OPENROUTER_API_KEY')\nurllib.request.urlopen(URL)\n"}
+    new_manifest = build_manifest({k: v.encode() for k, v in new.items()})
+    result = triage(_diff(old, new), RATES, new_manifest=new_manifest)
+    assert [c["shape"] for c in result["combinations"]] == ["secret to its own service"]

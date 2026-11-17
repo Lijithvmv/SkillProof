@@ -101,7 +101,7 @@ def _own_service(secret: str, hosts: set[str]) -> bool:
     return bool(words) and any(any(word in host.lower() for word in words) for host in hosts)
 
 
-def _combinations(added: dict[str, dict[str, list[str]]]) -> list[dict[str, Any]]:
+def _combinations(added: dict[str, dict[str, list[str]]], known_hosts: dict[str, set[str]] | None = None) -> list[dict[str, Any]]:
     """Dangerous pairs inside one file: the shape that matters is the pair, not either fact alone."""
     by_file: dict[str, dict[str, set[str]]] = {}
     for category, values in added.items():
@@ -124,7 +124,7 @@ def _combinations(added: dict[str, dict[str, list[str]]]) -> list[dict[str, Any]
         secrets = tagged(facts, "credential_access")
         execution = tagged(facts, "process_execution", only=EXECUTION_SHAPES)
         if secrets and network:
-            hosts = facts.get("network_hosts", set())
+            hosts = facts.get("network_hosts", set()) | (known_hosts or {}).get(path, set())  # incl. hosts the old version had
             if hosts and all(_own_service(secret.split("|", 1)[1], hosts) for secret in secrets):
                 found.append({"file": path, "shape": "secret to its own service", "level": "ask", "facts": secrets + network,
                               "why": "reads a key and calls the service the key is named after (" + ", ".join(sorted(hosts)) + ")"})
@@ -145,14 +145,18 @@ def _combinations(added: dict[str, dict[str, list[str]]]) -> list[dict[str, Any]
     return found
 
 
-def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None) -> dict[str, Any]:
+def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
     """Rank the additions in a diff_manifests() result. Returns the decision (highest level), the ranked items,
     and the dangerous combinations found."""
     rates = base_rates if base_rates is not None else load_base_rates()
     total = max(int(rates.get("updates", 0)), 0)
     added: dict[str, dict[str, list[str]]] = diff.get("added", {})
     sources: dict[str, dict[str, list[str]]] = diff.get("added_sources", {})
-    combos = _combinations(added)
+    known_hosts: dict[str, set[str]] = {}
+    for host, locations in ((new_manifest or {}).get("capabilities", {}).get("network_hosts", {}) or {}).items():
+        for location in locations:
+            known_hosts.setdefault(_file(location), set()).add(host)
+    combos = _combinations(added, known_hosts)
     combo_level: dict[tuple[str, ...], str] = {}
     for combo in combos:
         for fact in combo["facts"]:

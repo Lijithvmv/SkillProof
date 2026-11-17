@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from skillproof.analyzer import analyze_files
-from skillproof.ingestion import PackageError, read_skill_zip
+from skillproof.approvals import ApprovalError, SQLiteApprovalStore
+from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal
+from skillproof.capabilities import build_manifest
+from skillproof.history import EvaluationHistoryStore
+from skillproof.ingestion import PackageError, read_skill_zip, read_skill_zip_bytes
+from skillproof.registry import RegistryError, SQLiteSkillRegistry
 from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
 from skillproof.security import scan_security
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
@@ -99,3 +107,163 @@ async def intelligence(file: UploadFile = File(...)) -> dict[str, Any]:
     except PackageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return analyze_files(files)
+
+
+# ------------------------------------------------------------------------------------------- skill registry
+# The catalogue: upload a skill version, see what it adds over the active version, send it for approval, and promote
+# it only after a different person approves (and acknowledges any block-level capability change).
+
+def _governance(request: Request) -> GovernanceAccess:
+    governance = getattr(request.app.state, "governance", None)
+    if governance is None:
+        data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
+        if not data_dir:
+            raise HTTPException(status_code=503, detail="Registry storage is not configured (set SKILLPROOF_DATA_DIR).")
+        root = Path(data_dir)
+        governance = GovernanceAccess(
+            registry=SQLiteSkillRegistry(root / "registry.db"),
+            approvals=SQLiteApprovalStore(root / "approvals.db"),
+            history=EvaluationHistoryStore(root / "history.db"),
+        )
+        request.app.state.governance = governance
+    return governance
+
+
+def _principal(request: Request) -> Principal:
+    principal = getattr(request.state, "principal", None)
+    if principal is not None:
+        return principal
+    if request.app.state.oidc_verifier is not None or os.environ.get("SKILLPROOF_ENV", "").lower() == "production":
+        raise HTTPException(status_code=401, detail="Authenticated principal required.")
+    # Local development only (OIDC off): one tenant, identity from headers so the two-person rule can be exercised.
+    try:
+        return Principal(
+            user_id=request.headers.get("x-skillproof-dev-user", "local-dev"),
+            tenant_id="local",
+            role=request.headers.get("x-skillproof-dev-role", "tenant_admin"),  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _guarded(call):
+    try:
+        return call()
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (RegistryError, ApprovalError) as exc:
+        status = 404 if "not found" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+class BehaviouralEvidence(BaseModel):
+    """Evidence only a run can produce. Static scores always come from SkillProof's own analysis of the upload."""
+    behavioral_lift_pp: float | None = Field(default=None, ge=-100, le=10000)
+    paired_runs: int | None = Field(default=None, ge=0)
+    measured_models: int | None = Field(default=None, ge=0)
+    cost_overhead_percent: float | None = Field(default=None, ge=-100, le=100000)
+
+
+@app.post("/api/v1/registry/versions")
+async def register_version(
+    request: Request,
+    file: UploadFile = File(...),
+    evidence_json: str | None = Form(default=None),
+    artifact_uri: str | None = Form(default=None),
+) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Upload a .zip skill package.")
+    data = await file.read(10_000_001)
+    if len(data) > 10_000_000:
+        raise HTTPException(status_code=413, detail="ZIP upload exceeds 10 MB.")
+    try:
+        raw = read_skill_zip_bytes(data)
+        behaviour = BehaviouralEvidence(**json.loads(evidence_json)) if evidence_json else BehaviouralEvidence()
+    except PackageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"evidence_json is invalid: {exc}") from exc
+    text = {}
+    for path, content in raw.items():
+        try:
+            text[path] = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text[path] = ""
+    report = analyze_files(text)
+    if report.get("package_fingerprint") is None or not (report.get("metadata") or {}).get("name"):
+        raise HTTPException(status_code=422, detail="The package needs a SKILL.md with a name to be registered.")
+    try:
+        manifest = build_manifest(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    security = report.get("security") or {}
+    evidence = AssuranceInput(
+        structural_score=report.get("structural_score"),
+        instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
+        security_score=security.get("security_score"),
+        security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
+        **behaviour.model_dump(),
+    )
+    assurance_report = evaluate_assurance(evidence, AssurancePolicy())
+    # Bind the report to this exact package so an approval of one version can never promote another.
+    assurance_report["subject"] = {"tenant_id": principal.tenant_id, "skill_name": report["metadata"]["name"],
+                                   "package_fingerprint": report["package_fingerprint"]}
+    version = _guarded(lambda: governance.register_skill(
+        principal, report, assurance_report, artifact_uri=artifact_uri, capability_manifest=manifest))
+    return {"version": version, "analysis": report}
+
+
+@app.get("/api/v1/registry/catalogue")
+def registry_catalogue(request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"tenant_id": principal.tenant_id, "skills": _guarded(lambda: governance.catalogue(principal))}
+
+
+@app.get("/api/v1/registry/skills/{skill_name}/versions")
+def registry_skill_versions(skill_name: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"skill_name": skill_name, "versions": _guarded(lambda: governance.list_skill_versions(principal, skill_name))}
+
+
+@app.get("/api/v1/registry/versions/{version_id}")
+def registry_version(version_id: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.get_skill(principal, version_id))
+
+
+@app.post("/api/v1/registry/versions/{version_id}/approval-requests")
+def registry_request_approval(version_id: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.submit_version_for_approval(principal, version_id))
+
+
+class DecisionRequest(BaseModel):
+    action: Literal["approve", "reject", "request_changes"]
+    comment: str = Field(default="", max_length=4000)
+
+
+@app.post("/api/v1/approvals/{request_id}/decision")
+def approval_decision(request_id: str, body: DecisionRequest, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.decide_approval(principal, request_id, body.action, comment=body.comment))
+
+
+class PromoteRequest(BaseModel):
+    approval_request_id: str = Field(min_length=1, max_length=64)
+    capability_ack: str | None = Field(default=None, max_length=64,
+                                       description="change_hash of the capability change, required when it has block-level items.")
+
+
+@app.post("/api/v1/registry/versions/{version_id}/promote")
+def registry_promote(version_id: str, body: PromoteRequest, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.promote_version(
+        principal, version_id, body.approval_request_id, capability_ack=body.capability_ack))

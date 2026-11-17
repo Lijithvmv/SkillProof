@@ -63,17 +63,46 @@ class GovernanceAccess:
     def _history_key(tenant_id: str, skill_key: str) -> str:
         return f"{tenant_id}:{skill_key}"
 
-    def register_skill(self, principal: Principal, skill_report: dict[str, Any], assurance_report: dict[str, Any], *, artifact_uri: str | None = None) -> dict[str, Any]:
+    def register_skill(
+        self, principal: Principal, skill_report: dict[str, Any], assurance_report: dict[str, Any], *,
+        artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "skill.register")
-        return self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id, artifact_uri=artifact_uri)
+        return self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id,
+                                      artifact_uri=artifact_uri, capability_manifest=capability_manifest)
 
-    def promote_skill(self, principal: Principal, version_id: str, assurance_report: dict[str, Any], approval_record: dict[str, Any]) -> dict[str, Any]:
+    def promote_skill(
+        self, principal: Principal, version_id: str, assurance_report: dict[str, Any], approval_record: dict[str, Any],
+        *, capability_ack: str | None = None,
+    ) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "skill.promote")
-        return self.registry.promote(principal.tenant_id, version_id, assurance_report, approval_record, actor_id=principal.user_id)
+        return self.registry.promote(principal.tenant_id, version_id, assurance_report, approval_record,
+                                     actor_id=principal.user_id, capability_ack=capability_ack)
+
+    def promote_version(self, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
+        """Promote using the assurance report stored with the version and the tenant's own approval record."""
+        authorize(principal, principal.tenant_id, "skill.promote")
+        assurance = self.registry.get_assurance(principal.tenant_id, version_id)
+        record = self.approvals.get_request(request_id, tenant_id=principal.tenant_id)
+        return self.registry.promote(principal.tenant_id, version_id, assurance, record,
+                                     actor_id=principal.user_id, capability_ack=capability_ack)
 
     def get_skill(self, principal: Principal, version_id: str) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "skill.read")
         return self.registry.get_version(principal.tenant_id, version_id)
+
+    def list_skill_versions(self, principal: Principal, skill_name: str) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return self.registry.list_versions(principal.tenant_id, skill_name)
+
+    def catalogue(self, principal: Principal) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return self.registry.catalogue(principal.tenant_id)
+
+    def submit_version_for_approval(self, principal: Principal, version_id: str) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "approval.submit")
+        assurance = self.registry.get_assurance(principal.tenant_id, version_id)
+        return self.approvals.submit_for_review(assurance, submitter_id=principal.user_id, tenant_id=principal.tenant_id)
 
     def submit_approval(self, principal: Principal, report: dict[str, Any]) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "approval.submit")

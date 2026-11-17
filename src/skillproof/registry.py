@@ -1,5 +1,9 @@
 """Tenant-scoped skill version catalog with approval-gated promotion.
 
+Each registered version can carry its capability manifest. The registry then compares it with the tenant's active
+version of the same skill and ranks what the new version adds (block / ask / note). A version whose additions include
+a block-level item can only be promoted when the approver acknowledges that exact change by its hash.
+
 The host application supplies authenticated tenant/actor IDs and resolves
 artifact_uri through its own object store. Package bytes are not stored here.
 """
@@ -15,8 +19,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from skillproof.capabilities import diff_manifests
+from skillproof.triage import triage
+
 class RegistryError(ValueError):
     """Invalid registry operation."""
+
+
+EMPTY_MANIFEST: dict[str, Any] = {"capabilities": {}, "scopes": {}}
+MAX_CHANGE_ITEMS = 50
 
 
 def _canonical_hash(value: dict[str, Any]) -> str:
@@ -65,6 +76,10 @@ class SQLiteSkillRegistry:
                 CREATE TRIGGER IF NOT EXISTS registry_events_no_delete
                 BEFORE DELETE ON registry_events BEGIN SELECT RAISE(ABORT, 'registry events are append-only'); END;
             """)
+            columns = {row[1] for row in self._connection.execute("PRAGMA table_info(skill_versions)")}
+            for column in ("assurance_json", "capabilities_json", "change_json"):
+                if column not in columns:
+                    self._connection.execute(f"ALTER TABLE skill_versions ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _now() -> str:
@@ -72,7 +87,7 @@ class SQLiteSkillRegistry:
 
     def register(
         self, tenant_id: str, skill_report: dict[str, Any], assurance_report: dict[str, Any],
-        *, actor_id: str, artifact_uri: str | None = None,
+        *, actor_id: str, artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
         if not tenant_id or not actor_id:
@@ -85,6 +100,8 @@ class SQLiteSkillRegistry:
             raise RegistryError("skill report requires a skill metadata name")
         if artifact_uri is not None and (len(artifact_uri) > 2048 or "\x00" in artifact_uri):
             raise RegistryError("artifact_uri must be 2048 characters or fewer")
+        if capability_manifest is not None and not isinstance(capability_manifest.get("capabilities"), dict):
+            raise RegistryError("capability manifest must come from build_manifest()")
         assurance_hash = _canonical_hash(assurance_report)
         state = "pending_review" if assurance_report.get("decision") == "eligible_for_human_approval" else "not_eligible"
         summary = {
@@ -110,13 +127,23 @@ class SQLiteSkillRegistry:
                         raise RegistryError("this package fingerprint is already registered with a different assurance report")
                     self._connection.execute("COMMIT")
                     return self._decode(existing)
+                change = None
+                if capability_manifest is not None:
+                    change = self._change(tenant_id, name, capability_manifest)
+                    summary["capability_decision"] = change["decision"]
+                    summary["capability_counts"] = change["counts"]
                 self._connection.execute(
-                    "INSERT INTO skill_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO skill_versions (version_id, tenant_id, skill_name, package_fingerprint, assurance_hash, "
+                    "summary_json, artifact_uri, state, registered_by, created_at, updated_at, assurance_json, "
+                    "capabilities_json, change_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (version_id, tenant_id, name, fingerprint, assurance_hash,
                      json.dumps(summary, sort_keys=True, separators=(",", ":")), artifact_uri,
-                     state, actor_id, now, now),
+                     state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change)),
                 )
                 self._event(version_id, tenant_id, actor_id, "registered", state, now)
+                if change is not None:
+                    self._event(version_id, tenant_id, actor_id, "capabilities_compared",
+                                f"{change['decision']} against {change['against']} {change['change_hash'][:12]}", now)
                 self._connection.execute("COMMIT")
             except Exception:
                 self._connection.execute("ROLLBACK")
@@ -125,7 +152,7 @@ class SQLiteSkillRegistry:
 
     def promote(
         self, tenant_id: str, version_id: str, assurance_report: dict[str, Any],
-        approval_record: dict[str, Any], *, actor_id: str,
+        approval_record: dict[str, Any], *, actor_id: str, capability_ack: str | None = None,
     ) -> dict[str, Any]:
         tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
         if not tenant_id or not actor_id:
@@ -154,6 +181,17 @@ class SQLiteSkillRegistry:
                     raise RegistryError(f"version cannot be promoted from state '{row['state']}'")
                 if row["assurance_hash"] != _canonical_hash(assurance_report):
                     raise RegistryError("assurance report does not match the registered version")
+                if row["capabilities_json"]:
+                    # Compare again: another version may have become active since this one was registered.
+                    change = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]))
+                    if change["decision"] == "block" and capability_ack != change["change_hash"]:
+                        reasons = "; ".join(f"{i['category']}: {i['value']}" for i in change["items"] if i["level"] == "block")[:500]
+                        raise RegistryError(
+                            "this version adds block-level capabilities (" + reasons + "); the approver must "
+                            f"acknowledge capability change {change['change_hash']}")
+                    self._connection.execute("UPDATE skill_versions SET change_json=? WHERE version_id=?", (_dump(change), version_id))
+                    if change["decision"] == "block":
+                        self._event(version_id, tenant_id, actor_id, "capabilities_acknowledged", change["change_hash"], now)
                 active = self._connection.execute(
                     "SELECT version_id FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'",
                     (tenant_id, row["skill_name"]),
@@ -169,6 +207,73 @@ class SQLiteSkillRegistry:
                 raise
         return self.get_version(tenant_id, version_id)
 
+    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        """What this manifest adds over the tenant's active version of the skill, ranked by triage."""
+        active = self._connection.execute(
+            "SELECT version_id, capabilities_json FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'",
+            (tenant_id, skill_name),
+        ).fetchone()
+        if active is None:
+            against, against_id, old = "nothing_active", None, EMPTY_MANIFEST
+        elif not active["capabilities_json"]:
+            against, against_id, old = "active_version_without_manifest", active["version_id"], EMPTY_MANIFEST
+        else:
+            against, against_id, old = "active_version", active["version_id"], json.loads(active["capabilities_json"])
+        diff = diff_manifests(old, manifest)
+        ranked = triage(diff, new_manifest=manifest)
+        change = {
+            "against": against,
+            "against_version_id": against_id,
+            "status": diff["status"],
+            "decision": ranked["decision"],
+            "counts": ranked["counts"],
+            "items": ranked["items"][:MAX_CHANGE_ITEMS],
+            "items_total": len(ranked["items"]),
+            "combinations": ranked["combinations"],
+            "removed": diff["removed"],
+            "meaning": ranked["meaning"],
+        }
+        change["change_hash"] = _canonical_hash(change)
+        return change
+
+    def catalogue(self, tenant_id: str) -> list[dict[str, Any]]:
+        """One entry per skill in the tenant: the active version and every version waiting for a decision."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT version_id, skill_name, package_fingerprint, state, summary_json, created_at, updated_at "
+                "FROM skill_versions WHERE tenant_id=? ORDER BY skill_name, created_at DESC, rowid DESC",
+                (tenant_id,),
+            ).fetchall()
+        skills: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = skills.setdefault(row["skill_name"], {"skill_name": row["skill_name"], "active": None, "waiting": [], "versions": 0})
+            entry["versions"] += 1
+            summary = json.loads(row["summary_json"])
+            brief = {
+                "version_id": row["version_id"], "package_fingerprint": row["package_fingerprint"], "state": row["state"],
+                "assurance_decision": summary.get("assurance_decision"),
+                "capability_decision": summary.get("capability_decision"),
+                "capability_counts": summary.get("capability_counts"),
+                "security_status": summary.get("security_status"),
+                "created_at": row["created_at"], "updated_at": row["updated_at"],
+            }
+            if row["state"] == "active":
+                entry["active"] = brief
+            elif row["state"] in {"pending_review", "not_eligible"}:
+                entry["waiting"].append(brief)
+        return list(skills.values())
+
+    def get_assurance(self, tenant_id: str, version_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT assurance_json FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)
+            ).fetchone()
+        if row is None:
+            raise RegistryError("skill version not found in this tenant")
+        if not row["assurance_json"]:
+            raise RegistryError("this version was registered before assurance reports were stored")
+        return json.loads(row["assurance_json"])
+
     def _event(self, version_id: str, tenant_id: str, actor_id: str, action: str, detail: str, timestamp: str) -> None:
         self._connection.execute(
             "INSERT INTO registry_events (version_id, tenant_id, actor_id, action, detail, occurred_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -178,6 +283,9 @@ class SQLiteSkillRegistry:
     def _decode(self, row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["summary"] = json.loads(result.pop("summary_json"))
+        for column, key in (("assurance_json", "assurance"), ("capabilities_json", "capabilities"), ("change_json", "capability_change")):
+            raw = result.pop(column, None)
+            result[key] = json.loads(raw) if raw else None
         result["events"] = [dict(event) for event in self._connection.execute(
             "SELECT actor_id, action, detail, occurred_at FROM registry_events WHERE version_id=? ORDER BY event_id", (row["version_id"],)
         ).fetchall()]
@@ -211,3 +319,7 @@ class SQLiteSkillRegistry:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+
+def _dump(value: dict[str, Any] | None) -> str | None:
+    return None if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

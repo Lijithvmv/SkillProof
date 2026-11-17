@@ -15,7 +15,21 @@ MAX_TOTAL_SIZE = 10_000_000
 
 
 def read_skill_zip(data: bytes) -> dict[str, str]:
-    files: dict[str, str] = {}
+    """Text view of a skill ZIP: each file decoded as UTF-8, non-text files as empty strings."""
+    decoded: dict[str, str] = {}
+    for path, raw in read_skill_zip_bytes(data).items():
+        try:
+            decoded[path] = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # Non-text assets remain represented in the manifest without being interpreted.
+            decoded[path] = ""
+    return decoded
+
+
+def read_skill_zip_bytes(data: bytes) -> dict[str, bytes]:
+    """Raw bytes of each file in a skill ZIP, after the same safety checks. The capability manifest needs bytes so
+    that bundled binaries are seen as binaries."""
+    files: dict[str, bytes] = {}
     total = 0
     try:
         archive = zipfile.ZipFile(__import__("io").BytesIO(data))
@@ -43,11 +57,7 @@ def read_skill_zip(data: bytes) -> dict[str, str]:
             total += info.file_size
             if total > MAX_TOTAL_SIZE:
                 raise PackageError(f"ZIP expands beyond {MAX_TOTAL_SIZE} bytes.")
-            try:
-                files[normalized] = archive.read(info).decode("utf-8-sig")
-            except UnicodeDecodeError:
-                # Non-text assets remain represented in the manifest without being interpreted.
-                files[normalized] = ""
+            files[normalized] = archive.read(info)
     # Handle archives that wrap a skill directory in one extra packaging folder.
     roots = {PurePosixPath(path).parts[0] for path in files if len(PurePosixPath(path).parts) > 1}
     skill_depths = [len(PurePosixPath(path).parts) for path in files if PurePosixPath(path).name == "SKILL.md"]

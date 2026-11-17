@@ -31,6 +31,18 @@ The Python service `skillproof.history.EvaluationHistoryStore` stores experiment
 
 The Python service `skillproof.registry.SQLiteSkillRegistry` catalogs immutable package fingerprints per tenant and skill name. New versions remain pending review (or are marked not eligible); promotion to active requires a separate human approval record matching the assurance report hash. The registry stores report summaries and an optional external `artifact_uri`, not skill package contents. The embedding application must authenticate and authorize tenant/actor IDs and resolve artifact URIs.
 
+### Skill catalogue API
+
+Set `SKILLPROOF_DATA_DIR` to a folder for the registry, approval and history databases. Then:
+
+1. `POST /api/v1/registry/versions` uploads a skill ZIP, with optional `evidence_json` for run results (lift, paired runs, models, cost). SkillProof analyses the package itself; static scores are never taken from the caller. It builds the capability manifest and compares it with the tenant's active version of the same skill, then ranks every addition block / ask / note. The assurance report is bound to this exact package, so approving one version can never promote another.
+2. `POST /api/v1/registry/versions/{id}/approval-requests` sends an eligible version for review.
+3. `POST /api/v1/approvals/{request_id}/decision` lets a different person approve, reject or request changes.
+4. `POST /api/v1/registry/versions/{id}/promote` makes the version active. The capability change is compared again at this point, because another version may have become active in the meantime. If the change has a block-level addition, promotion also needs `capability_ack` set to that change's `change_hash`, so the approver confirms the exact lines they read. The acknowledgement is written to the append-only audit trail.
+5. `GET /api/v1/registry/catalogue` lists each skill with its active version and every version waiting for a decision. `GET /api/v1/registry/skills/{name}/versions` and `GET /api/v1/registry/versions/{id}` show the history and the full change.
+
+Roles decide who can act: an evaluator uploads and submits, an approver decides and promotes, and a viewer can only read. With OIDC off (local development), the tenant is `local` and identity comes from the `X-SkillProof-Dev-User` and `X-SkillProof-Dev-Role` headers. Production mode refuses to start without OIDC.
+
 The `skillproof.authorization` module defines tenant roles (`tenant_admin`, `evaluator`, `approver`, `viewer`) and a `GovernanceAccess` façade for registry, approval, and evaluation history operations. When using this façade outside the HTTP API, the host application must create `Principal` objects from verified authentication claims.
 
 For API SSO, configure `SKILLPROOF_AUTH_MODE=oidc`, `SKILLPROOF_OIDC_ISSUER`, `SKILLPROOF_OIDC_AUDIENCE`, and `SKILLPROOF_OIDC_JWKS_URL`. Optional claim settings are `SKILLPROOF_OIDC_ROLE_CLAIM` (default `skillproof_role`) and `SKILLPROOF_OIDC_TENANT_CLAIM` (default `tenant_id`). Access tokens must use the RFC 9068 `at+jwt` type and carry a recognized single role. Set `SKILLPROOF_ENV=production` to make startup fail unless OIDC mode is configured. In local development, authentication remains disabled unless OIDC mode is explicitly enabled. Health checks remain public; API routes require a bearer token in OIDC mode, and evaluation routes require the evaluator or tenant admin role.

@@ -83,6 +83,125 @@ NOT_CONTACTED_CONTEXT = re.compile(
     r"(?:\bthrow\s+new\s+\w*Error\s*\(|\bconsole\.(?:log|error|warn|info)\s*\(|\braise\s+\w+\s*\(|\blogger?\.\w+\s*\()[^)]*$"
     r"|\b\w*(?:SIGNUP|DOCS?|HELP|HOMEPAGE|WEBSITE|REPO|LICENSE|SUPPORT|ORIGIN)_?(?:URL|URI|LINK|PAGE)?\s*[:=]\s*[\"'`]$"
     r"|\borigin[\"']?\s*[:=]\s*[\"'`]$|\^=\s*\\?[\"']$", re.I)
+# ------------------------------------------------------------------ contact positions (held-outs 1-4 root cause)
+# A URL in code-like text is a host the skill CONTACTS only in a contact position. Every other URL is a mention.
+# Deciding by exclusion (every URL counts unless an exception matches) never converged across fresh corpora: there
+# are endless ways to mention a URL, and few ways to contact one. These are the few.
+CONTACT_CALL = re.compile(
+    r"\b(?:curl(?:\.exe)?|wget|https?ie|xh|Invoke-RestMethod|Invoke-WebRequest|iwr|irm|aria2c|"
+    r"fetch\s*\(|axios(?:\.\w+)?|urlopen|urlretrieve|getJson|get_json|fetchJson|fetch_json|"
+    r"requests\.\w+|httpx\.\w+|aiohttp\.\w+|session\.(?:get|post|put|patch|delete|request)|client\.(?:get|post|put|patch|delete|request)|"
+    r"\$http\.\w+|https?\.(?:get|request)|new\s+WebSocket|EventSource|io\.connect|socket\.connect|"
+    r"git\s+(?:clone|remote\s+add|fetch|pull|submodule\s+add|ls-remote)|kubectl\s+(?:apply|create)|helm\s+(?:repo\s+add|install)|"
+    r"docker\s+(?:pull|run|login)|podman\s+pull|skills?\s+add|marketplace\s+add|"
+    r"pip3?\s+install|uv\s+(?:pip\s+install|add)|npm\s+(?:install|i)|go\s+(?:install|get)|cargo\s+install|brew\s+(?:tap|install)|"
+    r"navigate|goto|page\.goto|browser\s+open|webbrowser\.open|"
+    r"dig|nslookup|ssh|scp|sftp|rsync|ncat|telnet|ping|traceroute|sqlmap|nmap|"
+    r"source\s+<\(|bash\s+<\(|\.package\(url|import\s*\(|importScripts|load(?:Script|Image|URL)?\s*\(|"
+    r"new\s+URL\s*\(|createClient\s*\(|OpenAI\s*\(|connect\s*\("
+    r")|--(?:index-url|extra-index-url|registry|url|endpoint|server|base-url|api-url)\b|"
+    r"\b(?:from|import)\s+[\"']$|@import\s+(?:url\()?[\"']?$|\b(?:Client|Session)\s*\([^)]*$|"
+    r"\b\w+\.(?:get|post|put|patch|delete|head|fetch|request|download|upload|send)(?:_\w+)?\s*\(\s*[fbru]?[\"'`]$", re.I)
+CONTACT_NAME = re.compile(
+    r"(?i)(?:^|[_.\-])(?:base|api|endpoint|endpoints|server|servers|host|webhook|gateway|registry|index|mirror|proxy|upload|download|"
+    r"auth|token|oauth|callback|tiles?|style|feed|rss|root|remote|ws|wss|socket|mcp|url|uri|urls|uris|src|"
+    r"service|backend|target_url|request|nameserver|nameservers|dns|resolver)(?:$|[_.\-]|url|uri)|baseurl|apiurl|apibase|endpoint|serverurl")
+NOT_CONTACT_NAME = re.compile(r"(?i)signup|docs?(?:$|_)|help|homepage|website|repo(?:sitory)?(?:$|_)|license|support|console|dashboard|"
+                              r"portal|page|learn|guide|reference|example|sample|about|privacy|terms|issues?(?:$|_)|changelog|"
+                              r"readme|tutorial|blog|profile|^link$|^href$|_link$|citation|credit")
+QUOTED_ITEM = r"(?:[\"'`][^\"'`]*[\"'`]\s*,\s*)*"
+ASSIGNED = re.compile(r"([A-Za-z_$][\w.$\-]*)(?:\[[^\]]*\])?[\"'\]]?\s*(?:=|:=|:|=>)\s*(?:[\(\[{]\s*)*"
+                      r"(?:[\w.$\[\]\"']+\s*(?:\|\||\?\?|or)\s*)?" + QUOTED_ITEM + r"(?:[fbru]?[\"'`])?$")
+DATA_RECORD = re.compile(r"[\"']?(?:title|snippet|author|authors|published|published_at|summary|abstract|excerpt|"
+                         r"headline|score|rank|position|date|timestamp|status_code|remote_address|destination_ip|"
+                         r"referer|user_agent|children|caption|alt|description)[\"']?\s*[:=]", re.I)
+HTML_LOAD = re.compile(r"<(?:script|link|img|iframe|source|video|audio|embed|object)\b[^>]*\b(?:src|href|data)\s*=\s*[\"']?$|"
+                       r"\.src\s*=\s*[\"'`]$", re.I)
+API_DOC_CUE = re.compile(r"(?:(?i:\b(?:base(?:\s+url)?|endpoint|api\s+root|public\s+root|default\s+(?:public\s+)?root|"
+                         r"use\s+(?:the\s+)?url|served\s+(?:at|from)|routes?\s+(?:use|are)|under)\b)[^.;]{0,40}?|"
+                         r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+(?:of\s+)?|(?i:\b(?:use|open|visit|call|query|hit)\s+(?:an?\s+[\w-]+\s+|the\s+)?))[`\"'<(]*$")
+API_SHAPED = re.compile(r"^(?:https?|wss?)://(?:api[.\-]|[^/]*\.api\.|mcp\.|[^?#\s]*/(?:api|graphql|rest|rpc|xrpc|v\d+(?:beta|alpha)?\d*|"
+                        r"oauth2?|token)(?:/|\b))|[?&][\w.-]+=|\$\{|\{\w+\}|\.(?:js|mjs|css|json|ya?ml|sh|ps1|py|git|tar\.gz|tgz|zip|whl|"
+                        r"traineddata)(?:$|[?#\s\"'`)])|/llms(?:-full)?\.txt$", re.I)
+URL_TOKEN = re.compile(r"\S+://\S+")
+
+
+CALL_ARGS = re.compile(r"\(([^()]*)")
+IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def called_names(lines: list[str]) -> set[str]:
+    """Names that appear inside the parentheses of a network call, or after a network command, in one file. A URL bound
+    to one of them is contacted through it, whatever the name (one step of data flow: x = "https://..."; post(x))."""
+    names: set[str] = set()
+    for line in lines:
+        call = CONTACT_CALL.search(line)
+        if not call:
+            continue
+        rest = line[call.start():]
+        for group in CALL_ARGS.findall(rest) or [rest]:
+            names.update(IDENTIFIER.findall(group))
+    return names
+
+
+def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[str, ...] | list[str] = (), previous: str = "",
+                   called: set[str] | frozenset[str] = frozenset()) -> str:
+    """Why the URL starting at url_start is contacted by the skill, or "" when it is only mentioned. Contact positions:
+    an argument of a network call or command, the value of an endpoint-named setting, a resource a page loads, an
+    API base or HTTP-method line in docs, a fetch instruction in prose, or (in scripts) an API-shaped URL bound to
+    any name. Everything else (links, data records, examples, error text) is a mention."""
+    prefix = line[:url_start]
+    url = re.match(r"\S+", line[url_start:]).group(0).strip("`'\")<>,;]")
+    statement = re.split(r"(?:;|&&|\|\||\bthen\b)\s", prefix)[-1]
+    if NOT_CONTACTED_CONTEXT.search(prefix):
+        return ""
+    call = CONTACT_CALL.search(statement)
+    if call:
+        return f"argument of {call.group(0).strip()}"
+    if HTML_LOAD.search(prefix):
+        return "a resource the page loads"
+    suffix = PurePosixPath(path).suffix.lower()
+    # Inside a string literal, running text before the URL ("Embedded tweet: https://...") makes it a message. In
+    # Markdown a backtick opens inline code, not a string, so only real quotes count there.
+    quotes = ('"', "'") if suffix in DOC_SUFFIXES else ('"', "'", "`")
+    quote = max(prefix.rfind(q) for q in quotes)
+    if (quote >= 0 and prefix.count(prefix[quote]) % 2 == 1 and re.search(r"[A-Za-z]{2,}[^\w$]*\s", prefix[quote + 1:])
+            and not API_DOC_CUE.search(prefix)):
+        return ""
+    assigned = ASSIGNED.search(prefix)
+    if assigned:
+        name = assigned.group(1).split(".")[-1]
+        record = DATA_RECORD.search(line) or any(DATA_RECORD.search(n) for n in neighbours)
+        words_before = prefix[max(0, assigned.start(1) - 24): assigned.start(1)]
+        if NOT_CONTACT_NAME.search(name) or NOT_CONTACT_NAME.search(words_before.split("\n")[-1].split(",")[-1]):
+            return ""
+        if name in called and suffix in SCRIPT_SUFFIXES:
+            return f"bound to {name}, which a network call in this file uses"
+        if CONTACT_NAME.search(name):
+            if record and name.lower() in {"url", "uri", "src", "source"}:
+                return ""
+            return f"value of the endpoint setting {name}"
+        if suffix in SCRIPT_SUFFIXES and API_SHAPED.search(url) and not record:
+            return f"API address bound to {name}"
+        return ""
+    if API_DOC_CUE.search(prefix) or (API_DOC_CUE.search(previous.rstrip() + " ") and len(prefix.strip(" `'\"")) <= 4):
+        return "API base or request line in the docs"
+    if _prose_cue(line, url_start):
+        return "an instruction to fetch or send"
+    bare = URL_TOKEN.sub(" ", prefix).strip(" -*>`'\"→=:|")
+    if bare in {"f", "b", "r", "u", "rb", "fr"}:
+        bare = ""  # a Python string prefix: f"https://..."
+    if not bare and CONTACT_CALL.search(previous.rstrip()) and re.search(r"[(,]\s*$", previous.rstrip()):
+        return "argument of the call on the line before"
+    if not bare and API_SHAPED.search(url):
+        return "an API address listed on its own"
+    return ""
+
+
+def contact_position(line: str, url_start: int, path: str = "", neighbours: tuple[str, ...] | list[str] = (), previous: str = "") -> bool:
+    return bool(contact_reason(line, url_start, path, neighbours, previous))
+
+
 PROVENANCE = re.compile(r"\b(?:adapted from|based on|derived from|inspired by|credits?:|provenance|original source)\b", re.I)
 # A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
 NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS|\b\w*issuer\w*|\biss\b)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
@@ -364,6 +483,13 @@ class Manifest:
     decode_trail: list[dict[str, str]] = field(default_factory=list)
     files: int = 0
     scopes: dict[str, set[str]] = field(default_factory=dict)  # "category|value" -> reach seen (see SCOPE_RANK)
+    mentions: dict[str, dict[str, list[str]]] = field(default_factory=dict)  # named but not contacted / read
+    reasons: dict[str, str] = field(default_factory=dict)  # "category|value" -> why it counts (first seen)
+
+    def mention(self, category: str, value: str, location: str) -> None:
+        locations = self.mentions.setdefault(category, {}).setdefault(value, [])
+        if location not in locations and len(locations) < 5:
+            locations.append(location)
 
     def add(self, category: str, value: str, location: str) -> None:
         locations = self.capabilities[category].setdefault(value, [])
@@ -381,6 +507,9 @@ class Manifest:
             "files": self.files,
             "capabilities": {c: {v: sorted(locs) for v, locs in sorted(values.items())} for c, values in self.capabilities.items()},
             "scopes": {key: sorted(values) for key, values in sorted(self.scopes.items())},
+            "reasons": dict(sorted(self.reasons.items())),
+            "mentions": {c: {v: sorted(l) for v, l in sorted(values.items()) if v not in self.capabilities.get(c, {})}
+                         for c, values in sorted(self.mentions.items())},
             "decode_trail": self.decode_trail[:200],
             "limitations": (
                 "Facts from static text after reversing common hiding techniques. Content that is fetched at run time, "
@@ -819,6 +948,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 for match in pattern.finditer(text):
                     manifest.add("agent_spawning", name, f"{path}:{text.count(chr(10), 0, match.start()) + 1}")
         lines = _active_lines(path, decoded)
+        called = called_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
         source_lines = decoded.splitlines()
 
         def original_line(number: int, fallback: str) -> str:
@@ -835,6 +965,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             if suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines and DOC_COMMENT.match(line):
                 continue  # a comment inside a fenced example ("# Available at: https://...")
             cue = is_code or bool(FETCH_CUE.search(line))
+            previous = lines[index - 1][1] if index > 0 else ""
+            neighbours = [n for n in (previous, lines[index + 1][1] if index + 1 < len(lines) else "") if n]
             hosts_apply = not is_test and not ECHO_LINE.match(line) and not (suffix in DOC_SUFFIXES and TABLE_ROW.match(full_line))
             if cue and hosts_apply and PurePosixPath(path).name.lower() not in LOCKFILES:
                 for match in URL.finditer(line):
@@ -861,7 +993,23 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         continue
                     if PLACEHOLDER_PATH.match(rest) and not (suffix in SCRIPT_SUFFIXES and re.match(r"^/(?:\{|\$\{)", rest)):
                         continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
+                    if number > original_lines:
+                        reason = "revealed by decoding hidden text"
+                    elif is_code:
+                        if inline_row:
+                            # An inline span from a prose line: judge it in its sentence ("Use URL `https://...`").
+                            at = full_line.find(match.group(0))
+                            prose_before = original_line(number - 1, "") if number > 1 else ""
+                            reason = contact_reason(full_line, at, path, (), prose_before) if at >= 0 else ""
+                        else:
+                            reason = contact_reason(line, match.start(), path, neighbours, previous, called)
+                    else:
+                        reason = "an instruction to fetch or send"
+                    if not reason:
+                        manifest.mention("network_hosts", host, location)
+                        continue
                     manifest.add("network_hosts", host, location)
+                    manifest.reasons.setdefault(f"network_hosts|{host}", reason)
                 if is_code:
                     for ip_match in IPV4.finditer(line):
                         ip = ip_match.group(0)
@@ -870,7 +1018,13 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         if IP_DATA_KEY.search(line[: ip_match.start()]) or CSP_LINE.search(line):
                             continue  # a field of a sample log record, or a browser allowlist
                         if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
+                            reason = ("revealed by decoding hidden text" if number > original_lines
+                                      else contact_reason(line, ip_match.start(), path, neighbours, previous, called))
+                            if not reason:
+                                manifest.mention("network_hosts", ip, location)
+                                continue
                             manifest.add("network_hosts", ip, location)
+                            manifest.reasons.setdefault(f"network_hosts|{ip}", reason)
             if not is_code:
                 # Prose still matters for the two most specific attacks: an instruction to write to agent
                 # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write

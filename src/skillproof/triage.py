@@ -202,6 +202,9 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
         else:
             level, reason = _reach_level(category, value, *_base_level(category, value), scopes.get(f"{category}|{value}"))
         reasons = [reason]
+        how = ((new_manifest or {}).get("reasons") or {}).get(f"{category}|{value}")
+        if how:
+            reasons.append(f"how it is used: {how}")
         paired = combo_level.get((category, value))
         if paired and LEVELS[paired] > LEVELS[level]:
             level = paired

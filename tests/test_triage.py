@@ -92,3 +92,11 @@ def test_delete_reach_sets_the_level_and_a_widening_is_an_item():
     grown = triage(_diff({"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/a\n"}, {"SKILL.md": "# s\n", "c.sh": "rm -rf /tmp/a\nrm -rf /\n"}), RATES)
     assert grown["decision"] == "block" and grown["items"][0]["widened"] == {"before": "temp", "after": "root"}
     assert not any("real public skill updates" in r for r in grown["items"][0]["reasons"])
+
+
+def test_triage_says_how_a_host_is_used():
+    from skillproof.capabilities import build_manifest, diff_manifests
+    old = build_manifest({"SKILL.md": b"---\nname: t\ndescription: d\n---\n"})
+    new = build_manifest({"SKILL.md": b"---\nname: t\ndescription: d\n---\n```bash\ncurl -s https://api.vendor-e.dev/v1/x\n```\n"})
+    [item] = [i for i in triage(diff_manifests(old, new), new_manifest=new)["items"] if i["category"] == "network_hosts"]
+    assert "how it is used: argument of curl" in item["reasons"]

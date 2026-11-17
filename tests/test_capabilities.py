@@ -1,4 +1,5 @@
 import base64
+import re
 import json
 import zipfile
 
@@ -384,8 +385,10 @@ def test_p5b_identifiers_are_not_hosts():
     files = {"SKILL.md": "# s\n```xml\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n```\n"
                          "```text\nEU: `3.75.65.221`, `3.40.9.80/28`\n```\n",
              "uids.py": 'UIDS = ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.70"]\n'}
-    hosts = set(_caps(files)["network_hosts"])
-    assert hosts == {"3.75.65.221"}
+    hosts = set(_caps(files).get("network_hosts", {}))
+    # An address listed for a firewall allowlist ("EU: `3.75.65.221`") is named, not contacted: a mention since the
+    # contact-position rule. The DTD and the DICOM identifiers were never hosts.
+    assert hosts == set()
 
 
 def test_p5b_install_flags_with_values_quotes_and_placeholders():
@@ -562,3 +565,84 @@ def test_heldout4_false_groups_are_gone_and_real_facts_stay():
     assert codex["agent_config_writes"] == {}
     from skillproof.capabilities import source_kind
     assert source_kind("scripts/selftest.py:5") == "test"
+
+
+# ------------------------------------------------------------------ contact positions (hosts counted only when contacted)
+from skillproof.capabilities import contact_reason  # noqa: E402
+
+CONTACTED = [
+    ('BASE_URL = "https://api.pixfaro.com/v1"', "lib/client.py"),
+    ("const base = (process.env.MINIMAX_BASE_URL || \"https://api.minimax.io\").replace(/x/g, '');", "scripts/p.ts"),
+    ('curl -s "https://api.github.com/repos/o/r/actions/runs" | jq .total_count', "SKILL.md"),
+    ('image = requests.get("https://thinkingmachines.ai/blog/chess.png").content', "scripts/a.py"),
+    ("const CFPB = 'https://www.consumerfinance.gov/data-research/search/api/v1/';", "scripts/t.mjs"),
+    ('<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>', "references/docs.md"),
+    ("GET https://open.feishu.cn/open-apis/minutes/v1/minutes/x/transcript", "references/feishu.md"),
+    ('"url": "https://mcp.sanity.io"', "references/get-started.md"),
+    ("git clone https://gitlab.com/jix/neca.git", "SKILL.md"),
+    ("Base: `https://api.clinpgx.org/v1`. Public read access, JSON.", "SKILL.md"),
+    ("For an EU project, use `https://eu.posthog.com` instead.", "references/flags.md"),
+    ("kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml", "SKILL.md"),
+]
+MENTIONED = [
+    ('throw new Error("KEY is required. Get one from https://platform.minimax.io/");', "scripts/m.ts"),
+    ('PIXFARO_SIGNUP_URL = "https://pixfaro.com"', "lib/client.py"),
+    ("return `> Embedded tweet: https://x.com/i/status/${tweetId}`;", "scripts/article.ts"),
+    ('"url": "https://arxiv.org/abs/2201.11903",', "scripts/sample.py"),
+    ("* License URI:       https://www.gnu.org/licenses/gpl-2.0.html", "references/plugin.md"),
+    ("- [Download Agent repository](https://github.com/dnanexus/dxda)", "references/sources.md"),
+    ('link: "https://pubmed.ncbi.nlm.nih.gov/full-url/",', "references/docx.md"),
+    ('console_url = "https://cloud.redis.io"', "scripts/setup.py"),
+    ("See the [guide](https://docs.example-vendor.com/start) for details.", "SKILL.md"),
+]
+
+
+@pytest.mark.parametrize("line,path", CONTACTED)
+def test_contact_positions_count(line, path):
+    start = re.search(r"https?://", line).start()
+    neighbours = ['"title": "x"'] if "arxiv" in line else []
+    assert contact_reason(line, start, path, neighbours), line
+
+
+@pytest.mark.parametrize("line,path", MENTIONED)
+def test_mentions_do_not_count(line, path):
+    start = re.search(r"https?://", line).start()
+    neighbours = ['"title": "Chain of thought"'] if "arxiv" in line else []
+    assert contact_reason(line, start, path, neighbours) == "", line
+
+
+def test_mentioned_hosts_are_kept_apart_and_reasons_recorded():
+    files = {
+        "SKILL.md": b"---\nname: t\ndescription: d\n---\nSee the [docs](https://docs.vendor-a.dev/x).\n",
+        "scripts/run.py": b'import requests\nAPI_URL = "https://api.vendor-b.dev/v1"\nprint(requests.get(API_URL).json())\n'
+                          b'raise SystemExit("Get a key at https://keys.vendor-c.dev/new")\n',
+    }
+    manifest = build_manifest(files)
+    hosts = manifest["capabilities"]["network_hosts"]
+    assert set(hosts) == {"api.vendor-b.dev"}
+    assert manifest["reasons"]["network_hosts|api.vendor-b.dev"] == "bound to API_URL, which a network call in this file uses"
+    diff = diff_manifests(build_manifest({"SKILL.md": files["SKILL.md"]}), manifest)
+    assert list(diff["added"].get("network_hosts", {})) == ["api.vendor-b.dev"]
+
+
+def test_any_name_used_by_a_network_call_is_a_contact():
+    script = b'import requests\nx = "https://collector.vendor-d.dev/in"\nrequests.post(x, json={"k": 1})\n'
+    assert "collector.vendor-d.dev" in build_manifest({"scripts/send.py": script})["capabilities"]["network_hosts"]
+    unused = b'import requests\nx = "https://collector.vendor-d.dev/in"\nprint(x)\n'
+    assert "collector.vendor-d.dev" not in build_manifest({"scripts/send.py": unused})["capabilities"]["network_hosts"]
+
+
+def test_helper_calls_and_continuation_lines_are_contacts():
+    script = (b'def q(http, payload, system, name):\n'
+              b'    data = http.post_json("https://api.osv.dev/v1/querybatch", payload)\n'
+              b'    return http.get_json(\n'
+              b'        f"https://api.deps.dev/v3alpha/systems/{system}/packages/{name}"\n'
+              b'    )\n')
+    hosts = build_manifest({"scripts/sources.py": script})["capabilities"]["network_hosts"]
+    assert {"api.osv.dev", "api.deps.dev"} <= set(hosts)
+
+
+def test_request_method_on_the_line_before_an_inline_url():
+    doc = (b"---\nname: t\ndescription: d\n---\nThe client performs an unauthenticated GET\n"
+           b"of `https://github.com/tesseract-ocr/tessdata_best/raw/main/<code>.traineddata`.\n")
+    assert "github.com" in build_manifest({"references/ocr.md": doc})["capabilities"]["network_hosts"]

@@ -20,6 +20,9 @@ openai = ["openai>=1.68,<3"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+skillproof = ["data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

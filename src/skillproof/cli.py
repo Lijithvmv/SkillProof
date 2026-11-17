@@ -26,6 +26,7 @@ from skillproof.installed import default_roots, scan_installed
 from skillproof.apm_lock import check_lockfile
 from skillproof.update_report import build_update_report
 from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
+from skillproof.triage import triage
 from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
 from skillproof.execution import execute_experiment
 from skillproof.grader_check import check_grader, read_cases
@@ -240,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             old_manifest = build_manifest(read_package_bytes(args.old))
             new_manifest = build_manifest(read_package_bytes(args.new))
             result = diff_manifests(old_manifest, new_manifest)
+            result["triage"] = triage(result)
             result["new_decode_trail"] = new_manifest["decode_trail"]
             exit_code = 1 if result["status"] == "new_capabilities" else 0
         except (OSError, PackageError) as exc:

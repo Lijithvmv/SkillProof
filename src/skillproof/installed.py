@@ -25,6 +25,7 @@ from typing import Any
 
 from skillproof.capabilities import build_manifest, diff_manifests
 from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, PackageError
+from skillproof.triage import triage
 
 STATE_VERSION = 1
 SKIP_PARTS = {"node_modules", ".git", "__pycache__", "site-packages"}
@@ -160,6 +161,9 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         "hooks_repointed": diff.get("hooks_repointed", []),
         "not_scanned": new["manifest"].get("not_scanned", []),
     }
+    ranked = triage(diff)
+    change["triage"] = {"decision": ranked["decision"], "counts": ranked["counts"], "combinations": ranked["combinations"],
+                        "top": [{k: item[k] for k in ("level", "category", "value", "reasons", "locations")} for item in ranked["items"][:10]]}
     if old["manifest"].get("manifest_version") != new["manifest"].get("manifest_version"):
         # The stored manifest came from an older extractor, which may simply have missed what the new one reads
         # (2026-11-17: pptx "gained" npm:react, react-dom, sharp; the same line was in every older copy, and the
@@ -167,6 +171,7 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         # report it as re-baselined, list the differences as unverified, and do not raise an alert.
         change["status"] = "extractor_upgraded"
         change["unverified_added"], change["added"] = change["added"], {}
+        change["triage"] = {"decision": "none", "counts": {}, "combinations": [], "top": [], "note": "extractor upgraded; not ranked"}
     return change
 
 
@@ -238,6 +243,8 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
     finally:
         temp.unlink(missing_ok=True)
     flagged = [c for c in changes if c["status"] == "new_capabilities"]
+    order = {"block": 0, "ask": 1, "note": 2, "none": 3}
+    flagged.sort(key=lambda c: order.get(c.get("triage", {}).get("decision", "none"), 3))  # most severe first
     return {
         "method": "installed_skill_watch",
         "roots": [str(r) for r in roots],
@@ -250,6 +257,7 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
         "unchanged": unchanged,
         "changed": len(changes),
         "changes_adding_capabilities": len(flagged),
+        "changes_by_decision": {d: sum(c.get("triage", {}).get("decision") == d for c in flagged) for d in ("block", "ask", "note")},
         "changes": flagged + [c for c in changes if c["status"] != "new_capabilities"],
         # On a first run every skill is new; listing all their capabilities would bury the updates.
         "new_skills": [] if first_run else new_skills,

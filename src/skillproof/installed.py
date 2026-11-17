@@ -90,9 +90,65 @@ def _snapshot(skill_dir: Path) -> dict[str, Any]:
     }
 
 
+def find_plugin_dirs(roots: list[Path]) -> list[Path]:
+    """Plugin roots: a folder holding .claude-plugin/plugin.json, or the parent of a hooks/ folder whose JSON
+    registers hooks. Hooks live here, not in skill folders, so a skill-only scan never sees them."""
+    found = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for manifest in root.rglob("plugin.json"):
+            if manifest.parent.name == ".claude-plugin" and not SKIP_PARTS.intersection(manifest.parts):
+                found.add(manifest.parent.parent)
+        for hooks_file in root.rglob("*hooks*.json"):
+            if hooks_file.parent.name == "hooks" and not SKIP_PARTS.intersection(hooks_file.parts):
+                found.add(hooks_file.parent.parent)
+    return sorted(found)
+
+
+PLUGIN_PARTS = ("hooks", ".claude-plugin", "plugin.json", ".mcp.json", "hooks.json")
+PLUGIN_REF = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT(?::-[^}]*)?\}?[/\\]+([^\"'\s\\$]+)")
+
+
+def _plugin_snapshot(plugin_dir: Path) -> dict[str, Any]:
+    """The plugin-level files that decide what runs without a skill being used: hook definitions and their
+    scripts, the plugin manifest, and MCP server config. Skills inside the plugin are scanned as skills."""
+    files: dict[str, bytes] = {}
+    for part in PLUGIN_PARTS:
+        target = plugin_dir / part
+        items = [target] if target.is_file() else sorted(target.rglob("*")) if target.is_dir() else []
+        for item in items:
+            relative = item.relative_to(plugin_dir)
+            if SKIP_PARTS.intersection(relative.parts) or item.is_symlink() or not item.is_file() or item.stat().st_size > MAX_FILE_SIZE:
+                continue
+            files[relative.as_posix()] = item.read_bytes()
+    # A hook can run a script anywhere in the plugin ("${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.sh" in
+    # code-modernization); read every file the hook definitions point at, inside the plugin root only.
+    base = plugin_dir.resolve()
+    for name, raw in list(files.items()):
+        if not name.endswith(".json"):
+            continue
+        for ref in PLUGIN_REF.findall(raw.decode("utf-8", "replace")):
+            target = (plugin_dir / ref).resolve()
+            if target.is_relative_to(base) and target.is_file() and not target.is_symlink() and target.stat().st_size <= MAX_FILE_SIZE:
+                files.setdefault(target.relative_to(base).as_posix(), target.read_bytes())
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode() + b"\0" + files[name])
+    name = plugin_dir.name
+    try:
+        data = json.loads(files.get(".claude-plugin/plugin.json", b"{}"))
+        name = str(data.get("name") or name) if isinstance(data, dict) else name
+    except ValueError:
+        pass
+    newest = max((plugin_dir / f).stat().st_mtime for f in files) if files else 0.0
+    return {"path": str(plugin_dir), "name": f"plugin:{name}", "fingerprint": digest.hexdigest(), "mtime": newest,
+            "manifest": build_manifest(files) | {"not_scanned": []}}
+
+
 def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, Any]:
     diff = diff_manifests(old["manifest"], new["manifest"])
-    return {
+    change = {
         "skill": new["name"],
         "source": source,  # "on_disk_history" (copies found together) or "since_last_scan"
         "old": old["path"],
@@ -101,8 +157,17 @@ def _change(old: dict[str, Any], new: dict[str, Any], source: str) -> dict[str, 
         "added": {category: sorted(values) for category, values in diff["added"].items()},
         "added_by_source": diff["added_by_source"],
         "removed": diff["removed"],
+        "hooks_repointed": diff.get("hooks_repointed", []),
         "not_scanned": new["manifest"].get("not_scanned", []),
     }
+    if old["manifest"].get("manifest_version") != new["manifest"].get("manifest_version"):
+        # The stored manifest came from an older extractor, which may simply have missed what the new one reads
+        # (2026-11-17: pptx "gained" npm:react, react-dom, sharp; the same line was in every older copy, and the
+        # same-extractor diff was empty). The old files are not stored, so the change cannot be re-checked:
+        # report it as re-baselined, list the differences as unverified, and do not raise an alert.
+        change["status"] = "extractor_upgraded"
+        change["unverified_added"], change["added"] = change["added"], {}
+    return change
 
 
 def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str, Any]:
@@ -115,6 +180,8 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
         raise ValueError(f"unsupported state file version: {state.get('version')}")
     known: dict[str, dict[str, Any]] = state["skills"]
     first_run = not known
+    # Plugins were added to the scan later; their first scan is a baseline, not a list of "new plugins".
+    plugins_baseline = not state.get("plugins_tracked")
 
     families: dict[str, list[dict[str, Any]]] = {}
     unreadable = []
@@ -125,6 +192,15 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
             unreadable.append({"path": str(skill_dir), "error": str(exc)[:200]})
             continue
         families.setdefault(family_key(skill_dir), []).append(snap)
+    plugin_count = 0
+    for plugin_dir in find_plugin_dirs([Path(r) for r in roots]):
+        try:
+            snap = _plugin_snapshot(plugin_dir)
+        except (PackageError, OSError, ValueError) as exc:
+            unreadable.append({"path": str(plugin_dir), "error": str(exc)[:200]})
+            continue
+        plugin_count += 1
+        families.setdefault("plugin::" + family_key(plugin_dir), []).append(snap)
 
     changes, new_skills, unchanged = [], [], 0
     for key, copies in families.items():
@@ -138,7 +214,8 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
             for old, new in zip(distinct, distinct[1:]):
                 changes.append(_change(old, new, "on_disk_history"))
             caps = {c: sorted(v) for c, v in distinct[-1]["manifest"]["capabilities"].items() if v}
-            new_skills.append({"skill": distinct[-1]["name"], "path": distinct[-1]["path"], "capabilities": caps})
+            if not (key.startswith("plugin::") and plugins_baseline):
+                new_skills.append({"skill": distinct[-1]["name"], "path": distinct[-1]["path"], "capabilities": caps})
         elif previous["fingerprint"] != distinct[-1]["fingerprint"]:
             changes.append(_change(previous, distinct[-1], "since_last_scan"))
         else:
@@ -147,6 +224,7 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
         known[key] = {k: latest[k] for k in ("path", "name", "fingerprint", "manifest")} | {"seen_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
     missing = sorted(known[k]["path"] for k in known if k not in families)
+    state["plugins_tracked"] = True
     state_file.parent.mkdir(parents=True, exist_ok=True)
     # Write to a temp file and replace: a full disk once left the state file empty mid-write, and every later
     # scheduled run then failed. With replace, a failed write leaves the previous state intact.
@@ -164,7 +242,11 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
         "method": "installed_skill_watch",
         "roots": [str(r) for r in roots],
         "first_run": first_run,
-        "skills_seen": len(families),
+        "skills_seen": sum(not k.startswith("plugin::") for k in families),
+        "plugins_seen": sum(k.startswith("plugin::") for k in families),
+        "plugin_folders": plugin_count,
+        "plugins_baseline": plugins_baseline and not first_run,
+        "extractor_upgraded": sum(c["status"] == "extractor_upgraded" for c in changes),
         "unchanged": unchanged,
         "changed": len(changes),
         "changes_adding_capabilities": len(flagged),

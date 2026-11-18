@@ -768,3 +768,47 @@ def test_process_module_loads_and_method_runners_count():
     assert {"child_process", "cmd /c", "pipe-to-shell"} <= set(found)
     assert any(loc.startswith("references/p.md") for loc in found["pipe-to-shell"])
     assert any(loc.startswith("SKILL.md") for loc in found["pipe-to-shell"])
+
+
+def _creds(files):
+    manifest = build_manifest(files)
+    return manifest["capabilities"]["credential_access"], manifest
+
+
+def test_go_template_env_field_is_not_a_env_file():
+    doc = b'```\nERROR: executing "manifest template" at <.Env.MANAGED_IDENTITY_CLIENT_ID>: map has no entry\n```\n'
+    found, _ = _creds({"references/errors.md": doc})
+    assert ".env file" not in found
+    found, _ = _creds({"scripts/a.sh": b"#!/bin/sh\nset -a; . ./.env; set +a\n"})
+    assert ".env file" in found
+
+
+def test_searching_for_a_key_name_is_a_leak_scan():
+    found, manifest = _creds({"references/scan.md": b'```bash\ngrep -rn "aws_secret_access_key" .\n```\n'})
+    assert "aws credentials" not in found and "aws credentials" in manifest["mentions"]["credential_access"]
+    found, _ = _creds({"scripts/s.sh": b"#!/bin/sh\ngrep aws_secret_access_key ~/.aws/credentials\n"})
+    assert "aws credentials" in found
+
+
+def test_shell_local_state_variable_is_not_browser_data():
+    found, _ = _creds({"scripts/h.sh": b"#!/bin/sh\nf() {\n  local state result\n}\n"})
+    assert "browser data" not in found
+    found, _ = _creds({"scripts/c.py": b'p = home / "Google/Chrome/Local State"\nopen(p).read()\n'})
+    assert "browser data" in found
+
+
+def test_a_env_file_the_skill_writes_itself_is_not_credential_access():
+    test = (b'(self.target / ".env").write_text("SYNTHETIC=x\n")\n'
+            b'self.assertEqual((self.out / "root/ignored/.env").read_bytes(), b"x")\n')
+    found, _ = _creds({"tests/test_retire.py": test})
+    assert ".env file" not in found
+    doc = b"```bash\necho 'ANTHROPIC_API_KEY=sk-ant-xxxxx' > .claude/.env\n```\n\n```\n.claude/.env\n```\n"
+    found, _ = _creds({"references/setup.md": doc})
+    assert ".env file" not in found
+    found, _ = _creds({"scripts/x.py": b'open(".claude/.env", "w").write("A=1")\nsecrets = open(".env").read()\n'})
+    assert ".env file" in found
+
+
+def test_folder_variables_are_not_secrets():
+    found, _ = _creds({"scripts/i.py": b'import os\nroot = os.environ["COOKIE_COPY_SKILL_DIR"]\ntok = os.environ["GITHUB_TOKEN"]\n'})
+    assert "env:COOKIE_COPY_SKILL_DIR" not in found and "env:GITHUB_TOKEN" in found

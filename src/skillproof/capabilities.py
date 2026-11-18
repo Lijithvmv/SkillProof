@@ -395,9 +395,14 @@ PERSISTENCE = [
 CREDENTIALS = [
     ("ssh keys", r"~?/\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b"), ("aws credentials", r"\.aws[/\\]credentials|\bAWS_SECRET_ACCESS_KEY\b"),
     ("netrc", r"\.netrc\b"), ("npmrc/pypirc", r"\.npmrc\b|\.pypirc\b"), ("keychain", r"\bsecurity\s+find-(?:generic|internet)-password\b|\bkeyring\.get_password\b"),
-    ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"Login Data|cookies\.sqlite|Local State"),
-    (".env file", r"(?<![\w.}\])])\.env\b(?!\.example)"),  # "{path}.env" is attribute access, not a .env file
+    # Chrome's files are "Login Data" and "Local State"; `local state` in a shell function is a variable.
+    ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"(?-i:Login Data)|cookies\.sqlite|(?-i:Local State)"),
+    # "{path}.env" is attribute access; ".Env.X" is a Go template field, not a file.
+    (".env file", r"(?<![\w.}\])])(?-i:\.env)\b(?!\.example)"),
 ]
+# A key name given to a search command is looked FOR (a leak scan: grep -rn "aws_secret_access_key" .), not read.
+SEARCH_TERM = re.compile(r"\b(?:grep|egrep|rg|ag|git\s+grep|findstr|Select-String)\b[^|;&]*$", re.I)
+CREDENTIAL_FILE = re.compile(r"[/\\~]|\bid_(?:rsa|ed25519|ecdsa)\b")  # a path names a file that is opened
 ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|(?:os\.)?getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
 SECRETISH_ENV = re.compile(r"KEY|SECRET|TOKEN|PASS|AUTH|CRED|PRIVATE|COOKIE|SESSION", re.I)
 # Reading a variable is a credential access only when the variable holds a secret. Most variables a skill reads are
@@ -419,6 +424,8 @@ def is_secret_env(name: str) -> bool:
     name = name.upper()
     if PUBLIC_ENV.search(name) or LOCATION_ENV.match(name):
         return False
+    if re.search(r"_(?:DIR|ROOT|FOLDER|HOME)$", name):
+        return False  # COOKIE_COPY_SKILL_DIR names a folder, whatever word it contains
     parts = name.split("_")
     if "KEY" in parts and parts.index("KEY") + 1 < len(parts) and parts[parts.index("KEY") + 1] in {"VAULT", "VAULTS"}:
         parts = [p for i, p in enumerate(parts) if not (p == "KEY" and i + 1 < len(parts) and parts[i + 1] in {"VAULT", "VAULTS"})]
@@ -856,6 +863,48 @@ def _add_config_writes(manifest: Manifest, line: str, location: str, *, prose: b
                 manifest.mention("agent_config_writes", name, location)
 
 
+def _path_token(line: str, start: int, end: int) -> str:
+    while start > 0 and line[start - 1] not in " \t\"'`(=,[{<":
+        start -= 1
+    while end < len(line) and line[end] not in " \t\"'`),;]}>|&":
+        end += 1
+    return line[start:end]
+
+
+def own_env_files(lines: list[str], written: set[str] | frozenset[str] = frozenset()) -> set[str]:
+    """The .env paths a file itself writes (a fixture, a template it creates): the skill's own file, not a secret."""
+    env = dict(CREDENTIALS)[".env file"]
+    own: set[str] = set()
+    for line in lines:
+        for match in re.finditer(env, line, re.I):
+            if config_write(line, match.start(), match.end(), prose=False, written=written):
+                own.add(_path_token(line, match.start(), match.end()))
+    return own
+
+
+def credential_reason(name: str, line: str, match: re.Match, own_env: set[str], fixture_file: bool) -> str:
+    """Why a credential pattern match is an access, or "" when the secret is only named or is the skill's own file."""
+    if name == ".env file" and own_env and (fixture_file or _path_token(line, match.start(), match.end()) in own_env):
+        return ""  # a .env this file writes itself (in a test, any .env in it is the test's fixture)
+    if SEARCH_TERM.search(re.split(r"\|", line[: match.start()])[-1]) and not CREDENTIAL_FILE.search(match.group(0)):
+        return ""
+    return "read or opened"
+
+
+def _add_credentials(manifest: Manifest, line: str, location: str, own_env: set[str], fixture_file: bool) -> None:
+    for name, pattern in CREDENTIALS:
+        matches = list(re.finditer(pattern, line, re.I))
+        if not matches:
+            continue
+        reasons = [credential_reason(name, line, m, own_env, fixture_file) for m in matches]
+        reason = next((r for r in reasons if r), "")
+        if reason:
+            manifest.add("credential_access", name, location)
+            manifest.reasons.setdefault(f"credential_access|{name}", reason)
+        else:
+            manifest.mention("credential_access", name, location)
+
+
 def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, str]], line: str, location: str) -> None:
     for name, pattern in patterns:
         if re.search(pattern, line, re.I if category != "agent_config_writes" else 0):
@@ -1113,6 +1162,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
         run_names = exec_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
         string_quotes = ('"', "'", "`") if suffix in {".js", ".mjs", ".cjs", ".ts"} else ('"', "'")
         anti_example, last_number = False, 0
+        own_env = own_env_files([text for _, text, code in lines if code], written)
         source_lines = decoded.splitlines()
 
         def original_line(number: int, fallback: str) -> str:
@@ -1238,7 +1288,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
             if WRITE_CUE.search(command_line):
                 _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
-            _scan_patterns(manifest, "credential_access", CREDENTIALS, command_line, location)
+            _add_credentials(manifest, command_line, location, own_env, is_test)
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
             _add_delete_scope(manifest, command_line)
             _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)

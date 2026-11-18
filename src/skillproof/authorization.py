@@ -109,6 +109,15 @@ class GovernanceAccess:
         assurance = self.registry.get_assurance(principal.tenant_id, version_id)
         return self.approvals.submit_for_review(assurance, submitter_id=principal.user_id, tenant_id=principal.tenant_id)
 
+    def mark_false_alarm(self, principal: Principal, version_id: str, category: str, value: str, reason: str) -> dict[str, Any]:
+        """A reviewer says one raised item is not a real capability. Needs the reviewer's permission, never the author's."""
+        authorize(principal, principal.tenant_id, "approval.decide")
+        return self.registry.mark_false_alarm(principal.tenant_id, version_id, category, value, reason, actor_id=principal.user_id)
+
+    def false_alarm_labels(self, principal: Principal) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return self.registry.false_alarms(principal.tenant_id)
+
     def submit_approval(self, principal: Principal, report: dict[str, Any]) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "approval.submit")
         return self.approvals.submit_for_review(report, submitter_id=principal.user_id, tenant_id=principal.tenant_id)

@@ -292,3 +292,25 @@ def registry_promote(version_id: str, body: PromoteRequest, request: Request) ->
     governance = _governance(request)
     return _guarded(lambda: governance.promote_version(
         principal, version_id, body.approval_request_id, capability_ack=body.capability_ack))
+
+
+class FalseAlarmRequest(BaseModel):
+    category: str = Field(min_length=1, max_length=64)
+    value: str = Field(min_length=1, max_length=512)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/v1/registry/versions/{version_id}/false-alarms")
+def registry_mark_false_alarm(version_id: str, body: FalseAlarmRequest, request: Request) -> dict[str, Any]:
+    """A reviewer marks one raised item as not a real capability; the same evidence is not raised again."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.mark_false_alarm(principal, version_id, body.category, body.value, body.reason))
+
+
+@app.get("/api/v1/registry/false-alarms")
+def registry_false_alarms(request: Request) -> dict[str, Any]:
+    """Every reviewer mark in the tenant as labelled items (verdict F), the feed for tuning the engine."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"tenant_id": principal.tenant_id, "labels": _guarded(lambda: governance.false_alarm_labels(principal))}

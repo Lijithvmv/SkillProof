@@ -896,3 +896,44 @@ def test_negation_carried_from_a_wrapped_line():
     manifest = build_manifest({"SKILL.md": doc})
     locations = manifest["capabilities"]["destructive_operations"].get("rm -rf", [])
     assert locations == ["SKILL.md:4"]
+
+
+def test_described_command_is_not_an_install():
+    doc = (b"This skill needs the kit. Install it with `npx ux-kit@3.0.0 init`\n"
+           b"or as the plugin. `npx skills@1.7.6 add` copies the skill folder and\nnothing else.\n\n"
+           b"> Only the skill folders were installed, which is what\n> `npx skills add` does. Point the user at\n> `npx ux-kit init`.\n")
+    found = build_manifest({"SKILL.md": doc})["capabilities"]["package_installs"]
+    assert "npx:ux-kit@3.0.0" in found and "npx:ux-kit" in found
+    assert not any(k.startswith("npx:skills") for k in found)
+    found = build_manifest({"CHANGELOG.md": b"- The pdf extra now installs pypdf (`pip install tool[pdf]`).\n"})
+    assert not found["capabilities"]["package_installs"]
+
+
+def test_regex_deny_list_and_locating_a_shell_are_mentions():
+    script = b'const SENSITIVE = ["^(?:\\.netrc|\\.npmrc)$"];\n'
+    assert "netrc" not in build_manifest({"scripts/guard.mjs": script})["capabilities"]["credential_access"]
+    assert "netrc" in build_manifest({"scripts/read.sh": b"#!/bin/sh\ncat ~/.netrc\n"})["capabilities"]["credential_access"]
+    doc = b"To check: `(Get-Command pwsh -All).Source` shows where it is.\n"
+    assert "powershell" not in build_manifest({"references/x.md": doc})["capabilities"]["process_execution"]
+    assert "powershell" in build_manifest({"SKILL.md": b"Run `pwsh -File build.ps1`.\n"})["capabilities"]["process_execution"]
+
+
+def test_setting_an_env_var_is_not_reading_a_secret():
+    script = b'import os\nos.environ["SERVER_TOKEN"] = "x"\ntok = os.environ["GITHUB_TOKEN"]\n'
+    found = build_manifest({"scripts/rec.py": script})["capabilities"]["credential_access"]
+    assert "env:SERVER_TOKEN" not in found and "env:GITHUB_TOKEN" in found
+
+
+def test_joined_install_path_in_a_copying_script_is_a_config_write():
+    script = (b'import { cpSync } from "node:fs";\nimport { join } from "node:path";\nimport { homedir } from "node:os";\n'
+              b'const TARGETS = { "claude-code": () => join(homedir(), ".claude", "skills", "distilly") };\n'
+              b"cpSync(src, TARGETS[host](), { recursive: true });\n")
+    found = build_manifest({"bin/install.mjs": script})["capabilities"]["agent_config_writes"]
+    assert ".claude/commands" in found
+    reader = b'import { join } from "node:path";\nconst p = join(homedir(), ".claude", "skills");\nconsole.log(readdirSync(p));\n'
+    assert not build_manifest({"bin/list.mjs": reader})["capabilities"]["agent_config_writes"]
+
+
+def test_wildcard_tools_keep_their_star():
+    skill = b"---\nname: x\nallowed-tools: Bash(*), Read, mcp__zotero__*\n---\nBody.\n"
+    assert "mcp__zotero__*" in build_manifest({"SKILL.md": skill})["capabilities"]["declared_tools"]

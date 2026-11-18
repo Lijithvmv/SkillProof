@@ -120,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
     feed.add_argument("--output", default="-")
 
+    check = commands.add_parser("catalogue-check", help="Compare the skills installed on this machine with the versions the catalogue approved. Registers nothing. Exit 1 when an installed skill differs from its approved version (running unapproved); with --strict also when a skill was never approved.")
+    check.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
+    check.add_argument("--tenant", default="local")
+    check.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
+    check.add_argument("--strict", action="store_true", help="Also fail when an installed skill has no approved version.")
+    check.add_argument("--output", default="-")
+
     inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
     inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
     inventory_cmd.add_argument("--overlap-threshold", type=float, default=0.3)
@@ -236,6 +243,20 @@ def main(argv: list[str] | None = None) -> int:
                 governance.registry.close()
                 governance.approvals.close()
             exit_code = 1 if result["updates_with_block"] else 0
+        except (OSError, ValueError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "catalogue-check":
+        try:
+            roots = [Path(r) for r in args.root] or default_roots()
+            if not roots:
+                raise ValueError("No skill folders found; pass --root.")
+            governance = _catalogue_governance(Path(args.data_dir))
+            try:
+                result = _check_installed(governance, _check_principal(args.tenant), roots)
+            finally:
+                governance.registry.close()
+                governance.approvals.close()
+            exit_code = 1 if result["running_unapproved"] or (args.strict and result["never_approved"]) else 0
         except (OSError, ValueError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "inventory":
@@ -386,6 +407,18 @@ def _import_principal(tenant: str):
     from skillproof.authorization import Principal
 
     return Principal(user_id="installed-skill-import", tenant_id=tenant, role="evaluator")
+
+
+def _check_principal(tenant: str):
+    from skillproof.authorization import Principal
+
+    return Principal(user_id="installed-skill-check", tenant_id=tenant, role="viewer")
+
+
+def _check_installed(governance, principal, roots):
+    from skillproof.catalogue_import import check_installed
+
+    return check_installed(governance, principal, roots)
 
 
 def _import_installed(governance, principal, roots):

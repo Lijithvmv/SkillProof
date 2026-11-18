@@ -47,17 +47,41 @@ def _skill_name(files: dict[str, bytes], skill_dir: Path) -> str:
     return match.group(1).strip() if match else skill_dir.name
 
 
-def import_installed(
-    governance: GovernanceAccess, principal: Principal, roots: list[Path], policy: AssurancePolicy | None = None,
-) -> dict[str, Any]:
-    policy = policy or AssurancePolicy()
+def check_installed(governance: GovernanceAccess, principal: Principal, roots: list[Path]) -> dict[str, Any]:
+    """Compare what is installed with what the catalogue approved, without registering anything.
+
+    For every installed skill: `approved` when its folder fingerprint is the tenant's active version, `running_unapproved`
+    when an approved version exists but the installed folder differs from it (the alert: something changed the skill
+    after approval, or an unapproved update was installed), `never_approved` when nothing is approved for that name."""
+    families, names_by_family, packages, errors = _installed_families(roots)
+    skills: list[dict[str, Any]] = []
+    for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
+        _, skill_dir = families[key]
+        fingerprint = packages[key][2]
+        versions = governance.list_skill_versions(principal, name)
+        active = next((v for v in versions if v["state"] == "active"), None)
+        known = next((v for v in versions if v["package_fingerprint"] == fingerprint), None)
+        status = "never_approved" if active is None else "approved" if active["package_fingerprint"] == fingerprint else "running_unapproved"
+        entry = {"skill_name": name, "path": str(skill_dir), "status": status, "installed_fingerprint": fingerprint,
+                 "approved_version_id": active["version_id"] if active else None,
+                 "approved_fingerprint": active["package_fingerprint"] if active else None,
+                 "installed_version_id": known["version_id"] if known else None}
+        if status == "running_unapproved" and known and known.get("capability_change"):
+            change = known["capability_change"]
+            entry["adds_over_approved"] = {"decision": change.get("decision"), "counts": change.get("counts"),
+                                           "against": change.get("against")}
+        skills.append(entry)
+    counts = {s: sum(e["status"] == s for e in skills) for s in ("approved", "running_unapproved", "never_approved")}
+    return {"method": "installed_vs_approved", "tenant_id": principal.tenant_id, "roots": [str(r) for r in roots],
+            "skills_found": len(skills), **counts,
+            "alerts": [e for e in skills if e["status"] == "running_unapproved"], "skills": skills, "errors": errors}
+
+
+def _installed_families(roots: list[Path]):
     found: list[tuple[Path, Path]] = []
     for root in roots:
         for skill_dir in find_skill_dirs([root]):
             found.append((root, skill_dir))
-
-    # One catalogue name per install family. A name shared by different families (the same skill shipped by two
-    # agents, or two copies in different places) gets the agent label, then a short path hash if still ambiguous.
     families: dict[str, tuple[Path, Path]] = {}
     for root, skill_dir in found:
         families.setdefault(family_key(skill_dir), (root, skill_dir))
@@ -82,6 +106,16 @@ def import_installed(
         for label, members in labelled.items():
             for key in members:
                 names_by_family[key] = label if len(members) == 1 else f"{label[:-1]} {hashlib.sha256(key.encode()).hexdigest()[:6]})"
+    return families, names_by_family, packages, errors
+
+
+def import_installed(
+    governance: GovernanceAccess, principal: Principal, roots: list[Path], policy: AssurancePolicy | None = None,
+) -> dict[str, Any]:
+    policy = policy or AssurancePolicy()
+    # One catalogue name per install family (see _installed_families): a name shared by different families gets the
+    # agent label, then a short path hash if still ambiguous.
+    families, names_by_family, packages, errors = _installed_families(roots)
 
     registered: list[dict[str, Any]] = []
     known: dict[str, list[dict[str, Any]]] = {}

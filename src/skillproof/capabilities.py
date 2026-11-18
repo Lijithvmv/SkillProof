@@ -193,6 +193,41 @@ EXEC_CALL = re.compile(r"\bsubprocess\.\w+\s*\(|\bos\.(?:system|popen|exec\w*)\s
 # Only a label counts ("// VULNERABLE - Node.js", "# BAD:", "# ❌ wrong"); "# Never run as root" heads a real command.
 ANTI_EXAMPLE = re.compile(r"^\s*(?:#|//|--)\s*(?:❌|(?i:vulnerable|insecure|unsafe|bad|wrong|anti-?pattern)(?:\s*$|\s*[:(]|\s+[-–—])|DON'?T\b)")
 MODULE_LOAD = re.compile(r"(?:\bfrom|\brequire\s*\(|\bimport\s*\(?)\s*$")  # import { spawn } from "node:child_process"
+# A command span that is the SUBJECT of its sentence is described, not instructed: "`npx skills add` copies the skill
+# folder and nothing else", "which is what `npx skills add` does". "Install it with `npx x init`" instructs.
+DESCRIBE_AFTER = re.compile(r"^\s*(?:\([^)]*\)\s*)?(?:copies|does|did|installs|installed|runs|ran|fetches|downloads|adds|creates|writes|"
+                            r"puts|works|is|was|are|were|will|would|only|just|alone|also|now|then|still|no longer|used to|"
+                            r"behaves|fails|succeeds|leaves|skips|prints|returns)\b", re.I)
+INSTRUCT_BEFORE = re.compile(r"\b(?:install|run|use|execute|type|call|invoke|enter|paste|try|with|via|using|then|first|do)\b", re.I)
+CHANGELOG_FILE = re.compile(r"(?:^|/)(?:CHANGELOG|CHANGES|HISTORY|RELEASE[-_ ]?NOTES|NEWS)[^/]*\.(?:md|txt|rst)$", re.I)
+
+
+def describes_span(full: str, needle: str) -> bool:
+    """True when the inline-code span holding `needle` is the subject of a describing sentence in prose."""
+    for span in INLINE_CODE.finditer(full):
+        if needle in span.group(1):
+            before = SENTENCE_END.split(full[: span.start()])[-1]
+            before = INLINE_CODE.sub(" ", before)
+            if DESCRIBE_AFTER.match(full[span.end():]) and not INSTRUCT_BEFORE.search(before):
+                return True
+    return False
+
+
+LOCATE_BEFORE = re.compile(r"(?:\b(?:which|whereis|where(?:\.exe)?|Get-Command(?:\s+-\w+)*|command\s+-v|type\s+-[aPp])\s*\(?\s*[\"']?)$", re.I)
+# Path segments joined in code — join(homedir(), ".claude", "skills", name), Path.home() / ".claude" / "settings.json".
+JOINED_SEGMENTS = re.compile(r"[\"'][.\w*-]+[\"'](?:\s*(?:,|/)\s*[\"'][.\w*-]+[\"'])+")
+AGENT_INSTALL_DIR = re.compile(r"\.(?:claude|codex|cursor|agents|gemini)/(?:skills|commands|agents|rules|plugins)\b")
+FILE_COPY = re.compile(r"\b(?:cpSync|copyFileSync|copyFile|cp|copytree|copy2?|copyfile|move|rename(?:Sync)?|symlink(?:Sync)?|"
+                       r"writeFile(?:Sync)?|write_text|write_bytes)\s*\(|\bcp\s+-[rR]|\bshutil\.", re.I)
+
+
+def joined_path_line(line: str) -> str:
+    """The line with joined quoted path segments rewritten as one path string, or "" when it has none."""
+    if not JOINED_SEGMENTS.search(line):
+        return ""
+    return JOINED_SEGMENTS.sub(lambda m: '"' + "/".join(re.findall(r"[\"']([^\"']+)[\"']", m.group(0))) + '"', line)
+
+
 NEGATED_LABEL = re.compile(r"^\s*(?:#+\s*)?(?:\*\*|__)?\s*(?:[✗❌🚫×]\s*)?(?:don'?t|do not|never|avoid|bad|wrong)\b[^.!?:]{0,30}:?\s*(?:\*\*|__)?\s*:?\s*$", re.I)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 # A bin the file itself runs as already installed (npx --no-install X, pnpm exec X): npx/bunx X runs that local bin.
@@ -616,7 +651,7 @@ CATEGORIES = (
     "declared_tools", "agent_spawning", "hooks",
 )
 FRONTMATTER = re.compile(r"\A﻿?---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
-TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*(?:\([^)]*\))?")
+TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*\*?(?:\([^)]*\))?")  # mcp__zotero__* grants every tool of that server
 TOOL_KEYS = ("allowed-tools", "allowed_tools", "tools")
 
 
@@ -906,6 +941,8 @@ def credential_reason(name: str, line: str, match: re.Match, own_env: set[str], 
         return ""  # a .env this file writes itself (in a test, any .env in it is the test's fixture)
     if SEARCH_TERM.search(re.split(r"\|", line[: match.start()])[-1]) and not CREDENTIAL_FILE.search(match.group(0)):
         return ""
+    if line[: match.start()].endswith("\\"):
+        return ""  # "^(?:\\.netrc|\\.npmrc)$": a pattern in a deny-list of sensitive names, not a file opened
     return "read or opened"
 
 
@@ -1270,6 +1307,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             run_names = exec_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
             string_quotes = ('"', "'", "`") if suffix in {".js", ".mjs", ".cjs", ".ts"} else ('"', "'")
             anti_example, last_number, negated_list = False, 0, False
+            file_copies = suffix in SCRIPT_SUFFIXES and bool(FILE_COPY.search(text))
             local_bins = set(LOCAL_BIN.findall(text)) if suffix in DOC_SUFFIXES or suffix in SCRIPT_SUFFIXES else set()
             own_env = own_env_files([text for _, text, code in lines if code], written)
             source_lines = decoded.splitlines()
@@ -1394,6 +1432,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     at = line.find(found.group(0)) if found.group(0) in line else -1
                     if name == "powershell" and SETTING_SHELL.search(alternation_free[: found.start()]):
                         continue  # `shell: pwsh` in a workflow names the shell of a CI step
+                    if LOCATE_BEFORE.search(alternation_free[: found.start()]):
+                        manifest.mention("process_execution", name, location)
+                        continue  # `Get-Command pwsh`, `which bash`: finding where a program is, not running it
                     if PLACEHOLDER_ARG.match(alternation_free[found.end():]):
                         manifest.mention("process_execution", name, location)
                         continue  # `bash -c 'TRIGGER'`, `sh -c <cmd>`: the shape of a command, its argument a slot
@@ -1424,6 +1465,17 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         _add_config_writes(manifest, all_spans, location, prose=False)
                     else:
                         _add_config_writes(manifest, line, location, prose=False, written=written)
+                        joined = joined_path_line(line) if suffix in SCRIPT_SUFFIXES else ""
+                        if joined:
+                            _add_config_writes(manifest, joined, location, prose=False, written=written)
+                            install_dir = AGENT_INSTALL_DIR.search(joined)
+                            if install_dir and file_copies:
+                                # An agent skills/commands folder built in a script that copies or writes files: the
+                                # script installs into the agent's configuration (distilly: join(home, ".claude", "skills")).
+                                value = ".claude/commands" if ".claude/" in install_dir.group(0) else next(
+                                    (n for n, pat in AGENT_CONFIG if re.search(pat, joined)), install_dir.group(0))
+                                manifest.add("agent_config_writes", value, location)
+                                manifest.reasons.setdefault(f"agent_config_writes|{value}", "an install target in a script that copies files")
                         if suffix in DOC_SUFFIXES and YAML_TEXT_VALUE.match(line):
                             # A text value in front matter or YAML in docs ("short-description: Update AGENTS.md with
                             # design system rules") is a sentence: read it as prose.
@@ -1432,6 +1484,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     name = next(g for g in match.groups() if g).upper()
                     if not is_secret_env(name):
                         continue  # $env:APPDATA is a folder, AGENT_ID an identifier, PORT configuration: not secrets
+                    if re.match(r"\s*[\])]?\s*=(?!=)", all_spans[match.end():]):
+                        manifest.mention("credential_access", "env:" + name, location)
+                        continue  # os.environ["TOKEN"] = value SETS the variable; nothing is read
                     manifest.add("credential_access", "env:" + name, location)
                 if ENV_ALL.search(command_line):
                     manifest.add("credential_access", "env:<all>", location)
@@ -1442,6 +1497,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
                     if NEGATED.search(full[: max(0, full.find(command))][-40:]):
                         continue  # "do not run `npm install` first" is the opposite of an install
+                    if inline_row and (CHANGELOG_FILE.search(path) or describes_span(full, command)):
+                        continue  # "`npx skills add` copies the folder": the command is described, not instructed
                     groups = [g for g in match.groups() if g]
                     tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
                     tool = TOOL_ALIASES.get(tool, tool)

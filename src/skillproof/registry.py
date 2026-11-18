@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from skillproof.capabilities import diff_manifests
-from skillproof.triage import triage
+from skillproof.triage import LEVELS, triage
 
 class RegistryError(ValueError):
     """Invalid registry operation."""
@@ -75,6 +75,18 @@ class SQLiteSkillRegistry:
                 BEFORE UPDATE ON registry_events BEGIN SELECT RAISE(ABORT, 'registry events are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS registry_events_no_delete
                 BEFORE DELETE ON registry_events BEGIN SELECT RAISE(ABORT, 'registry events are append-only'); END;
+                CREATE TABLE IF NOT EXISTS false_alarms (
+                    tenant_id TEXT NOT NULL,
+                    skill_name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    files TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    version_id TEXT NOT NULL REFERENCES skill_versions(version_id),
+                    marked_by TEXT NOT NULL,
+                    marked_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, skill_name, category, value, files)
+                );
             """)
             columns = {row[1] for row in self._connection.execute("PRAGMA table_info(skill_versions)")}
             for column in ("assurance_json", "capabilities_json", "change_json"):
@@ -234,20 +246,102 @@ class SQLiteSkillRegistry:
             against, against_id, old = "active_version", active["version_id"], json.loads(active["capabilities_json"])
         diff = diff_manifests(old, manifest)
         ranked = triage(diff, new_manifest=manifest)
+        items, dismissed = self._apply_false_alarms(tenant_id, skill_name, ranked["items"])
         change = {
             "against": against,
             "against_version_id": against_id,
             "status": diff["status"],
-            "decision": ranked["decision"],
-            "counts": ranked["counts"],
-            "items": ranked["items"][:MAX_CHANGE_ITEMS],
-            "items_total": len(ranked["items"]),
+            "decision": max((item["level"] for item in items), key=LEVELS.get, default="none"),
+            "counts": {level: sum(item["level"] == level for item in items) for level in LEVELS},
+            "items": items[:MAX_CHANGE_ITEMS],
+            "items_total": len(items),
+            "dismissed": dismissed,
             "combinations": ranked["combinations"],
             "removed": diff["removed"],
             "meaning": ranked["meaning"],
         }
         change["change_hash"] = _canonical_hash(change)
         return change
+
+    def _apply_false_alarms(self, tenant_id: str, skill_name: str, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Split ranked items into those still raised and those a reviewer marked as not a real capability.
+
+        A mark covers the same category and value with evidence in the same files. The same value found in a file the
+        mark did not cover is raised again: that is new evidence, not the line the reviewer read."""
+        marks = self._connection.execute(
+            "SELECT category, value, files, reason, marked_by, marked_at FROM false_alarms WHERE tenant_id=? AND skill_name=?",
+            (tenant_id, skill_name),
+        ).fetchall()
+        if not marks:
+            return list(items), []
+        by_key: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for mark in marks:
+            by_key.setdefault((mark["category"], mark["value"]), []).append(mark)
+        kept, dismissed = [], []
+        for item in items:
+            files = set(_evidence_files(item))
+            mark = next((m for m in by_key.get((item["category"], item["value"]), []) if files <= set(json.loads(m["files"]))), None)
+            if mark is None:
+                kept.append(item)
+            else:
+                dismissed.append({"category": item["category"], "value": item["value"], "level": item["level"],
+                                  "reason": mark["reason"], "marked_by": mark["marked_by"], "marked_at": mark["marked_at"]})
+        return kept, dismissed
+
+    def mark_false_alarm(self, tenant_id: str, version_id: str, category: str, value: str, reason: str, *, actor_id: str) -> dict[str, Any]:
+        """A reviewer marks one raised item of a version as not a real capability. The person who registered the version
+        cannot mark its items, the mark is audited, and the version's change is compared again so the page and the
+        acknowledgement hash reflect it."""
+        tenant_id, actor_id, reason = tenant_id.strip(), actor_id.strip(), (reason or "").strip()
+        if not tenant_id or not actor_id:
+            raise RegistryError("tenant_id and actor_id are required")
+        if not reason or len(reason) > 500:
+            raise RegistryError("a reason of 1 to 500 characters is required")
+        now = self._now()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)
+                ).fetchone()
+                if row is None:
+                    raise RegistryError("skill version not found in this tenant")
+                if row["registered_by"] == actor_id:
+                    raise RegistryError("the person who registered a version cannot mark its alarms as false")
+                change = json.loads(row["change_json"]) if row["change_json"] else None
+                item = next((i for i in (change or {}).get("items", []) if i["category"] == category and i["value"] == value), None)
+                if item is None:
+                    raise RegistryError("this version does not raise that item")
+                self._connection.execute(
+                    "INSERT OR REPLACE INTO false_alarms (tenant_id, skill_name, category, value, files, reason, version_id, "
+                    "marked_by, marked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (tenant_id, row["skill_name"], category, value, json.dumps(sorted(_evidence_files(item))), reason,
+                     version_id, actor_id, now),
+                )
+                self._event(version_id, tenant_id, actor_id, "false_alarm_marked", f"{category}: {value} - {reason}"[:600], now)
+                if row["capabilities_json"] and row["state"] in {"pending_review", "not_eligible"}:
+                    against_active = change.get("against") in {"active_version", "active_version_without_manifest"}
+                    fresh = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]),
+                                         fallback_previous=not against_active)
+                    summary = json.loads(row["summary_json"])
+                    summary["capability_decision"], summary["capability_counts"] = fresh["decision"], fresh["counts"]
+                    self._connection.execute("UPDATE skill_versions SET change_json=?, summary_json=? WHERE version_id=?",
+                                             (_dump(fresh), json.dumps(summary, sort_keys=True, separators=(",", ":")), version_id))
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        return self.get_version(tenant_id, version_id)
+
+    def false_alarms(self, tenant_id: str) -> list[dict[str, Any]]:
+        """Every mark in the tenant, shaped as labelled items (verdict F) for tuning the capability engine."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM false_alarms WHERE tenant_id=? ORDER BY marked_at", (tenant_id,)
+            ).fetchall()
+        return [{"skill_name": r["skill_name"], "category": r["category"], "value": r["value"], "files": json.loads(r["files"]),
+                 "verdict": "F", "reason": r["reason"], "version_id": r["version_id"], "labeller": r["marked_by"],
+                 "labelled_at": r["marked_at"]} for r in rows]
 
     def catalogue(self, tenant_id: str) -> list[dict[str, Any]]:
         """One entry per skill in the tenant: the active version and every version waiting for a decision."""
@@ -332,6 +426,10 @@ class SQLiteSkillRegistry:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+
+def _evidence_files(item: dict[str, Any]) -> list[str]:
+    return sorted({re.sub(r":(?:\d+|decoded)$", "", location) for location in item.get("locations") or []})
 
 
 def _dump(value: dict[str, Any] | None) -> str | None:

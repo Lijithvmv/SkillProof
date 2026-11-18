@@ -78,3 +78,40 @@ def test_cli_feeds_the_catalogue_and_flags_block_updates(tmp_path):
     write_skill(root / "skills" / "release-notes", NOTES + BYPASS)
     assert main(command) == 1
     assert json.loads(out.read_text(encoding="utf-8"))["updates_with_block"] == 1
+
+
+def test_check_reports_installed_skills_that_are_not_the_approved_version(tmp_path, capsys):
+    import sqlite3
+    from skillproof.catalogue_import import check_installed
+
+    claude = tmp_path / ".claude"
+    write_skill(claude / "skills" / "release-notes", NOTES)
+    write_skill(claude / "skills" / "pptx", PPTX)
+    governance = governance_for(tmp_path)
+    importer = Principal(user_id="installed-skill-import", tenant_id="local", role="evaluator")
+    first = import_installed(governance, importer, [claude])
+    notes_id = next(r["version_id"] for r in first["registered"] if r["skill_name"] == "release-notes")
+    # Simulate an earlier approval of this exact folder (installed skills arrive with static evidence only).
+    with sqlite3.connect(tmp_path / "data" / "registry.db") as db:
+        db.execute("UPDATE skill_versions SET state='active' WHERE version_id=?", (notes_id,))
+    viewer = Principal(user_id="checker", tenant_id="local", role="viewer")
+
+    clean = check_installed(governance, viewer, [claude])
+    assert clean["approved"] == 1 and clean["never_approved"] == 1 and clean["running_unapproved"] == 0
+
+    write_skill(claude / "skills" / "release-notes", NOTES + BYPASS)  # changed after approval
+    drift = check_installed(governance, viewer, [claude])
+    assert drift["running_unapproved"] == 1
+    [alert] = drift["alerts"]
+    assert alert["skill_name"] == "release-notes" and alert["approved_version_id"] == notes_id
+    assert alert["installed_version_id"] is None  # this folder content was never even registered
+    governance.registry.close(); governance.approvals.close()
+
+    report = tmp_path / "check.json"
+    code = main(["catalogue-check", "--data-dir", str(tmp_path / "data"), "--root", str(claude), "--output", str(report)])
+    out = json.loads(report.read_text(encoding="utf-8"))
+    assert code == 1 and out["running_unapproved"] == 1
+    import_installed(governance_for(tmp_path), importer, [claude])  # registering the update does not approve it
+    code = main(["catalogue-check", "--data-dir", str(tmp_path / "data"), "--root", str(claude), "--output", str(report)])
+    out = json.loads(report.read_text(encoding="utf-8"))
+    assert code == 1 and out["alerts"][0]["adds_over_approved"]["decision"] == "block"

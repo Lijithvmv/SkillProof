@@ -1,0 +1,29 @@
+# SkillProof service configuration. Run with:  skillproof serve --config skillproof.toml
+# Relative paths are resolved from this file's folder.
+
+[server]
+host = "127.0.0.1"        # put a TLS-terminating reverse proxy in front for anything beyond this machine
+port = 8045
+environment = "production" # production refuses local identity and plain-HTTP identity providers
+
+[storage]
+# One of the two. PostgreSQL enforces tenant isolation with row-level security; connect as a role that is not a
+# superuser and cannot bypass row-level security.
+database_url = "postgresql://skillproof_app@db.internal:5432/skillproof?sslmode=verify-full"
+# data_dir = "data"       # SQLite files (one machine)
+
+[auth]
+mode = "oidc"
+issuer = "https://login.example.org/realms/main"
+audience = "skillproof-api"
+jwks_url = "https://login.example.org/realms/main/protocol/openid-connect/certs"
+client_id = "skillproof-catalogue"   # a PUBLIC client (PKCE, no secret); redirect URI = https://<host>/catalogue
+scope = "openid profile"
+role_claim = "skillproof_role"       # one of tenant_admin, evaluator, approver, viewer
+tenant_claim = "tenant_id"
+
+[backup]
+dir = "backups"
+keep = 14                 # newest backups kept
+interval_hours = 24       # scheduled backups while serving; 0 = only on demand (skillproof backup)
+# pg_dump = "/usr/bin/pg_dump"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, TextIO
@@ -127,6 +128,19 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--strict", action="store_true", help="Also fail when an installed skill has no approved version.")
     check.add_argument("--output", default="-")
 
+    serve_cmd = commands.add_parser("serve", help="Run the API from a configuration file (storage, sign-in, scheduled backups).")
+    serve_cmd.add_argument("--config", required=True)
+    backup_cmd = commands.add_parser("backup", help="Back up the catalogue, approvals and history now (consistent copy, hashed manifest, retention).")
+    backup_cmd.add_argument("--config", required=True)
+    backup_cmd.add_argument("--output", default="-")
+    restore_cmd = commands.add_parser("restore", help="Restore a SQLite backup after checking its hashes. The server must be stopped.")
+    restore_cmd.add_argument("--config", required=True)
+    restore_cmd.add_argument("--from", dest="source", required=True)
+    restore_cmd.add_argument("--output", default="-")
+    unit_cmd = commands.add_parser("service-file", help="Print a systemd unit or a Windows scheduled-task definition that runs 'serve'.")
+    unit_cmd.add_argument("--config", required=True)
+    unit_cmd.add_argument("--kind", choices=("systemd", "windows-task"), default="systemd")
+
     inventory_cmd = commands.add_parser("inventory", help="Find duplicate skill names and competing descriptions across installed skills. Exit 1 if a name has divergent copies.")
     inventory_cmd.add_argument("roots", nargs="+", help="Folders to search for SKILL.md (e.g. ~/.claude).")
     inventory_cmd.add_argument("--overlap-threshold", type=float, default=0.3)
@@ -244,6 +258,30 @@ def main(argv: list[str] | None = None) -> int:
                 governance.approvals.close()
             exit_code = 1 if result["updates_with_block"] else 0
         except (OSError, ValueError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "serve":
+        from skillproof.service import ServiceError, load_config, serve
+        try:
+            serve(load_config(args.config))
+            return 0
+        except (OSError, ValueError, ServiceError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 4
+    elif args.command == "service-file":
+        from skillproof.service import ServiceError, service_file
+        try:
+            sys.stdout.write(service_file(args.config, args.kind))
+            return 0
+        except ServiceError as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 4
+    elif args.command in {"backup", "restore"}:
+        from skillproof.service import ServiceError, backup, load_config, restore
+        try:
+            config = load_config(args.config)
+            result = backup(config) if args.command == "backup" else restore(config, args.source)
+            exit_code = 0
+        except (OSError, ValueError, ServiceError, subprocess.CalledProcessError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "catalogue-check":
         try:

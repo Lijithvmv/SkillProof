@@ -58,7 +58,25 @@ class AnalyzeRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Liveness: the process answers."""
     return {"status": "ok", "version": "1.7.0"}
+
+
+@app.get("/health/ready")
+def health_ready(request: Request) -> JSONResponse:
+    """Readiness: storage is configured and answers a query. 503 otherwise, so a supervisor or balancer can tell."""
+    try:
+        governance = getattr(request.app.state, "governance", None) or governance_from_environment()
+        if governance is None:
+            return JSONResponse({"status": "not_ready", "reason": "storage is not configured"}, status_code=503)
+        request.app.state.governance = governance
+        for store in (governance.registry, governance.approvals, governance.history):
+            with store.db.transaction(None) as db:
+                db.execute("SELECT 1").fetchone()
+        backend = governance.registry.db.dialect
+    except Exception as exc:  # any storage failure means not ready
+        return JSONResponse({"status": "not_ready", "reason": type(exc).__name__}, status_code=503)
+    return JSONResponse({"status": "ready", "storage": backend, "auth": "oidc" if request.app.state.oidc_verifier else "local"})
 
 
 @app.post("/api/v1/skills/analyze", dependencies=[Depends(require_roles("tenant_admin", "evaluator"))])

@@ -126,6 +126,83 @@ API_SHAPED = re.compile(r"^(?:https?|wss?)://(?:api[.\-]|[^/]*\.api\.|mcp\.|[^?#
 URL_TOKEN = re.compile(r"\S+://\S+")
 
 
+# ------------------------------------------------------------------ writes and executions that happen (held-outs 1-4)
+# The same root cause as hosts: a config path or an execution pattern was counted wherever it was NAMED (in a list of
+# folders, an `ls`, a grep, an error message, a test fixture string). It now counts only where it is DONE.
+PROSE_WRITE = re.compile(r"\b(?:write|writes|writing|append|appends|add|adds|save|saves|create|creates|put|insert|"
+                         r"update|edit|modify|copy|place|register|merge|drop|overwrite|replace|generate|commit|"
+                         r"clean(?:ing)?\s+up|cleans\s+up|remov(?:e|es|ing)|rewrit(?:e|es|ing)|trim(?:s|ming)?|"
+                         r"prun(?:e|es|ing)|fix(?:es|ing)?|edits|editing|updates|updating|modif(?:y|ies|ying))\b"
+                         r"[^.;!?]{0,90}$", re.I)
+SHELL_WRITE_BEFORE = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?|\bsed\s+-i\S*\s(?:[^;|&\n]*\s)?|"
+                                r"\b(?:Set-Content|Add-Content|Out-File)\b[^;|&\n]*?(?:-(?:Path|FilePath|LiteralPath)\s+)?|"
+                                r"\b(?:writeFileSync|writeFile|appendFileSync|appendFile|outputFile|outputJson|writeJson)\s*\(\s*|"
+                                r"\bcat\s*>>?\s*)\s*[\"'`]?[^\s\"'`]*$")
+COPY_TO = re.compile(r"\b(?:cp|mv|ln|install|rsync|Copy-Item|Move-Item|copyFileSync|copyFile|shutil\.copy\w*|shutil\.move|"
+                     r"fs\.cp\w*|cpSync)\b")
+WRITE_AFTER = re.compile(r"^[^\s\"'`),]*[\"'`]?\s*\)?\s*(?:\.(?:write_text|write_bytes|write|open\s*\(\s*[\"'][wax])|"
+                         r",\s*[\"'][wax]b?\+?[\"']|,\s*(?:[^,)]*,\s*)?mode\s*=\s*[\"'][wax])")
+WRITTEN_NAME = re.compile(r"(?:\bopen\s*\(\s*|\b(?:writeFileSync|writeFile|appendFileSync|appendFile)\s*\(\s*)([A-Za-z_$][\w$]*)\s*[,)]|"
+                          r"\b([A-Za-z_$][\w$]*)\.(?:write_text|write_bytes|open\s*\(\s*[\"'][wax])|"
+                          r"(?:>>?|\btee\s+(?:-a\s+)?)\s*\"?\$\{?([A-Za-z_]\w*)")
+YAML_TEXT_VALUE = re.compile(r"^\s*(?:-\s+)?(?:description|short-description|summary|when_to_use|usage|instructions?|purpose|"
+                             r"title|notes?)\s*:\s+[\"']?[A-Za-z]", re.I)
+ASSIGN_NAME = re.compile(r"([A-Za-z_$][\w$]*)\s*(?::\s*[\w\[\]. ]+)?\s*=\s*[^=]")
+PROSE_TEXT = re.compile(r"[A-Za-z]{2,}[,:]?\s+[a-z]{2,}\s+[a-z]{2,}|[A-Za-z]:\s|\w\.\s")
+
+
+def written_names(lines: list[str]) -> set[str]:
+    """Names a file writes to: open(x, "w"), x.write_text(...), writeFile(x, ...), echo ... >> "$x"."""
+    names: set[str] = set()
+    for line in lines:
+        for match in WRITTEN_NAME.finditer(line):
+            name = next(g for g in match.groups() if g)
+            if name.startswith("open") is False and (name not in {"f", "fh", "fp"} or ".write" in line):
+                names.add(name)
+    return names
+
+
+def in_message_string(line: str, position: int, backtick_is_string: bool = True) -> bool:
+    """True when position sits inside a string literal whose text before it reads like a sentence ("Use the
+    PowerShell script", "Proof: `sh -c ...`"): a message or fixture, not a command."""
+    prefix = line[:position]
+    quotes = ('"', "'", "`") if backtick_is_string else ('"', "'")
+    quote = max(prefix.rfind(q) for q in quotes)
+    if quote < 0 or prefix.count(prefix[quote]) % 2 == 0:
+        return False
+    return bool(PROSE_TEXT.search(prefix[quote + 1:]))
+
+
+def config_write(line: str, start: int, end: int, *, prose: bool, written: set[str] | frozenset[str] = frozenset()) -> str:
+    """Why the agent-config path at line[start:end] is WRITTEN, or "" when it is only named or read."""
+    token_start = start
+    while token_start > 0 and line[token_start - 1] not in " \t\"'`(=,[{<":
+        token_start -= 1
+    token_end = end
+    while token_end < len(line) and line[token_end] not in " \t\"'`),;]}>|&":
+        token_end += 1
+    before, after = line[:token_start], line[token_end:]
+    if prose:
+        # Code spans and file names hold dots ("`AGENTS.md` (or `CLAUDE.md`"): neutralise them before reading the
+        # sentence, or the write verb before them is cut off.
+        sentence = re.sub(r"`[^`]*`|\b[\w.-]+\.(?:md|json|toml|ya?ml|txt)\b", " X ", SENTENCE_END.split(before)[-1])
+        sentence = SENTENCE_END.split(sentence)[-1]
+        if NEGATED.search(sentence):
+            return ""
+        return "an instruction to write it" if PROSE_WRITE.search(sentence) else ""
+    if SHELL_WRITE_BEFORE.search(before):
+        return "the target of a write"
+    if WRITE_AFTER.search(line[token_start:]):
+        return "opened or written for writing"
+    copy = COPY_TO.search(before)
+    if copy and re.match(r"^[\"'`]?\s*\)?\s*(?:$|[;|&#]|\s+(?:&&|\|\||;))", after):
+        return "the destination of a copy or move"
+    assigned = ASSIGN_NAME.search(before)
+    if assigned and assigned.group(1) in written:
+        return f"assigned to {assigned.group(1)}, which this file writes to"
+    return ""
+
+
 CALL_ARGS = re.compile(r"\(([^()]*)")
 IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
 
@@ -696,6 +773,19 @@ def _add_delete_scope(manifest: Manifest, line: str) -> None:
             manifest.scope("destructive_operations", name, scope)
 
 
+def _add_config_writes(manifest: Manifest, line: str, location: str, *, prose: bool, written=frozenset()) -> None:
+    for name, pattern in AGENT_CONFIG:
+        for match in re.finditer(pattern, line):
+            reason = config_write(line, match.start(), match.end(), prose=prose, written=written)
+            if reason:
+                manifest.add("agent_config_writes", name, location)
+                manifest.reasons.setdefault(f"agent_config_writes|{name}", reason)
+                break
+        else:
+            if re.search(pattern, line):
+                manifest.mention("agent_config_writes", name, location)
+
+
 def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, str]], line: str, location: str) -> None:
     for name, pattern in patterns:
         if re.search(pattern, line, re.I if category != "agent_config_writes" else 0):
@@ -949,6 +1039,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     manifest.add("agent_spawning", name, f"{path}:{text.count(chr(10), 0, match.start()) + 1}")
         lines = _active_lines(path, decoded)
         called = called_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+        written = written_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
         source_lines = decoded.splitlines()
 
         def original_line(number: int, fallback: str) -> str:
@@ -1030,8 +1121,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write
                 # verb on the same line; network and execution patterns stay code-only because prose mentions
                 # of tools are common and harmless.
+                if not TABLE_ROW.match(original_line(number, line)):
+                    _add_config_writes(manifest, line, location, prose=True)
                 if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
-                    _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, line, location)
                     _scan_patterns(manifest, "persistence", PERSISTENCE + SHELL_RC, line, location)
                 continue
             command_line = all_spans = line
@@ -1045,8 +1137,13 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             alternation_free = ALTERNATION.sub(" ", command_line)  # "curl|wget|nc", "{zsh|bash|powershell}" are lists
             _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, alternation_free, location)
             for name, pattern in PROCESS_EXEC:
-                if re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I):
-                    manifest.add("process_execution", name, location)
+                found = re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I)
+                if not found:
+                    continue
+                if not inline_row and in_message_string(line, line.find(found.group(0)) if found.group(0) in line else 0,
+                                                        suffix not in DOC_SUFFIXES):
+                    continue  # inside a message or fixture sentence: "...unavailable in this PowerShell script"
+                manifest.add("process_execution", name, location)
             _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
             if WRITE_CUE.search(command_line):
                 _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
@@ -1054,9 +1151,18 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
             _add_delete_scope(manifest, command_line)
             _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)
-            window = " ".join(row[1] for row in lines[max(0, index - 2): index + 3])
-            if WRITE_CUE.search(window) and not TABLE_ROW.match(full_line):
-                _scan_patterns(manifest, "agent_config_writes", AGENT_CONFIG, command_line, location)
+            if not TABLE_ROW.match(full_line):
+                if inline_row:
+                    # A span in a prose line: an instruction in its sentence ("Add this to `~/.claude/settings.json`"),
+                    # or a write inside the span itself (`echo x >> CLAUDE.md`).
+                    _add_config_writes(manifest, full_line, location, prose=True)
+                    _add_config_writes(manifest, all_spans, location, prose=False)
+                else:
+                    _add_config_writes(manifest, line, location, prose=False, written=written)
+                    if suffix in DOC_SUFFIXES and YAML_TEXT_VALUE.match(line):
+                        # A text value in front matter or YAML in docs ("short-description: Update AGENTS.md with
+                        # design system rules") is a sentence: read it as prose.
+                        _add_config_writes(manifest, line, location, prose=True)
             for match in ENV_READ.finditer(all_spans):
                 name = next(g for g in match.groups() if g).upper()
                 if not is_secret_env(name):

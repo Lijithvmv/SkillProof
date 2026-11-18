@@ -646,3 +646,61 @@ def test_request_method_on_the_line_before_an_inline_url():
     doc = (b"---\nname: t\ndescription: d\n---\nThe client performs an unauthenticated GET\n"
            b"of `https://github.com/tesseract-ocr/tessdata_best/raw/main/<code>.traineddata`.\n")
     assert "github.com" in build_manifest({"references/ocr.md": doc})["capabilities"]["network_hosts"]
+
+
+# ------------------------------------------------------------------ config writes and executions that are done, not named
+from skillproof.capabilities import AGENT_CONFIG, config_write  # noqa: E402
+
+CONFIG_CASES = [
+    ('echo "rule" >> ~/.claude/CLAUDE.md', False, True),
+    ("cp hooks.json ~/.claude/settings.json", False, True),
+    ("cp ~/.claude/settings.json backup.json", False, False),
+    ('ls "$HOME/.claude/skills"', False, False),
+    ("grep -r x ~/.claude/settings.json", False, False),
+    ('for root in (".agents/skills", ".claude/skills"):', False, False),
+    ('Path("CLAUDE.md").write_text(text)', False, True),
+    ('with open("AGENTS.md", "a") as f:', False, True),
+    ('with open("AGENTS.md") as f:', False, False),
+    ("Add this to `~/.claude/settings.json` (Claude Code).", True, True),
+    ("Write the CLAUDE.md to the target repo root.", True, True),
+    ("Skills live in `.claude/skills` and are discovered once.", True, False),
+    ("Never write to CLAUDE.md directly.", True, False),
+    ("- Project instructions: <AGENTS.md/CLAUDE.md or equivalent>", True, False),
+]
+
+
+@pytest.mark.parametrize("line,prose,expected", CONFIG_CASES)
+def test_config_writes_count_only_when_written(line, prose, expected):
+    match = re.search("|".join(p for _, p in AGENT_CONFIG), line)
+    assert bool(config_write(line, match.start(), match.end(), prose=prose)) is expected
+
+
+def test_config_path_held_in_a_variable_that_is_written():
+    script = b'from pathlib import Path\ntarget = Path.home() / ".claude" / "CLAUDE.md"\nmemory = "~/.claude/CLAUDE.md"\nopen(memory, "a").write("x")\n'
+    manifest = build_manifest({"scripts/install.py": script})
+    assert "CLAUDE.md" in manifest["capabilities"]["agent_config_writes"]
+
+
+def test_execution_named_in_a_message_is_not_execution():
+    script = (b'def guard():\n    raise RuntimeError("Safe operations are unavailable in this PowerShell script; use the shell one")\n'
+              b'import subprocess\nsubprocess.run(["git", "status"])\n')
+    found = build_manifest({"scripts/a.py": script})["capabilities"]["process_execution"]
+    assert "subprocess" in found and "powershell" not in found
+
+
+def test_edit_instructions_on_agent_config_count():
+    line = '**Auditing or cleaning up prompts, tool descriptions, skills, or agent configuration files such as `CLAUDE.md`:**'
+    match = re.search(r"CLAUDE\.md", line)
+    assert config_write(line, match.start(), match.end(), prose=True)
+
+
+def test_config_write_instructions_with_file_names_in_the_sentence():
+    line = "Do **not** skip this. Add a one-line marker to the project's `AGENTS.md` (or `CLAUDE.md` in Claude Code) so prompts reload it."
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        match = re.search(re.escape(name), line)
+        assert config_write(line, match.start(), match.end(), prose=True), name
+
+
+def test_front_matter_description_that_writes_agent_config():
+    skill = b"---\nname: rules\ndescription: Make rules.\nshort-description: Update AGENTS.md with design system rules\n---\nBody.\n"
+    assert "AGENTS.md" in build_manifest({"SKILL.md": skill})["capabilities"]["agent_config_writes"]

@@ -24,6 +24,7 @@ import base64
 import binascii
 import ipaddress
 import json
+import hashlib
 import re
 import stat
 import unicodedata
@@ -192,6 +193,12 @@ EXEC_CALL = re.compile(r"\bsubprocess\.\w+\s*\(|\bos\.(?:system|popen|exec\w*)\s
 # Only a label counts ("// VULNERABLE - Node.js", "# BAD:", "# ❌ wrong"); "# Never run as root" heads a real command.
 ANTI_EXAMPLE = re.compile(r"^\s*(?:#|//|--)\s*(?:❌|(?i:vulnerable|insecure|unsafe|bad|wrong|anti-?pattern)(?:\s*$|\s*[:(]|\s+[-–—])|DON'?T\b)")
 MODULE_LOAD = re.compile(r"(?:\bfrom|\brequire\s*\(|\bimport\s*\(?)\s*$")  # import { spawn } from "node:child_process"
+NEGATED_LABEL = re.compile(r"^\s*(?:#+\s*)?(?:\*\*|__)?\s*(?:[✗❌🚫×]\s*)?(?:don'?t|do not|never|avoid|bad|wrong)\b[^.!?:]{0,30}:?\s*(?:\*\*|__)?\s*:?\s*$", re.I)
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+# A bin the file itself runs as already installed (npx --no-install X, pnpm exec X): npx/bunx X runs that local bin.
+LOCAL_BIN = re.compile(r"\b(?:npx\s+(?:--no-install|--no)\s+|(?:pnpm|yarn)\s+exec\s+|npm\s+exec\s+--no\s+(?:--\s+)?|bun\s+x\s+--no-install\s+)(@?[\w./@-]+)")
+# The only argument is a slot: an all-caps word (TRIGGER, CMD), <cmd>, {cmd} or an ellipsis. "$CMD" is a real value.
+PLACEHOLDER_ARG = re.compile(r"^\s*([\"']?)(?:[A-Z][A-Z_]{2,}|<[^>\s]+>|\{[^}\s]+\}|\.\.\.|…)\1\s*(?:$|[`;)/|]|\s(?:/|or\b))")
 SETTING_SHELL = re.compile(r"\bshell\s*:\s*[\"']?$")  # `shell: pwsh` names a CI step's shell; nothing is launched by the skill
 SHELL_SCRIPT_SUFFIXES = {".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd"}
 
@@ -916,6 +923,36 @@ def _add_credentials(manifest: Manifest, line: str, location: str, own_env: set[
             manifest.mention("credential_access", name, location)
 
 
+# A client named but not used: arguments that are only an ellipsis (`httpx.Client(...)`, `curl … | bash` describe a
+# call's shape), a regex escape after the name (`axios\.` in a search pattern), or the bare name as a whole string
+# ("curl",  # in a blocked-commands list).
+# `httpx.Client(...)` in "Always use `with httpx.Client(...)`" still tells the agent to use httpx: it counts (the same
+# sentence was labelled real in one skill and false in another; the engine treats both alike).
+CLIENT_SHAPE_ONLY = re.compile(r"^(?:\s+(?:\.\.\.|…)(?:\s|$|[|`])|\\[.(])")
+
+
+def client_reason(line: str, match: re.Match) -> str:
+    if CLIENT_SHAPE_ONLY.match(line[match.end():]):
+        return ""
+    before, after = line[: match.start()], line[match.end():]
+    if re.search(r"[\"'`]$", before) and after[:1] and after[0] == before[-1]:
+        return ""
+    return "used in code or a command"
+
+
+def _add_clients(manifest: Manifest, line: str, location: str) -> None:
+    for name, pattern in NETWORK_CLIENTS:
+        matches = list(re.finditer(pattern, line, re.I))
+        if not matches:
+            continue
+        reason = next((r for r in (client_reason(line, m) for m in matches) if r), "")
+        if reason:
+            manifest.add("network_clients", name, location)
+            manifest.reasons.setdefault(f"network_clients|{name}", reason)
+        else:
+            manifest.mention("network_clients", name, location)
+
+
 def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, str]], line: str, location: str) -> None:
     for name, pattern in patterns:
         if re.search(pattern, line, re.I if category != "agent_config_writes" else 0):
@@ -1127,218 +1164,306 @@ def _add_hooks(manifest: Manifest, path: str, suffix: str, text: str) -> None:
                 manifest.add("package_installs", f"{re.sub(chr(92) + 's+', ' ', groups[0]).lower()}:{groups[-1]}", location)
 
 
+# ------------------------------------------------------------------ per-file cache
+_FILE_CACHE: dict[tuple[str, bytes], list[tuple]] = {}
+_FILE_CACHE_LIMIT = 200_000
+
+
+class _RecordedReasons(dict):
+    def __init__(self, ops: list[tuple]) -> None:
+        super().__init__()
+        self._ops = ops
+
+    def setdefault(self, key, default=None):  # first seen wins, in file order, as on a real manifest
+        self._ops.append(("reason", key, default))
+        return super().setdefault(key, default)
+
+
+class _Recorder:
+    """Stands in for a Manifest while one file is analysed and records every call in order."""
+
+    def __init__(self) -> None:
+        self.ops: list[tuple] = []
+        self.reasons = _RecordedReasons(self.ops)
+        self.decode_trail: list[dict[str, str]] = []
+        self.ops.append(("trail", self.decode_trail))
+
+    def add(self, category: str, value: str, location: str) -> None:
+        self.ops.append(("add", category, value, location))
+
+    def mention(self, category: str, value: str, location: str) -> None:
+        self.ops.append(("mention", category, value, location))
+
+    def scope(self, category: str, value: str, scope: str | None) -> None:
+        self.ops.append(("scope", category, value, scope))
+
+
+def _replay(manifest: "Manifest", ops: list[tuple]) -> None:
+    for op in ops:
+        kind = op[0]
+        if kind == "add":
+            manifest.add(op[1], op[2], op[3])
+        elif kind == "mention":
+            manifest.mention(op[1], op[2], op[3])
+        elif kind == "scope":
+            manifest.scope(op[1], op[2], op[3])
+        elif kind == "reason":
+            manifest.reasons.setdefault(op[1], op[2])
+        else:
+            manifest.decode_trail.extend(dict(step) for step in op[1])
+
+
 def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
-    manifest = Manifest(files=len(files))
+    """The capability manifest of a package. Each file is analysed on its own; its result (an ordered list of
+    manifest calls) is cached by path and content, so a history of many versions re-reads only changed files.
+    Replaying the calls in path order gives exactly the manifest a full scan gives."""
+    result = Manifest(files=len(files))
     for path in sorted(files):
         raw = files[path]
-        suffix = PurePosixPath(path).suffix.lower()
-        is_binary = suffix in BINARY_SUFFIXES or raw[:4] in {b"\x7fELF", b"MZ\x90\x00"} or raw[:2] == b"MZ" or b"\x00" in raw[:4096]
-        if is_binary and suffix not in TEXT_SUFFIXES:
-            manifest.add("bundled_binaries", path, path)
+        key = (path, hashlib.sha256(raw).digest())
+        cached = _FILE_CACHE.get(key)
+        if cached is not None:
+            _replay(result, cached)
             continue
-        vendored = VENDORED.match(path)
-        if vendored:
-            manifest.add("package_installs", "vendored:" + vendored.group(1), vendored.group(1))
-            continue
+        manifest = _Recorder()
+        failed = False
         try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            manifest.add("bundled_binaries", path, path)
-            continue
-        if path == "SKILL.md":  # only the skill's own manifest declares its tools
-            tools, key_line = _declared_tools(text)
-            for tool in tools:
-                manifest.add("declared_tools", tool, f"SKILL.md:{key_line}")
-        if not TEST_PATH.search(path):
-            _add_hooks(manifest, path, suffix, text)
-        trail_start = len(manifest.decode_trail)
-        if suffix == ".py":
-            text = _mask_python(text)
-        is_test = bool(TEST_PATH.search(path) or TEST_NAME.match(PurePosixPath(path).name))
-        decoded = decode_text(text, path, manifest.decode_trail)
-        for step in manifest.decode_trail[trail_start:]:
-            # Hiding matters when it hides something: count a technique only if what it revealed is itself a
-            # capability (a host, a command, a config path...). Ordinary "a" + "b" joins are not disguise.
-            if _reveals_capability(step["after"]):
-                step["revealed_capability"] = "yes"
-                manifest.add("hiding_techniques", step["technique"], path)
-        original_lines = len(text.splitlines())
-        if suffix in SCRIPT_SUFFIXES and not is_test:
-            for name, pattern in ARGV_AGENT:
-                for match in pattern.finditer(text):
-                    manifest.add("agent_spawning", name, f"{path}:{text.count(chr(10), 0, match.start()) + 1}")
-        lines = _active_lines(path, decoded)
-        called = called_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
-        written = written_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
-        run_names = exec_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
-        string_quotes = ('"', "'", "`") if suffix in {".js", ".mjs", ".cjs", ".ts"} else ('"', "'")
-        anti_example, last_number = False, 0
-        own_env = own_env_files([text for _, text, code in lines if code], written)
-        source_lines = decoded.splitlines()
+            suffix = PurePosixPath(path).suffix.lower()
+            is_binary = suffix in BINARY_SUFFIXES or raw[:4] in {b"\x7fELF", b"MZ\x90\x00"} or raw[:2] == b"MZ" or b"\x00" in raw[:4096]
+            if is_binary and suffix not in TEXT_SUFFIXES:
+                manifest.add("bundled_binaries", path, path)
+                continue
+            vendored = VENDORED.match(path)
+            if vendored:
+                manifest.add("package_installs", "vendored:" + vendored.group(1), vendored.group(1))
+                continue
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                manifest.add("bundled_binaries", path, path)
+                continue
+            if path == "SKILL.md":  # only the skill's own manifest declares its tools
+                tools, key_line = _declared_tools(text)
+                for tool in tools:
+                    manifest.add("declared_tools", tool, f"SKILL.md:{key_line}")
+            if not TEST_PATH.search(path):
+                _add_hooks(manifest, path, suffix, text)
+            trail_start = len(manifest.decode_trail)
+            if suffix == ".py":
+                text = _mask_python(text)
+            is_test = bool(TEST_PATH.search(path) or TEST_NAME.match(PurePosixPath(path).name))
+            decoded = decode_text(text, path, manifest.decode_trail)
+            for step in manifest.decode_trail[trail_start:]:
+                # Hiding matters when it hides something: count a technique only if what it revealed is itself a
+                # capability (a host, a command, a config path...). Ordinary "a" + "b" joins are not disguise.
+                if _reveals_capability(step["after"]):
+                    step["revealed_capability"] = "yes"
+                    manifest.add("hiding_techniques", step["technique"], path)
+            original_lines = len(text.splitlines())
+            if suffix in SCRIPT_SUFFIXES and not is_test:
+                for name, pattern in ARGV_AGENT:
+                    for match in pattern.finditer(text):
+                        manifest.add("agent_spawning", name, f"{path}:{text.count(chr(10), 0, match.start()) + 1}")
+            lines = _active_lines(path, decoded)
+            called = called_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+            written = written_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+            run_names = exec_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+            string_quotes = ('"', "'", "`") if suffix in {".js", ".mjs", ".cjs", ".ts"} else ('"', "'")
+            anti_example, last_number, negated_list = False, 0, False
+            local_bins = set(LOCAL_BIN.findall(text)) if suffix in DOC_SUFFIXES or suffix in SCRIPT_SUFFIXES else set()
+            own_env = own_env_files([text for _, text, code in lines if code], written)
+            source_lines = decoded.splitlines()
 
-        def original_line(number: int, fallback: str) -> str:
-            return source_lines[number - 1] if 0 < number <= len(source_lines) else fallback
-        for index, (number, line, is_code) in enumerate(lines):
-            location = f"{path}:{number}" if number <= original_lines else f"{path}:decoded"
-            if number > original_lines:
-                is_code = True  # revealed payloads are always treated as code
-            in_comment = is_code and number <= original_lines and bool(COMMENT_LINE.match(line)) and suffix in SCRIPT_SUFFIXES
-            if in_comment:
-                continue  # a comment describes code; it does not run (license headers, notes about attacks)
-            full_line = original_line(number, line)
-            inline_row = suffix in DOC_SUFFIXES and is_code and line != full_line
-            fenced_row = suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines
-            if not fenced_row or number != last_number + 1 or not line.strip():
-                anti_example = False  # an example's marker covers its own lines, up to a blank line or the fence end
-            last_number = number
-            if fenced_row and DOC_COMMENT.match(line):
-                anti_example = bool(ANTI_EXAMPLE.match(line))
-                continue  # a comment inside a fenced example ("# Available at: https://...")
-            if fenced_row and anti_example:
-                continue  # under "// VULNERABLE" or "# BAD": what not to write, shown to be avoided
-            cue = is_code or bool(FETCH_CUE.search(line))
-            previous = lines[index - 1][1] if index > 0 else ""
-            neighbours = [n for n in (previous, lines[index + 1][1] if index + 1 < len(lines) else "") if n]
-            hosts_apply = not is_test and not ECHO_LINE.match(line) and not (suffix in DOC_SUFFIXES and TABLE_ROW.match(full_line))
-            if cue and hosts_apply and PurePosixPath(path).name.lower() not in LOCKFILES:
-                for match in URL.finditer(line):
-                    host = match.group(1).lower().strip("[]")
-                    if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
+            def original_line(number: int, fallback: str) -> str:
+                return source_lines[number - 1] if 0 < number <= len(source_lines) else fallback
+            for index, (number, line, is_code) in enumerate(lines):
+                location = f"{path}:{number}" if number <= original_lines else f"{path}:decoded"
+                if number > original_lines:
+                    is_code = True  # revealed payloads are always treated as code
+                in_comment = is_code and number <= original_lines and bool(COMMENT_LINE.match(line)) and suffix in SCRIPT_SUFFIXES
+                if in_comment:
+                    continue  # a comment describes code; it does not run (license headers, notes about attacks)
+                full_line = original_line(number, line)
+                inline_row = suffix in DOC_SUFFIXES and is_code and line != full_line
+                if suffix in DOC_SUFFIXES and number <= original_lines and not inline_row:
+                    # A list under a "**✗ Don't:**" / "Avoid:" label: every item in it is something not to do.
+                    if not is_code and NEGATED_LABEL.match(line):
+                        negated_list = True
+                    elif is_code or not line.strip() or not LIST_ITEM.match(line):
+                        negated_list = False
+                if inline_row and negated_list and LIST_ITEM.match(full_line):
+                    continue
+                fenced_row = suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines
+                if not fenced_row or number != last_number + 1 or not line.strip():
+                    anti_example = False  # an example's marker covers its own lines, up to a blank line or the fence end
+                last_number = number
+                if fenced_row and DOC_COMMENT.match(line):
+                    anti_example = bool(ANTI_EXAMPLE.match(line))
+                    continue  # a comment inside a fenced example ("# Available at: https://...")
+                if fenced_row and anti_example:
+                    continue  # under "// VULNERABLE" or "# BAD": what not to write, shown to be avoided
+                cue = is_code or bool(FETCH_CUE.search(line))
+                previous = lines[index - 1][1] if index > 0 else ""
+                neighbours = [n for n in (previous, lines[index + 1][1] if index + 1 < len(lines) else "") if n]
+                hosts_apply = not is_test and not ECHO_LINE.match(line) and not (suffix in DOC_SUFFIXES and TABLE_ROW.match(full_line))
+                if cue and hosts_apply and PurePosixPath(path).name.lower() not in LOCKFILES:
+                    for match in URL.finditer(line):
+                        host = match.group(1).lower().strip("[]")
+                        if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
+                            continue
+                        if NOT_CONTACTED_CONTEXT.search(line[: match.start()]):
+                            continue
+                        if inline_row and PROVENANCE.search(full_line):
+                            # "Adapted from `x.md` in the `https://github.com/x/y` repo" credits a source. Only provenance
+                            # lines: a bare URL span is otherwise often a real API base ("Base: `https://api.x/v1`"),
+                            # and a broader rule lost 9 true hosts on held-out 2.
+                            continue
+                        if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES) or CSP_LINE.search(line):
+                            continue
+                        if not is_code and not _prose_cue(line, match.start()):
+                            continue
+                        if "<!DOCTYPE" in line[: match.start()].upper():
+                            continue  # a DTD reference names a document type; nothing is fetched
+                        if host.endswith("."):
+                            continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
+                        rest = line[match.end():]
+                        if BRACKET_SEGMENT.match(rest):
+                            continue
+                        if PLACEHOLDER_PATH.match(rest) and not (suffix in SCRIPT_SUFFIXES and re.match(r"^/(?:\{|\$\{)", rest)):
+                            continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
+                        if number > original_lines:
+                            reason = "revealed by decoding hidden text"
+                        elif is_code:
+                            if inline_row:
+                                # An inline span from a prose line: judge it in its sentence ("Use URL `https://...`").
+                                at = full_line.find(match.group(0))
+                                prose_before = original_line(number - 1, "") if number > 1 else ""
+                                reason = contact_reason(full_line, at, path, (), prose_before) if at >= 0 else ""
+                            else:
+                                reason = contact_reason(line, match.start(), path, neighbours, previous, called)
+                        else:
+                            reason = "an instruction to fetch or send"
+                        if not reason:
+                            manifest.mention("network_hosts", host, location)
+                            continue
+                        manifest.add("network_hosts", host, location)
+                        manifest.reasons.setdefault(f"network_hosts|{host}", reason)
+                    if is_code:
+                        for ip_match in IPV4.finditer(line):
+                            ip = ip_match.group(0)
+                            if re.match(r"/\d{1,2}\b", line[ip_match.end():]):
+                                continue  # "3.40.9.80/28" is an address range (an allowlist entry), not a target
+                            if IP_DATA_KEY.search(line[: ip_match.start()]) or CSP_LINE.search(line):
+                                continue  # a field of a sample log record, or a browser allowlist
+                            if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
+                                reason = ("revealed by decoding hidden text" if number > original_lines
+                                          else contact_reason(line, ip_match.start(), path, neighbours, previous, called))
+                                if not reason:
+                                    manifest.mention("network_hosts", ip, location)
+                                    continue
+                                manifest.add("network_hosts", ip, location)
+                                manifest.reasons.setdefault(f"network_hosts|{ip}", reason)
+                if not is_code:
+                    # Prose still matters for the two most specific attacks: an instruction to write to agent
+                    # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write
+                    # verb on the same line; network and execution patterns stay code-only because prose mentions
+                    # of tools are common and harmless.
+                    if not TABLE_ROW.match(original_line(number, line)):
+                        _add_config_writes(manifest, line, location, prose=True)
+                    if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
+                        _scan_patterns(manifest, "persistence", PERSISTENCE + SHELL_RC, line, location)
+                    continue
+                command_line = all_spans = line
+                if inline_row:
+                    # An inline-code row from Markdown prose. Drop spans the sentence negates ("Never run its setup
+                    # scripts or `curl | sh`"), and treat a single bare word (`curl`, `os.environ`, `httpx.Client`,
+                    # `~/Library/LaunchAgents` listed as an indicator) as a mention: a command has arguments.
+                    # A sentence wrapped across lines ("..., never by\n`rm -rf`."): read the line before as part of it.
+                    above = original_line(number - 1, "").strip() if number > 1 else ""
+                    carried = above + " " if above and not re.search(r"[.!?:]\s*$|^#", above) and not LIST_ITEM.match(full_line) else ""
+                    spans = [m.group(1) for m in INLINE_CODE.finditer(full_line)
+                             if not NEGATED.search((carried + full_line[: m.start()])[-60:])]
+                    all_spans = " ; ".join(spans)
+                    command_line = " ; ".join(s for s in spans if len(s.split()) > 1)
+                alternation_free = ALTERNATION.sub(" ", command_line)  # "curl|wget|nc", "{zsh|bash|powershell}" are lists
+                _add_clients(manifest, alternation_free, location)
+                for name, pattern in PROCESS_EXEC:
+                    found = re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I)
+                    if not found:
                         continue
-                    if NOT_CONTACTED_CONTEXT.search(line[: match.start()]):
-                        continue
-                    if inline_row and PROVENANCE.search(full_line):
-                        # "Adapted from `x.md` in the `https://github.com/x/y` repo" credits a source. Only provenance
-                        # lines: a bare URL span is otherwise often a real API base ("Base: `https://api.x/v1`"),
-                        # and a broader rule lost 9 true hosts on held-out 2.
-                        continue
-                    if PLACEHOLDER_HOST.search(host) or _not_a_target_ip(host, suffix in DOC_SUFFIXES) or CSP_LINE.search(line):
-                        continue
-                    if not is_code and not _prose_cue(line, match.start()):
-                        continue
-                    if "<!DOCTYPE" in line[: match.start()].upper():
-                        continue  # a DTD reference names a document type; nothing is fetched
-                    if host.endswith("."):
-                        continue  # a templated host such as https://aws-external-anthropic.{region}.api.aws
-                    rest = line[match.end():]
-                    if BRACKET_SEGMENT.match(rest):
-                        continue
-                    if PLACEHOLDER_PATH.match(rest) and not (suffix in SCRIPT_SUFFIXES and re.match(r"^/(?:\{|\$\{)", rest)):
-                        continue  # a template link such as https://github.com/owner/repo/pull/123; in code, {x} is interpolation
+                    at = line.find(found.group(0)) if found.group(0) in line else -1
+                    if name == "powershell" and SETTING_SHELL.search(alternation_free[: found.start()]):
+                        continue  # `shell: pwsh` in a workflow names the shell of a CI step
+                    if PLACEHOLDER_ARG.match(alternation_free[found.end():]):
+                        manifest.mention("process_execution", name, location)
+                        continue  # `bash -c 'TRIGGER'`, `sh -c <cmd>`: the shape of a command, its argument a slot
+                    if not inline_row and in_message_string(line, max(at, 0), suffix not in DOC_SUFFIXES):
+                        continue  # inside a message or fixture sentence: "...unavailable in this PowerShell script"
+                    reason = "called in code"
                     if number > original_lines:
                         reason = "revealed by decoding hidden text"
-                    elif is_code:
-                        if inline_row:
-                            # An inline span from a prose line: judge it in its sentence ("Use URL `https://...`").
-                            at = full_line.find(match.group(0))
-                            prose_before = original_line(number - 1, "") if number > 1 else ""
-                            reason = contact_reason(full_line, at, path, (), prose_before) if at >= 0 else ""
-                        else:
-                            reason = contact_reason(line, match.start(), path, neighbours, previous, called)
+                    elif not inline_row and at >= 0 and suffix not in SHELL_SCRIPT_SUFFIXES:
+                        reason = exec_reason(line, at, previous=previous, names=run_names, quotes=string_quotes)
+                        if not reason:
+                            manifest.mention("process_execution", name, location)
+                            continue  # a sample or fixture string holding code as text, never run
+                    manifest.add("process_execution", name, location)
+                    manifest.reasons.setdefault(f"process_execution|{name}", reason)
+                _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
+                if WRITE_CUE.search(command_line):
+                    _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
+                _add_credentials(manifest, command_line, location, own_env, is_test)
+                _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
+                _add_delete_scope(manifest, command_line)
+                _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)
+                if not TABLE_ROW.match(full_line):
+                    if inline_row:
+                        # A span in a prose line: an instruction in its sentence ("Add this to `~/.claude/settings.json`"),
+                        # or a write inside the span itself (`echo x >> CLAUDE.md`).
+                        _add_config_writes(manifest, full_line, location, prose=True)
+                        _add_config_writes(manifest, all_spans, location, prose=False)
                     else:
-                        reason = "an instruction to fetch or send"
-                    if not reason:
-                        manifest.mention("network_hosts", host, location)
-                        continue
-                    manifest.add("network_hosts", host, location)
-                    manifest.reasons.setdefault(f"network_hosts|{host}", reason)
-                if is_code:
-                    for ip_match in IPV4.finditer(line):
-                        ip = ip_match.group(0)
-                        if re.match(r"/\d{1,2}\b", line[ip_match.end():]):
-                            continue  # "3.40.9.80/28" is an address range (an allowlist entry), not a target
-                        if IP_DATA_KEY.search(line[: ip_match.start()]) or CSP_LINE.search(line):
-                            continue  # a field of a sample log record, or a browser allowlist
-                        if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
-                            reason = ("revealed by decoding hidden text" if number > original_lines
-                                      else contact_reason(line, ip_match.start(), path, neighbours, previous, called))
-                            if not reason:
-                                manifest.mention("network_hosts", ip, location)
-                                continue
-                            manifest.add("network_hosts", ip, location)
-                            manifest.reasons.setdefault(f"network_hosts|{ip}", reason)
-            if not is_code:
-                # Prose still matters for the two most specific attacks: an instruction to write to agent
-                # configuration ("append this to ~/.claude/CLAUDE.md") or to a startup file. Both need a write
-                # verb on the same line; network and execution patterns stay code-only because prose mentions
-                # of tools are common and harmless.
-                if not TABLE_ROW.match(original_line(number, line)):
-                    _add_config_writes(manifest, line, location, prose=True)
-                if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
-                    _scan_patterns(manifest, "persistence", PERSISTENCE + SHELL_RC, line, location)
-                continue
-            command_line = all_spans = line
-            if inline_row:
-                # An inline-code row from Markdown prose. Drop spans the sentence negates ("Never run its setup
-                # scripts or `curl | sh`"), and treat a single bare word (`curl`, `os.environ`, `httpx.Client`,
-                # `~/Library/LaunchAgents` listed as an indicator) as a mention: a command has arguments.
-                spans = [m.group(1) for m in INLINE_CODE.finditer(full_line) if not NEGATED.search(full_line[: m.start()][-60:])]
-                all_spans = " ; ".join(spans)
-                command_line = " ; ".join(s for s in spans if len(s.split()) > 1)
-            alternation_free = ALTERNATION.sub(" ", command_line)  # "curl|wget|nc", "{zsh|bash|powershell}" are lists
-            _scan_patterns(manifest, "network_clients", NETWORK_CLIENTS, alternation_free, location)
-            for name, pattern in PROCESS_EXEC:
-                found = re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I)
-                if not found:
-                    continue
-                at = line.find(found.group(0)) if found.group(0) in line else -1
-                if name == "powershell" and SETTING_SHELL.search(alternation_free[: found.start()]):
-                    continue  # `shell: pwsh` in a workflow names the shell of a CI step
-                if not inline_row and in_message_string(line, max(at, 0), suffix not in DOC_SUFFIXES):
-                    continue  # inside a message or fixture sentence: "...unavailable in this PowerShell script"
-                reason = "called in code"
-                if number > original_lines:
-                    reason = "revealed by decoding hidden text"
-                elif not inline_row and at >= 0 and suffix not in SHELL_SCRIPT_SUFFIXES:
-                    reason = exec_reason(line, at, previous=previous, names=run_names, quotes=string_quotes)
-                    if not reason:
-                        manifest.mention("process_execution", name, location)
-                        continue  # a sample or fixture string holding code as text, never run
-                manifest.add("process_execution", name, location)
-                manifest.reasons.setdefault(f"process_execution|{name}", reason)
-            _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
-            if WRITE_CUE.search(command_line):
-                _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
-            _add_credentials(manifest, command_line, location, own_env, is_test)
-            _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
-            _add_delete_scope(manifest, command_line)
-            _scan_patterns(manifest, "agent_spawning", AGENT_SPAWNING, command_line, location)
-            if not TABLE_ROW.match(full_line):
-                if inline_row:
-                    # A span in a prose line: an instruction in its sentence ("Add this to `~/.claude/settings.json`"),
-                    # or a write inside the span itself (`echo x >> CLAUDE.md`).
-                    _add_config_writes(manifest, full_line, location, prose=True)
-                    _add_config_writes(manifest, all_spans, location, prose=False)
-                else:
-                    _add_config_writes(manifest, line, location, prose=False, written=written)
-                    if suffix in DOC_SUFFIXES and YAML_TEXT_VALUE.match(line):
-                        # A text value in front matter or YAML in docs ("short-description: Update AGENTS.md with
-                        # design system rules") is a sentence: read it as prose.
-                        _add_config_writes(manifest, line, location, prose=True)
-            for match in ENV_READ.finditer(all_spans):
-                name = next(g for g in match.groups() if g).upper()
-                if not is_secret_env(name):
-                    continue  # $env:APPDATA is a folder, AGENT_ID an identifier, PORT configuration: not secrets
-                manifest.add("credential_access", "env:" + name, location)
-            if ENV_ALL.search(command_line):
-                manifest.add("credential_access", "env:<all>", location)
-            if is_test:
-                continue  # an install command inside a test's string data is test input, not something run
-            for match in INSTALL.finditer(line):
-                full = original_line(number, line)
-                command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
-                if NEGATED.search(full[: max(0, full.find(command))][-40:]):
-                    continue  # "do not run `npm install` first" is the opposite of an install
-                groups = [g for g in match.groups() if g]
-                tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
-                tool = TOOL_ALIASES.get(tool, tool)
-                package = groups[-1].strip(".,;:)\"'`").rstrip("@")  # "@ag-ui/client@<pinned version>" -> the name
-                if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES and not PLACEHOLDER_TOKEN.search(package):
-                    manifest.add("package_installs", f"{tool}:{package}", location)
-                    if tool in MULTI_INSTALL_TOOLS and "://" not in package:
-                        for extra in _more_packages(line[match.end():]):
-                            manifest.add("package_installs", f"{tool}:{extra}", location)
-    return manifest.to_dict()
+                        _add_config_writes(manifest, line, location, prose=False, written=written)
+                        if suffix in DOC_SUFFIXES and YAML_TEXT_VALUE.match(line):
+                            # A text value in front matter or YAML in docs ("short-description: Update AGENTS.md with
+                            # design system rules") is a sentence: read it as prose.
+                            _add_config_writes(manifest, line, location, prose=True)
+                for match in ENV_READ.finditer(all_spans):
+                    name = next(g for g in match.groups() if g).upper()
+                    if not is_secret_env(name):
+                        continue  # $env:APPDATA is a folder, AGENT_ID an identifier, PORT configuration: not secrets
+                    manifest.add("credential_access", "env:" + name, location)
+                if ENV_ALL.search(command_line):
+                    manifest.add("credential_access", "env:<all>", location)
+                if is_test:
+                    continue  # an install command inside a test's string data is test input, not something run
+                for match in INSTALL.finditer(line):
+                    full = original_line(number, line)
+                    command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
+                    if NEGATED.search(full[: max(0, full.find(command))][-40:]):
+                        continue  # "do not run `npm install` first" is the opposite of an install
+                    groups = [g for g in match.groups() if g]
+                    tool = "uv" if match.group(3) else re.sub(r"\s+", " ", groups[0]).lower()
+                    tool = TOOL_ALIASES.get(tool, tool)
+                    package = groups[-1].strip(".,;:)\"'`").rstrip("@")  # "@ag-ui/client@<pinned version>" -> the name
+                    if package and not package.startswith("-") and package.lower() not in STOP_PACKAGES and not PLACEHOLDER_TOKEN.search(package):
+                        if tool in {"npx", "bunx", "pnpm dlx"} and package in local_bins:
+                            manifest.mention("package_installs", f"{tool}:{package}", location)
+                            continue  # runs a bin the file says is already installed; nothing is fetched
+                        manifest.add("package_installs", f"{tool}:{package}", location)
+                        if tool in MULTI_INSTALL_TOOLS and "://" not in package:
+                            for extra in _more_packages(line[match.end():]):
+                                manifest.add("package_installs", f"{tool}:{extra}", location)
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if not failed:
+                if len(_FILE_CACHE) >= _FILE_CACHE_LIMIT:
+                    _FILE_CACHE.clear()
+                _FILE_CACHE[key] = manifest.ops
+                _replay(result, manifest.ops)
+    return result.to_dict()
 
 
 TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec)/", re.I)

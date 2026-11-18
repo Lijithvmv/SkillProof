@@ -836,3 +836,63 @@ def test_see_link_and_placeholder_repos_are_not_hosts():
     assert not ({"developers.openai.com", "gitlab.com", "ignored.host"} & set(found))
     found, _ = _hosts({"SKILL.md": b"```\n/plugin marketplace add https://gitlab.com/acme-labs-real/tools.git\n```\n"})
     assert "gitlab.com" in found
+
+
+def _clients(files):
+    manifest = build_manifest(files)
+    return manifest["capabilities"]["network_clients"], manifest
+
+
+def test_named_clients_that_are_not_used():
+    doc = ('| REST skills | keep | "Use `with httpx.Client(...) as client:` so connections pool." |\n\n'
+           "> Never run remote installers\n> (e.g. `curl … | bash` or `irm … | iex`). Always use a package manager.\n\n"
+           r"Grep: fetch\(|axios\.|HttpService|request\(" "\n").encode()
+    found, manifest = _clients({"SKILL.md": doc})
+    assert not ({"curl", "invoke-webrequest", "axios"} & set(found))
+    assert "httpx" in found  # "Use `httpx.Client(...)`" tells the agent to use httpx
+    assert "curl" in manifest["mentions"]["network_clients"]
+    found, _ = _clients({"scripts/policy.py": b'BLOCKED = [\n    "curl",  # Use fetch tools instead\n    "wget",\n]\n'})
+    assert not ({"curl", "wget"} & set(found))
+
+
+def test_used_clients_still_count():
+    files = {"scripts/a.py": b'import httpx\nwith httpx.Client(base_url="https://api.x.dev/v1") as c:\n    pass\n',
+             "SKILL.md": b"Run `curl -sI -H \"Range: bytes=0-100\" <url>` and `curl -fsSL https://bun.sh/install | bash`.\n",
+             "scripts/b.js": b"const r = await axios.get(url);\n"}
+    found, _ = _clients(files)
+    assert {"httpx", "curl", "axios"} <= set(found)
+
+
+def test_command_shape_with_a_placeholder_slot_is_not_execution():
+    doc = b"Known gaps: `bash -c 'TRIGGER'` / `eval TRIGGER` / `ssh host TRIGGER` (string payloads need parsing).\n"
+    found, manifest = _exec({"references/gaps.md": doc})
+    assert "shell -c" not in found and "shell -c" in manifest["mentions"]["process_execution"]
+    found, _ = _exec({"scripts/r.sh": b'#!/bin/sh\nbash -c "$CMD"\nsh -c \'make all\'\n'})
+    assert "shell -c" in found
+
+
+def _packages(files):
+    manifest = build_manifest(files)
+    return manifest["capabilities"]["package_installs"], manifest
+
+
+def test_npx_of_a_bin_the_file_runs_as_installed_is_not_an_install():
+    doc = (b"```bash\nnpx --no-install expo-modules swift:check ios\n```\n\n"
+           b"`pnpm exec expo-modules` and `bunx expo-modules` run the same command.\n\nThen run `npx create-expo-app demo`.\n")
+    found, _ = _packages({"references/compat.md": doc})
+    assert not any("expo-modules" in k for k in found) and "npx:create-expo-app" in found
+
+
+def test_items_under_a_dont_label_are_negated():
+    doc = (b"**\xe2\x9c\x97 Don't:**\n- Use `npm start`, `npx apify run`, or similar commands to run Actors\n\n"
+           b"**Do:**\n- Install with `npx apify-cli create`\n")
+    found, _ = _packages({"SKILL.md": doc})
+    assert "npx:apify" not in found and "npx:apify-cli" in found
+
+
+def test_negation_carried_from_a_wrapped_line():
+    doc = (b"- Retire by recoverable move plus file/executable/hash manifest, never by\n  `rm -rf`.\n"
+           b"- Clean the build folder with\n  `rm -rf build/`.\n")
+    manifest = build_manifest({"SKILL.md": doc})
+    locations = manifest["capabilities"]["destructive_operations"].get("rm -rf", [])
+    assert locations == ["SKILL.md:4"]

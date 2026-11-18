@@ -166,12 +166,45 @@ def interpret_lift(lift: float | None, paired: dict[str, Any] | None, *, alpha: 
     return "not_distinguishable_from_zero"
 
 
+MAX_CALIBRATION_FALSE_PASSES = 1    # a grader that passes more than one deliberately broken criterion is not trusted
+MAX_CALIBRATION_DISAGREEMENT = 0.15
+
+
+def calibration_gate(report: dict[str, Any] | None, *, judged_criteria: int) -> dict[str, Any]:
+    """Whether a grader may score this benchmark's judged criteria, from a grader_check report on labelled answers.
+
+    Checks need no calibration: they are exact. Judged criteria do: a grader that passes broken answers produces lift
+    that is the grader's, not the skill's."""
+    if judged_criteria == 0:
+        return {"status": "not_needed", "reason": "every criterion is an executable check"}
+    if report is None:
+        return {"status": "not_run", "reason": "the benchmark has judged criteria and no calibration cases were supplied"}
+    problems = []
+    if report.get("grader_failures"):
+        problems.append(f"{len(report['grader_failures'])} calibration answers could not be graded")
+    if not report.get("criterion_judgments"):
+        problems.append("no criterion was judged")
+    if report.get("false_pass", 0) > MAX_CALIBRATION_FALSE_PASSES:
+        problems.append(f"{report['false_pass']} broken criteria passed (at most {MAX_CALIBRATION_FALSE_PASSES})")
+    rate = report.get("disagreement_rate")
+    if rate is not None and rate > MAX_CALIBRATION_DISAGREEMENT:
+        problems.append(f"disagreement {rate:.0%} (at most {MAX_CALIBRATION_DISAGREEMENT:.0%})")
+    summary = {k: report.get(k) for k in ("cases", "criterion_judgments", "false_pass", "false_fail", "disagreement_rate")}
+    if problems:
+        return {"status": "failed", "reason": "; ".join(problems), **summary}
+    return {"status": "passed", **summary}
+
+
 def execute_experiment(
     *, tasks: list[BenchmarkTask], skill_instructions: str, runner: AgentRunner,
     evaluator: OutputEvaluator, repeats: int = 3, pass_threshold: float = 0.7,
-    seed: int = 0,
+    seed: int = 0, calibration_cases: list[Any] | None = None, require_calibration: bool = True,
 ) -> dict[str, Any]:
-    """Run paired baseline/enabled trials and summarize all generated records."""
+    """Run paired baseline/enabled trials and summarize all generated records.
+
+    When the benchmark has judged criteria, the grader first grades the labelled calibration cases (grader_check); the
+    lift is shown only if it passes (calibration_gate). Otherwise the lift is withheld, with the reason, and kept
+    under `withheld_lift_percentage_points` for audit."""
     if not tasks:
         raise ValueError("At least one benchmark task is required.")
     if len({task.task_id for task in tasks}) != len(tasks):
@@ -247,6 +280,22 @@ def execute_experiment(
         paired = paired_task_uncertainty(complete, seed=seed)
         comparison["paired_by_task"] = paired
         comparison["interpretation"] = interpret_lift(comparison.get("skill_lift_percentage_points"), paired)
+    from skillproof.checks import criteria_mix
+
+    mix = criteria_mix(tasks)
+    calibration_report = None
+    if calibration_cases is not None and mix["judged_criteria"]:
+        from skillproof.grader_check import check_grader
+
+        calibration_report = check_grader(tasks, calibration_cases, evaluator)
+    calibration = calibration_gate(calibration_report, judged_criteria=mix["judged_criteria"])
+    comparison["criteria_mix"] = mix
+    comparison["calibration"] = calibration
+    if require_calibration and calibration["status"] in {"not_run", "failed"} and comparison.get("skill_lift_percentage_points") is not None:
+        comparison["withheld_lift_percentage_points"] = comparison.pop("skill_lift_percentage_points")
+        comparison["skill_lift_percentage_points"] = None
+        comparison["interpretation"] = "grader_not_calibrated"
+        comparison["withheld_reason"] = calibration["reason"]
     return {
         "experiment_id": experiment_id,
         "engine_version": "1.7.0",

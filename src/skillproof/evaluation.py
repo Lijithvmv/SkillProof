@@ -5,13 +5,16 @@ import math
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from skillproof.checks import Check
 
 
 class BenchmarkTask(BaseModel):
     task_id: str = Field(min_length=1, max_length=120)
     prompt: str = Field(min_length=1, max_length=20_000)
-    criteria: list[str] = Field(min_length=1, max_length=30)
+    criteria: list[str] = Field(default_factory=list, max_length=30, description="Free-text criteria a model judge scores.")
+    checks: list[Check] = Field(default_factory=list, max_length=60, description="Executable checks scored exactly (see checks.py).")
     target_behaviors: list[str] = Field(default_factory=list, max_length=30)
     context: str | None = Field(default=None, max_length=10_000)
 
@@ -21,6 +24,12 @@ class BenchmarkTask(BaseModel):
         if any(not item.strip() for item in values):
             raise ValueError("criteria entries cannot be blank")
         return values
+
+    @model_validator(mode="after")
+    def needs_something_to_score(self) -> "BenchmarkTask":
+        if not self.criteria and not self.checks:
+            raise ValueError("a task needs at least one criterion or check")
+        return self
 
 
 class RunScores(BaseModel):

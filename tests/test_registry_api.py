@@ -238,3 +238,40 @@ def test_reviewer_marks_a_false_alarm_and_it_is_not_raised_again(client):
     assert "notes.example-team.dev" in {i["value"] for i in fourth["capability_change"]["items"]}
     labels = client.get("/api/v1/registry/false-alarms", headers=as_user("carol", "viewer")).json()["labels"]
     assert labels == [{**labels[0], "category": "network_hosts", "value": "notes.example-team.dev", "verdict": "F"}]
+
+
+def test_version_cites_recorded_experiments_bound_to_its_skill_text(client):
+    from skillproof.checks import Check, CheckedEvaluator
+    from skillproof.evaluation import BenchmarkTask
+    from skillproof.execution import AgentResult, execute_experiment
+
+    task = BenchmarkTask(task_id="notes", prompt="Write release notes.", checks=[
+        Check(kind="heading", description="has an Added section", value="Added"),
+        Check(kind="heading", description="has a Fixed section", value="Fixed")])
+
+    class Runner:
+        def run(self, *, prompt, context, skill_instructions):
+            text = "## Added\n- x\n## Fixed\n- y" if skill_instructions else "notes"
+            return AgentResult(output=text, provider="local", model="llama3", duration_ms=5, input_tokens=100 if skill_instructions else 80)
+
+    def experiment(skill_text):
+        return execute_experiment(tasks=[task], skill_instructions=skill_text, runner=Runner(), evaluator=CheckedEvaluator(), repeats=3)
+
+    recorded = client.post("/api/v1/evaluations/experiments", json={"skill_name": "release-notes", "report": experiment(SKILL)},
+                           headers=as_user("alice", "evaluator"))
+    assert recorded.status_code == 200, recorded.text
+    other = client.post("/api/v1/evaluations/experiments", json={"skill_name": "release-notes", "report": experiment(SKILL + "\nextra")},
+                        headers=as_user("alice", "evaluator")).json()["experiment_id"]
+    upload_with = lambda ids, **extra: client.post(
+        "/api/v1/registry/versions", files={"file": ("skill.zip", zip_of(SKILL))},
+        data={"experiment_ids": ids, **extra}, headers=as_user("alice", "evaluator"))
+
+    assert upload_with(other).status_code == 422  # ran a different SKILL.md
+    assert upload_with(recorded.json()["experiment_id"], evidence_json=EVIDENCE).status_code == 422  # not both
+    version = upload_with(recorded.json()["experiment_id"]).json()["version"]
+    assurance = version["assurance"]
+    assert assurance["evidence"]["source"] == "measured"
+    assert assurance["evidence"]["experiment_ids"] == [recorded.json()["experiment_id"]]
+    assert assurance["evidence"]["models"] == ["local/llama3"]
+    gates = {g["code"]: g["status"] for g in assurance["gates"]}
+    assert gates["BEHAVIORAL_LIFT"] == "pass" and version["state"] == "pending_review"

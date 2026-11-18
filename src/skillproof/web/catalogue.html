@@ -270,6 +270,10 @@ function detailHtml(v, requests) {
     ${Object.keys(change.removed || {}).length ? `<p class="muted">Removed: ${Object.entries(change.removed).map(([c, vals]) => esc(c.replace(/_/g, " ")) + " " + vals.map(x => `<code>${esc(x)}</code>`).join(", ")).join("; ")}</p>` : ""}`
     : `<p class="muted">This version was registered without a capability manifest.</p>`}
   <h3>Assurance · ${esc(s.assurance_decision || "")}</h3>
+  ${(() => { const ev = (v.assurance && v.assurance.evidence) || { source: "none" };
+    if (ev.source === "measured") return `<p>${badge("measured", "pass")} Behavioural evidence from experiment${ev.experiment_ids.length === 1 ? "" : "s"} ${ev.experiment_ids.map(id => `<code>${short(id)}</code>`).join(", ")} on ${ev.models.length ? ev.models.map(esc).join(", ") : "no measured model"}${(ev.lift_withheld_by_calibration || []).length ? `; lift withheld by grader calibration in ${ev.lift_withheld_by_calibration.length}` : ""}.</p>`;
+    if (ev.source === "declared_by_uploader") return `<p>${badge("declared", "ask")} Behavioural numbers were typed by the uploader, not measured.</p>`;
+    return `<p class="muted">No behavioural evidence: cite recorded experiments when uploading.</p>`; })()}
   <div class="scroll"><table><tbody>${gates.map(g => `<tr><td>${badge(g.status.replace(/_/g, " "), g.status === "pass" ? "pass" : (g.status === "blocked" || g.status === "fail") ? "block" : "ask")}</td><td>${esc(g.message)}</td></tr>`).join("")}</tbody></table></div>
   <h3>Approval</h3>
   ${latest ? `<p>Request <code>${short(latest.request_id)}</code> ${badge(latest.state.replace(/_/g, " "), latest.state === "approved" ? "approved" : "state")} · submitted by ${esc(latest.submitter_id)}</p>` : `<p class="muted">No approval request yet.</p>`}

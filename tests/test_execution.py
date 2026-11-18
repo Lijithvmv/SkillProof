@@ -35,7 +35,7 @@ TASK = BenchmarkTask(
 
 def test_experiment_runs_paired_repeats_and_measures_lift():
     runner = FakeRunner()
-    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=runner, evaluator=FakeEvaluator(), repeats=4, seed=7)
+    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=runner, evaluator=FakeEvaluator(), repeats=4, seed=7, require_calibration=False)
     assert len(result["runs"]) == 8
     assert len(result["pairs"]) == 4
     assert result["comparison"]["skill_lift_percentage_points"] == 50.0
@@ -91,7 +91,7 @@ class FlakyBaselineGrader:
 
 
 def test_lift_uses_complete_pairs_and_flags_uneven_failures():
-    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(), evaluator=FlakyBaselineGrader(), repeats=4, seed=7)
+    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(), evaluator=FlakyBaselineGrader(), repeats=4, seed=7, require_calibration=False)
     coverage = result["comparison"]["coverage"]
     assert coverage == {**coverage, "complete_pairs": 2, "total_pairs": 4, "uneven_failures": True}
     assert "warning" in coverage
@@ -100,7 +100,7 @@ def test_lift_uses_complete_pairs_and_flags_uneven_failures():
 
 
 def test_no_complete_pair_means_no_lift():
-    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(fail_baseline=True), evaluator=FakeEvaluator(), repeats=2, seed=1)
+    result = execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.", runner=FakeRunner(fail_baseline=True), evaluator=FakeEvaluator(), repeats=2, seed=1, require_calibration=False)
     assert result["comparison"]["skill_lift_percentage_points"] is None
     assert result["comparison"]["coverage"]["complete_pairs"] == 0
 
@@ -137,3 +137,77 @@ def test_interval_alone_is_not_enough_with_few_tasks():
     assert paired["interval_excludes_zero"] is True and paired["sign_flip_p_value"] == 0.25
     assert interpret_lift(50.0, paired) == "not_distinguishable_from_zero"
     assert interpret_lift(None, paired) == "not_measured"
+
+
+def test_lift_is_withheld_until_the_grader_passes_calibration():
+    from skillproof.grader_check import GraderCase
+
+    run = lambda **kw: execute_experiment(tasks=[TASK], skill_instructions="Always follow the required format.",
+                                          runner=FakeRunner(), repeats=2, seed=3, **kw)
+    uncalibrated = run(evaluator=FakeEvaluator())["comparison"]
+    assert uncalibrated["skill_lift_percentage_points"] is None and uncalibrated["interpretation"] == "grader_not_calibrated"
+    assert uncalibrated["withheld_lift_percentage_points"] == 50.0 and uncalibrated["calibration"]["status"] == "not_run"
+    good = [GraderCase(case_id="ok", task_id="format-task", output="uses the required format", expected=[1]),
+            GraderCase(case_id="broken", task_id="format-task", output="unstructured", expected=[0])]
+    class PerCriterion(FakeEvaluator):  # calibration needs a score per criterion, as real graders give
+        def evaluate(self, *, task, output):
+            grade = super().evaluate(task=task, output=output)
+            return Grade(grade.score, grade.evidence, criterion_scores=[{"criterion": task.criteria[0], "score": grade.score}])
+
+    passed = run(evaluator=PerCriterion(), calibration_cases=good)["comparison"]
+    assert passed["calibration"]["status"] == "passed" and passed["skill_lift_percentage_points"] == 50.0
+
+    class Lenient:  # passes everything, the failure the calibration set exists to catch
+        def evaluate(self, *, task, output):
+            return Grade(0.95, ["looks fine"], criterion_scores=[{"criterion": task.criteria[0], "score": 0.95}])
+
+    broken = [GraderCase(case_id=f"b{i}", task_id="format-task", output="unstructured", expected=[0]) for i in range(3)]
+    failed = run(evaluator=Lenient(), calibration_cases=broken)["comparison"]
+    assert failed["calibration"]["status"] == "failed" and "broken criteria passed" in failed["withheld_reason"]
+    assert failed["skill_lift_percentage_points"] is None
+
+
+def test_checks_score_exactly_and_need_no_calibration():
+    from skillproof.checks import Check, CheckedEvaluator, criteria_mix
+
+    task = BenchmarkTask(task_id="total", prompt="Sum the invoice.", checks=[
+        Check(kind="number", description="total is 1,250.50", value=r"total[^0-9]*([\d,.]+)", expected=1250.5, tolerance=0.01),
+        Check(kind="heading", description="has a Summary heading", value="Summary"),
+        Check(kind="not_contains", description="no TODO left", value="TODO"),
+        Check(kind="json_equals", description="status is ok", value="status", expected="ok"),
+        Check(kind="max_words", description="at most 60 words", limit=60),
+    ])
+    grade = CheckedEvaluator().evaluate(task=task, output='## Summary\nTotal: 1,250.50\n```json\n{"status": "ok"}\n```')
+    assert grade.score == 1.0 and all(item["kind"] == "check" for item in grade.criterion_scores)
+    wrong = CheckedEvaluator().evaluate(task=task, output="Total: 1,200\nTODO")
+    assert wrong.score == 0.2  # only the word limit holds
+    assert criteria_mix([task]) == {"checks": 5, "judged_criteria": 0, "check_share": 1.0}
+
+    class Runner:
+        def run(self, *, prompt, context, skill_instructions):
+            text = '## Summary\nTotal: 1,250.50\n{"status": "ok"}' if skill_instructions else "Total: 1,000"
+            return AgentResult(output=text, provider="fake", model="m", duration_ms=1)
+
+    result = execute_experiment(tasks=[task], skill_instructions="Sum carefully.", runner=Runner(), evaluator=CheckedEvaluator(), repeats=2)
+    assert result["comparison"]["calibration"]["status"] == "not_needed"
+    assert result["comparison"]["skill_lift_percentage_points"] == 60.0  # baseline passes 2 of 5 checks
+
+
+def test_mixed_task_asks_the_judge_only_about_criteria():
+    from skillproof.checks import Check, CheckedEvaluator
+
+    seen = []
+
+    class Judge:
+        def evaluate(self, *, task, output):
+            seen.append((list(task.criteria), list(task.checks)))
+            return Grade(1.0, [], criterion_scores=[{"criterion": task.criteria[0], "score": 1.0, "evidence": "clear"}])
+
+    task = BenchmarkTask(task_id="m", prompt="p", criteria=["Explains the trade-off clearly"],
+                         checks=[Check(kind="contains", description="names the API", value="GraphQL")])
+    grade = CheckedEvaluator(Judge()).evaluate(task=task, output="REST only")
+    assert seen == [(["Explains the trade-off clearly"], [])] and grade.score == 0.5
+    with pytest.raises(ValueError, match="no judge"):
+        CheckedEvaluator().evaluate(task=task, output="x")
+    with pytest.raises(ValueError, match="criterion or check"):
+        BenchmarkTask(task_id="e", prompt="p")

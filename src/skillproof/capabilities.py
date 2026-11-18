@@ -173,6 +173,76 @@ def in_message_string(line: str, position: int, backtick_is_string: bool = True)
     return bool(PROSE_TEXT.search(prefix[quote + 1:]))
 
 
+# Execution positions. A pattern inside a string literal is data (a fixture, a sample, a code snippet held as text)
+# unless the string is itself run: an argument of an exec-style call or remote/wrapper command, a name such a call
+# uses, or a command string that already starts an interpreter (python3 -c '...subprocess...').
+EXEC_OPENER = re.compile(
+    r"(?:\bsubprocess\.\w+|\bos\.(?:system|popen|exec\w*|spawn\w*)|\.(?:exec\w*|spawn\w*|system|popen)|(?<![\w.])(?:exec\w*|eval|spawn\w*|system|popen|Popen|"
+    r"check_output|check_call|shell_exec|passthru|execSync|execFile\w*|run|call)|\bRuntime\.getRuntime\(\)\.exec)\s*\(|"
+    r"(?<![\w-])(?:exec|eval|ssh(?:\s+-\S+)*\s+\S+|sudo|nohup|xargs|(?:python3?|node|perl|ruby|bash|sh|zsh|pwsh|powershell)\s+-[ceC])\s*$")
+EXEC_IN_STRING = re.compile(r"(?<![\w-])(?:(?:python3?|node|perl|ruby|bash|sh|zsh|pwsh|powershell)(?:\.exe)?\s+-[ceC]\b|exec\s|eval\s)|\|\s*(?:ba|z)?sh\b")
+EXEC_CALL = re.compile(r"\bsubprocess\.\w+\s*\(|\bos\.(?:system|popen|exec\w*)\s*\(|(?<!\w)\.?(?:exec|eval|execSync|spawn\w*|execFile\w*|Popen)\s*\(")
+# A fenced example under "// VULNERABLE", "# BAD:", "❌ Don't" shows what NOT to write; it is not run.
+# Only a label counts ("// VULNERABLE - Node.js", "# BAD:", "# ❌ wrong"); "# Never run as root" heads a real command.
+ANTI_EXAMPLE = re.compile(r"^\s*(?:#|//|--)\s*(?:❌|(?i:vulnerable|insecure|unsafe|bad|wrong|anti-?pattern)(?:\s*$|\s*[:(]|\s+[-–—])|DON'?T\b)")
+MODULE_LOAD = re.compile(r"(?:\bfrom|\brequire\s*\(|\bimport\s*\(?)\s*$")  # import { spawn } from "node:child_process"
+SETTING_SHELL = re.compile(r"\bshell\s*:\s*[\"']?$")  # `shell: pwsh` names a CI step's shell; nothing is launched by the skill
+SHELL_SCRIPT_SUFFIXES = {".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd"}
+
+
+def exec_names(lines: list[str]) -> set[str]:
+    """Names used inside the parentheses of an exec-style call in one file (cmd = "bash -c ..."; os.system(cmd))."""
+    names: set[str] = set()
+    for line in lines:
+        call = EXEC_CALL.search(line)
+        if call:
+            for group in CALL_ARGS.findall(line[call.start():]):
+                names.update(IDENTIFIER.findall(group))
+    return names
+
+
+def _open_string(prefix: str, quotes: tuple[str, ...]) -> int:
+    """Index of the opening quote of the string literal that prefix ends inside, or -1 when it ends outside one."""
+    opened, quote, index = -1, "", 0
+    while index < len(prefix):
+        char = prefix[index]
+        if char == "\\" and quote:
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                opened, quote = -1, ""
+        elif char in quotes:
+            opened, quote = index, char
+        index += 1
+    return opened
+
+
+def exec_reason(line: str, start: int, *, previous: str = "", names: set[str] | frozenset[str] = frozenset(),
+                quotes: tuple[str, ...] = ('"', "'")) -> str:
+    """Why the execution pattern at line[start] runs something, or "" when it sits in a string that is only data."""
+    opened = _open_string(line[:start], quotes)
+    if opened < 0:
+        return "called in code"
+    text, before = line[opened + 1:start], line[:opened]
+    if MODULE_LOAD.search(before):
+        return "loads the process module"
+    if EXEC_IN_STRING.search(text):
+        return "inside a command string that is run"
+    statement = re.split(r";\s|&&|\|\|", before)[-1]
+    if EXEC_OPENER.search(statement):
+        return "a string passed to a command runner"
+    if not statement.strip(" \t([{,") and previous.rstrip().endswith(("(", "[", ",")):
+        # A continuation line: count it when the line above opens an exec-style call outside any string.
+        call = EXEC_CALL.search(previous) or EXEC_OPENER.search(previous)
+        if call and _open_string(previous[:call.start()], quotes) < 0:
+            return "a string passed to a command runner"
+    assigned = ASSIGN_NAME.search(statement)
+    if assigned and assigned.group(1) in names:
+        return "a command string later run"
+    return ""
+
+
 def config_write(line: str, start: int, end: int, *, prose: bool, written: set[str] | frozenset[str] = frozenset()) -> str:
     """Why the agent-config path at line[start:end] is WRITTEN, or "" when it is only named or read."""
     token_start = start
@@ -302,7 +372,7 @@ PROCESS_EXEC = [
     ("subprocess", r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\b"), ("os.system", r"\bos\.(?:system|popen|exec\w*)\("),
     ("eval", r"(?<![\w.])eval\("), ("exec", r"(?<![\w.])exec\("), ("child_process", r"\bchild_process\b|\bexecSync\(|\bspawnSync?\("),
     ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"
-                      r"(?!\s+(?:-\S+\s+)*(?:[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b|[\"']?\$\{?\w+\}?[\"']?(?:\s|$)))"),  # data piped into a local script is not code
+                      r"(?!\s+(?:-\S+\s+)*(?:[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b|[\"']?\$\{?\w+\}?[\"']?(?:\s|$))|\s+-[ceC]\b)"),  # data piped into a local script, or into inline code given with -c/-e, is not code
     ("powershell", r"\bpowershell(?:\.exe)?\b|\bpwsh\b"), ("cmd /c", r"\bcmd(?:\.exe)?\s+/c\b"),
 ]
 AGENT_CONFIG = [
@@ -1040,6 +1110,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
         lines = _active_lines(path, decoded)
         called = called_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
         written = written_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+        run_names = exec_names([text for _, text, code in lines if code]) if suffix in SCRIPT_SUFFIXES else frozenset()
+        string_quotes = ('"', "'", "`") if suffix in {".js", ".mjs", ".cjs", ".ts"} else ('"', "'")
+        anti_example, last_number = False, 0
         source_lines = decoded.splitlines()
 
         def original_line(number: int, fallback: str) -> str:
@@ -1053,8 +1126,15 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 continue  # a comment describes code; it does not run (license headers, notes about attacks)
             full_line = original_line(number, line)
             inline_row = suffix in DOC_SUFFIXES and is_code and line != full_line
-            if suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines and DOC_COMMENT.match(line):
+            fenced_row = suffix in DOC_SUFFIXES and is_code and not inline_row and number <= original_lines
+            if not fenced_row or number != last_number + 1 or not line.strip():
+                anti_example = False  # an example's marker covers its own lines, up to a blank line or the fence end
+            last_number = number
+            if fenced_row and DOC_COMMENT.match(line):
+                anti_example = bool(ANTI_EXAMPLE.match(line))
                 continue  # a comment inside a fenced example ("# Available at: https://...")
+            if fenced_row and anti_example:
+                continue  # under "// VULNERABLE" or "# BAD": what not to write, shown to be avoided
             cue = is_code or bool(FETCH_CUE.search(line))
             previous = lines[index - 1][1] if index > 0 else ""
             neighbours = [n for n in (previous, lines[index + 1][1] if index + 1 < len(lines) else "") if n]
@@ -1140,10 +1220,21 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 found = re.search(pattern, command_line if name == "pipe-to-shell" else alternation_free, re.I)
                 if not found:
                     continue
-                if not inline_row and in_message_string(line, line.find(found.group(0)) if found.group(0) in line else 0,
-                                                        suffix not in DOC_SUFFIXES):
+                at = line.find(found.group(0)) if found.group(0) in line else -1
+                if name == "powershell" and SETTING_SHELL.search(alternation_free[: found.start()]):
+                    continue  # `shell: pwsh` in a workflow names the shell of a CI step
+                if not inline_row and in_message_string(line, max(at, 0), suffix not in DOC_SUFFIXES):
                     continue  # inside a message or fixture sentence: "...unavailable in this PowerShell script"
+                reason = "called in code"
+                if number > original_lines:
+                    reason = "revealed by decoding hidden text"
+                elif not inline_row and at >= 0 and suffix not in SHELL_SCRIPT_SUFFIXES:
+                    reason = exec_reason(line, at, previous=previous, names=run_names, quotes=string_quotes)
+                    if not reason:
+                        manifest.mention("process_execution", name, location)
+                        continue  # a sample or fixture string holding code as text, never run
                 manifest.add("process_execution", name, location)
+                manifest.reasons.setdefault(f"process_execution|{name}", reason)
             _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
             if WRITE_CUE.search(command_line):
                 _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)

@@ -92,7 +92,7 @@ def test_check_reports_installed_skills_that_are_not_the_approved_version(tmp_pa
     first = import_installed(governance, importer, [claude])
     notes_id = next(r["version_id"] for r in first["registered"] if r["skill_name"] == "release-notes")
     # Simulate an earlier approval of this exact folder (installed skills arrive with static evidence only).
-    with sqlite3.connect(tmp_path / "data" / "registry.db") as db:
+    with governance.registry.db.transaction("local", write=True) as db:
         db.execute("UPDATE skill_versions SET state='active' WHERE version_id=?", (notes_id,))
     viewer = Principal(user_id="checker", tenant_id="local", role="viewer")
 

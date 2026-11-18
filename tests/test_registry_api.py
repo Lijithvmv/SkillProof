@@ -170,6 +170,7 @@ def test_registry_needs_storage_configured(monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.sqlite_only
 def test_old_registry_database_gains_the_new_columns(tmp_path):
     path = tmp_path / "old.db"
     connection = sqlite3.connect(path)

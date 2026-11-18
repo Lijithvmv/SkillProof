@@ -62,10 +62,10 @@ def test_history_rows_are_append_only(tmp_path):
     database = tmp_path / "history.db"
     store = EvaluationHistoryStore(database)
     store.record(report("exp-1", "a", "b", 12))
-    with sqlite3.connect(database) as direct:
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("DELETE FROM evaluation_history WHERE experiment_id = 'exp-1'")
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("UPDATE evaluation_history SET skill_key = 'tampered' WHERE experiment_id = 'exp-1'")
+    for statement in ("DELETE FROM evaluation_history WHERE experiment_id = 'exp-1'",
+                      "UPDATE evaluation_history SET skill_key = 'tampered' WHERE experiment_id = 'exp-1'"):
+        with pytest.raises(Exception, match="append-only"):
+            with store.db.transaction("default", write=True) as db:
+                db.execute(statement)
     store.close()
 

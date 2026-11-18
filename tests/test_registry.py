@@ -92,10 +92,10 @@ def test_registry_audit_events_are_append_only(tmp_path):
     database = tmp_path / "registry.db"
     registry = SQLiteSkillRegistry(database)
     version = registry.register("tenant", skill_report("demo-skill", "a"), assurance_report(), actor_id="alice")
-    with sqlite3.connect(database) as direct:
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("UPDATE registry_events SET detail='tampered' WHERE version_id=?", (version["version_id"],))
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("DELETE FROM registry_events WHERE version_id=?", (version["version_id"],))
+    for statement in ("UPDATE registry_events SET detail='tampered' WHERE version_id=?",
+                      "DELETE FROM registry_events WHERE version_id=?"):
+        with pytest.raises(Exception, match="append-only"):
+            with registry.db.transaction("tenant", write=True) as db:
+                db.execute(statement, (version["version_id"],))
     registry.close()
 

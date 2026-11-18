@@ -1,42 +1,63 @@
-"""Append-only SQLite storage for evaluation summaries and regression trends."""
+"""Append-only storage for evaluation summaries and regression trends, on SQLite or PostgreSQL (see storage.py).
+
+A skill key of the form "tenant:skill" (what GovernanceAccess writes) belongs to that tenant; any other key belongs to
+the "default" tenant. In PostgreSQL that tenant is enforced by row-level security.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from skillproof.storage import Database, append_only, tenant_policy
+
+SQLITE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS evaluation_history (
+        experiment_id TEXT PRIMARY KEY,
+        skill_key TEXT NOT NULL,
+        instructions_fingerprint TEXT NOT NULL,
+        benchmark_fingerprint TEXT NOT NULL,
+        report_hash TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_evaluation_history_skill ON evaluation_history(skill_key, created_at DESC);
+    CREATE TRIGGER IF NOT EXISTS evaluation_history_no_update
+    BEFORE UPDATE ON evaluation_history BEGIN SELECT RAISE(ABORT, 'evaluation history is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS evaluation_history_no_delete
+    BEFORE DELETE ON evaluation_history BEGIN SELECT RAISE(ABORT, 'evaluation history is append-only'); END;
+"""
+
+POSTGRES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS evaluation_history (
+        seq BIGSERIAL UNIQUE,
+        experiment_id TEXT PRIMARY KEY,
+        skill_key TEXT NOT NULL,
+        instructions_fingerprint TEXT NOT NULL,
+        benchmark_fingerprint TEXT NOT NULL,
+        report_hash TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        tenant_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_evaluation_history_skill ON evaluation_history(skill_key, created_at DESC);
+""" + tenant_policy("evaluation_history") + append_only("evaluation_history", "evaluation history is append-only")
+
+
+def tenant_of(skill_key: str) -> str:
+    return skill_key.split(":", 1)[0] if ":" in skill_key else "default"
+
 
 class EvaluationHistoryStore:
     """Stores metrics and provenance only; raw model outputs are intentionally omitted."""
 
     def __init__(self, database: str | Path):
         self.database = str(database)
-        if self.database != ":memory:":
-            Path(self.database).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._connection = sqlite3.connect(self.database, check_same_thread=False, isolation_level=None)
-        self._connection.row_factory = sqlite3.Row
-        with self._lock:
-            self._connection.executescript("""
-                CREATE TABLE IF NOT EXISTS evaluation_history (
-                    experiment_id TEXT PRIMARY KEY,
-                    skill_key TEXT NOT NULL,
-                    instructions_fingerprint TEXT NOT NULL,
-                    benchmark_fingerprint TEXT NOT NULL,
-                    report_hash TEXT NOT NULL,
-                    summary_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_evaluation_history_skill ON evaluation_history(skill_key, created_at DESC);
-                CREATE TRIGGER IF NOT EXISTS evaluation_history_no_update
-                BEFORE UPDATE ON evaluation_history BEGIN SELECT RAISE(ABORT, 'evaluation history is append-only'); END;
-                CREATE TRIGGER IF NOT EXISTS evaluation_history_no_delete
-                BEFORE DELETE ON evaluation_history BEGIN SELECT RAISE(ABORT, 'evaluation history is append-only'); END;
-            """)
+        self.db = Database(database)
+        self.db.script(POSTGRES_SCHEMA if self.db.postgres else SQLITE_SCHEMA)
 
     @staticmethod
     def _valid_fingerprint(value: Any) -> bool:
@@ -68,29 +89,32 @@ class EvaluationHistoryStore:
         encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         report_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         now = self._now()
-        with self._lock:
-            existing = self._connection.execute("SELECT * FROM evaluation_history WHERE experiment_id = ?", (experiment_id,)).fetchone()
+        tenant = tenant_of(skill_key)
+        columns = "experiment_id, skill_key, instructions_fingerprint, benchmark_fingerprint, report_hash, summary_json, created_at"
+        values = (experiment_id, skill_key, instructions_fp, benchmark_fp, report_hash, encoded, now)
+        if self.db.postgres:
+            columns, values = columns + ", tenant_id", values + (tenant,)
+        with self.db.transaction(tenant, write=True) as db:
+            existing = db.execute("SELECT * FROM evaluation_history WHERE experiment_id = ?", (experiment_id,)).fetchone()
             if existing:
                 if existing["report_hash"] != report_hash:
                     raise ValueError("experiment_id already exists with different summary metrics")
                 return self._decode_row(existing)
-            self._connection.execute(
-                "INSERT INTO evaluation_history VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (experiment_id, skill_key, instructions_fp, benchmark_fp, report_hash, encoded, now),
-            )
-            row = self._connection.execute("SELECT * FROM evaluation_history WHERE experiment_id = ?", (experiment_id,)).fetchone()
+            db.execute(f"INSERT INTO evaluation_history ({columns}) VALUES ({', '.join('?' * len(values))})", values)
+            row = db.execute("SELECT * FROM evaluation_history WHERE experiment_id = ?", (experiment_id,)).fetchone()
         return self._decode_row(row)
 
     @staticmethod
-    def _decode_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {**dict(row), "summary": json.loads(row["summary_json"])}
+    def _decode_row(row: Any) -> dict[str, Any]:
+        record = {key: value for key, value in dict(row).items() if key not in {"seq", "tenant_id"}}
+        return {**record, "summary": json.loads(record["summary_json"])}
 
     def list_history(self, skill_key: str, *, limit: int = 50) -> list[dict[str, Any]]:
         if not 1 <= limit <= 500:
             raise ValueError("limit must be from 1 to 500")
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT * FROM evaluation_history WHERE skill_key = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        with self.db.transaction(tenant_of(skill_key)) as db:
+            rows = db.execute(
+                f"SELECT * FROM evaluation_history WHERE skill_key = ? ORDER BY created_at DESC, {db.insertion_order} DESC LIMIT ?",
                 (skill_key, limit),
             ).fetchall()
         return [self._decode_row(row) for row in rows]
@@ -122,5 +146,4 @@ class EvaluationHistoryStore:
         }
 
     def close(self) -> None:
-        with self._lock:
-            self._connection.close()
+        self.db.close()

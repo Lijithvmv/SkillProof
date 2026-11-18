@@ -398,6 +398,9 @@ def _catalogue_governance(data: Path):
     from skillproof.history import EvaluationHistoryStore as HistoryStore
     from skillproof.registry import SQLiteSkillRegistry
 
+    url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()  # PostgreSQL, the same database the API uses
+    if url:
+        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url), history=HistoryStore(url))
     return GovernanceAccess(registry=SQLiteSkillRegistry(data / "registry.db"),
                             approvals=SQLiteApprovalStore(data / "approvals.db"),
                             history=HistoryStore(data / "history.db"))

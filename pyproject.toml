@@ -16,6 +16,7 @@ skillproof = "skillproof.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "httpx>=0.27,<1"]
 openai = ["openai>=1.68,<3"]
+postgres = ["psycopg2-binary>=2.9,<3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

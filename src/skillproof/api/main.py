@@ -117,17 +117,29 @@ async def intelligence(file: UploadFile = File(...)) -> dict[str, Any]:
 def _governance(request: Request) -> GovernanceAccess:
     governance = getattr(request.app.state, "governance", None)
     if governance is None:
-        data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
-        if not data_dir:
-            raise HTTPException(status_code=503, detail="Registry storage is not configured (set SKILLPROOF_DATA_DIR).")
-        root = Path(data_dir)
-        governance = GovernanceAccess(
-            registry=SQLiteSkillRegistry(root / "registry.db"),
-            approvals=SQLiteApprovalStore(root / "approvals.db"),
-            history=EvaluationHistoryStore(root / "history.db"),
-        )
+        governance = governance_from_environment()
+        if governance is None:
+            raise HTTPException(status_code=503, detail="Registry storage is not configured "
+                                                        "(set SKILLPROOF_DATABASE_URL or SKILLPROOF_DATA_DIR).")
         request.app.state.governance = governance
     return governance
+
+
+def governance_from_environment() -> GovernanceAccess | None:
+    """PostgreSQL when SKILLPROOF_DATABASE_URL is set (one database, tenant row-level security), else SQLite files in
+    SKILLPROOF_DATA_DIR. None when neither is set."""
+    url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()
+    if url:
+        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url), history=EvaluationHistoryStore(url))
+    data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
+    if not data_dir:
+        return None
+    root = Path(data_dir)
+    return GovernanceAccess(
+        registry=SQLiteSkillRegistry(root / "registry.db"),
+        approvals=SQLiteApprovalStore(root / "approvals.db"),
+        history=EvaluationHistoryStore(root / "history.db"),
+    )
 
 
 def _principal(request: Request) -> Principal:

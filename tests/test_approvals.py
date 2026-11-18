@@ -48,11 +48,12 @@ def test_audit_events_cannot_be_updated_or_deleted(tmp_path):
     database = tmp_path / "audit.db"
     store = SQLiteApprovalStore(database)
     request = store.submit_for_review(eligible_report(), submitter_id="alice")
-    with sqlite3.connect(database) as direct:
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("UPDATE approval_events SET comment = 'tampered' WHERE request_id = ?", (request["request_id"],))
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            direct.execute("DELETE FROM approval_events WHERE request_id = ?", (request["request_id"],))
+    # Through the store's own connection, so the same check covers the SQLite and the PostgreSQL trigger.
+    for statement in ("UPDATE approval_events SET comment = 'tampered' WHERE request_id = ?",
+                      "DELETE FROM approval_events WHERE request_id = ?"):
+        with pytest.raises(Exception, match="append-only"):
+            with store.db.transaction("default", write=True) as db:
+                db.execute(statement, (request["request_id"],))
     store.close()
 
 

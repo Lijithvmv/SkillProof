@@ -36,7 +36,10 @@ class OIDCSettings:
     def __post_init__(self) -> None:
         for label, value in (("issuer", self.issuer), ("JWKS URL", self.jwks_url)):
             parsed = urlparse(value)
-            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            # Plain HTTP only to this machine's loopback outside production (a local development provider).
+            loopback_http = (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                             and os.getenv("SKILLPROOF_ENV", "").lower() != "production")
+            if (parsed.scheme != "https" and not loopback_http) or not parsed.netloc or parsed.username or parsed.password:
                 raise ValueError(f"{label} must be an HTTPS URL without embedded credentials")
         if not self.audience.strip():
             raise ValueError("audience is required")
@@ -125,3 +128,52 @@ def verifier_from_environment() -> OIDCAccessTokenVerifier | None:
     if auth_mode == "local" and settings is not None:
         raise RuntimeError("OIDC settings are present while auth mode is local; set SKILLPROOF_AUTH_MODE=oidc")
     return OIDCAccessTokenVerifier(settings) if settings is not None else None
+
+
+_DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def browser_login_config() -> dict[str, Any]:
+    """What the catalogue page needs to sign a person in with the authorization code flow and PKCE (public client).
+
+    The page never holds a client secret: SKILLPROOF_OIDC_CLIENT_ID names a public client registered at the identity
+    provider with the page's address as its redirect URI. Endpoints come from the issuer's discovery document unless
+    SKILLPROOF_OIDC_AUTHORIZATION_URL / SKILLPROOF_OIDC_TOKEN_URL set them."""
+    settings = OIDCSettings.from_env()
+    client_id = os.getenv("SKILLPROOF_OIDC_CLIENT_ID", "").strip()
+    if settings is None:
+        return {"mode": "local"}
+    config: dict[str, Any] = {"mode": "oidc", "issuer": settings.issuer, "client_id": client_id or None,
+                              "scope": os.getenv("SKILLPROOF_OIDC_SCOPE", "openid profile"),
+                              "audience": settings.audience}
+    authorization = os.getenv("SKILLPROOF_OIDC_AUTHORIZATION_URL", "").strip()
+    token = os.getenv("SKILLPROOF_OIDC_TOKEN_URL", "").strip()
+    end_session = os.getenv("SKILLPROOF_OIDC_END_SESSION_URL", "").strip()
+    if not (authorization and token):
+        discovered = _discover(settings.issuer)
+        authorization = authorization or discovered.get("authorization_endpoint", "")
+        token = token or discovered.get("token_endpoint", "")
+        end_session = end_session or discovered.get("end_session_endpoint", "")
+    for name, url in (("authorization_endpoint", authorization), ("token_endpoint", token), ("end_session_endpoint", end_session)):
+        if url and urlparse(url).scheme not in {"https", "http"}:
+            url = ""
+        config[name] = url or None
+    config["sign_in"] = bool(client_id and config["authorization_endpoint"] and config["token_endpoint"])
+    return config
+
+
+def _discover(issuer: str) -> dict[str, Any]:
+    if issuer in _DISCOVERY_CACHE:
+        return _DISCOVERY_CACHE[issuer]
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(issuer.rstrip("/") + "/.well-known/openid-configuration", timeout=5) as response:
+            document = json.loads(response.read(1_000_000).decode("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict) or document.get("issuer", "").rstrip("/") != issuer.rstrip("/"):
+        return {}
+    _DISCOVERY_CACHE[issuer] = document
+    return document

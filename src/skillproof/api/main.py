@@ -20,7 +20,7 @@ from skillproof.registry import RegistryError, SQLiteSkillRegistry
 from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
 from skillproof.security import scan_security
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
-from skillproof.oidc import AuthenticationError, verifier_from_environment
+from skillproof.oidc import AuthenticationError, browser_login_config, verifier_from_environment
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -37,7 +37,7 @@ def require_roles(*roles: str):
 
 @app.middleware("http")
 async def authenticate_api_requests(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") and request.url.path != "/api/v1/auth/config":
         verifier = request.app.state.oidc_verifier
         request.state.principal = None
         if verifier is not None:
@@ -326,3 +326,11 @@ def registry_false_alarms(request: Request) -> dict[str, Any]:
     principal = _principal(request)
     governance = _governance(request)
     return {"tenant_id": principal.tenant_id, "labels": _guarded(lambda: governance.false_alarm_labels(principal))}
+
+
+@app.get("/api/v1/auth/config")
+def auth_config(request: Request) -> dict[str, Any]:
+    """Public: how the page signs a person in (authorization code + PKCE), or that this server runs with local identity."""
+    if request.app.state.oidc_verifier is None:
+        return {"mode": "local"}
+    return browser_login_config()

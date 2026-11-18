@@ -99,7 +99,44 @@ ol.events li { margin: 2px 0; }
 "use strict";
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
                 set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
-const state = { selected: null, dev: true };
+const state = { selected: null, dev: true, auth: { mode: "local" } };
+// The access token lives in memory only: never in localStorage, gone when the tab closes.
+let accessToken = null;
+const once = { get(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+               set(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} },
+               take(k) { let v = null; try { v = sessionStorage.getItem(k); sessionStorage.removeItem(k); } catch (e) {} return v; } };
+
+function b64url(bytes) { return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+function randomText(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
+function redirectUri() { return location.origin + location.pathname; }
+
+async function startSignIn() {
+  // Authorization code flow with PKCE (public client): only the code verifier's hash leaves the browser.
+  const verifier = randomText(48), stateValue = randomText(24), nonce = randomText(24);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  once.set("sp-pkce", JSON.stringify({ verifier, state: stateValue }));
+  const a = state.auth;
+  const url = new URL(a.authorization_endpoint);
+  Object.entries({ response_type: "code", client_id: a.client_id, redirect_uri: redirectUri(), scope: a.scope,
+    state: stateValue, nonce, code_challenge: challenge, code_challenge_method: "S256" }).forEach(([k, v]) => url.searchParams.set(k, v));
+  if (a.audience) url.searchParams.set("audience", a.audience);
+  location.assign(url.toString());
+}
+
+async function finishSignIn() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("code") && !params.has("error")) return;
+  history.replaceState(null, "", redirectUri());  // the code never stays in the address bar or history
+  const saved = JSON.parse(once.take("sp-pkce") || "null");
+  if (params.has("error")) throw new Error("Sign-in failed: " + (params.get("error_description") || params.get("error")));
+  if (!saved || saved.state !== params.get("state")) throw new Error("Sign-in failed: the response does not match the request.");
+  const body = new URLSearchParams({ grant_type: "authorization_code", code: params.get("code"), redirect_uri: redirectUri(),
+    client_id: state.auth.client_id, code_verifier: saved.verifier });
+  const response = await fetch(state.auth.token_endpoint, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+  const tokens = await response.json().catch(() => ({}));
+  if (!response.ok || !tokens.access_token) throw new Error("Sign-in failed: " + (tokens.error_description || tokens.error || response.statusText));
+  accessToken = tokens.access_token;
+}
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -109,9 +146,8 @@ function short(id) { return esc(String(id || "").slice(0, 8)); }
 
 function headers(extra) {
   const h = Object.assign({}, extra || {});
-  const token = store.get("sp-token");
-  if (token) h["Authorization"] = "Bearer " + token;
-  else { h["X-SkillProof-Dev-User"] = store.get("sp-user") || "local-dev"; h["X-SkillProof-Dev-Role"] = store.get("sp-role") || "tenant_admin"; }
+  if (accessToken) h["Authorization"] = "Bearer " + accessToken;
+  else if (state.auth.mode === "local") { h["X-SkillProof-Dev-User"] = store.get("sp-user") || "local-dev"; h["X-SkillProof-Dev-Role"] = store.get("sp-role") || "tenant_admin"; }
   return h;
 }
 async function api(path, options) {
@@ -125,6 +161,15 @@ async function api(path, options) {
 
 async function renderWho() {
   const who = document.getElementById("who");
+  if (state.auth.mode === "oidc" && !accessToken) {
+    state.dev = false;
+    who.innerHTML = state.auth.sign_in
+      ? `<span>Not signed in</span><button id="signin">Sign in</button>`
+      : `<span class="msg err">Sign-in is not configured on this server (set SKILLPROOF_OIDC_CLIENT_ID).</span><button class="secondary" id="tok">Use a token</button>`;
+    if (state.auth.sign_in) document.getElementById("signin").onclick = () => startSignIn().catch(e => { who.innerHTML = `<span class="msg err">${esc(e.message)}</span>`; });
+    else document.getElementById("tok").onclick = () => { const t = prompt("Bearer access token"); if (t) { accessToken = t.trim(); refresh(); } };
+    return false;
+  }
   let me = null;
   try { me = await api("/api/v1/whoami"); } catch (e) { who.innerHTML = `<span class="msg err">${esc(e.message)}</span>`; }
   const roles = ["tenant_admin", "evaluator", "approver", "viewer"];
@@ -136,13 +181,18 @@ async function renderWho() {
        <select id="role" aria-label="Role">${roles.map(r => `<option ${r === (store.get("sp-role") || "tenant_admin") ? "selected" : ""}>${r}</option>`).join("")}</select>
        <button class="secondary" id="switch">Switch</button>
        <button class="secondary" id="tok">Use a token</button>`
-    : `<span>${esc(me.user_id)} · ${esc(me.role)} · tenant ${esc(me.tenant_id)}</span><button class="secondary" id="signout">Forget token</button>`;
+    : `<span>${esc(me.user_id)} · ${esc(me.role)} · tenant ${esc(me.tenant_id)}</span><button class="secondary" id="signout">Sign out</button>`;
   if (dev) {
     document.getElementById("switch").onclick = () => { store.set("sp-user", document.getElementById("user").value.trim() || "local-dev"); store.set("sp-role", document.getElementById("role").value); refresh(); };
-    document.getElementById("tok").onclick = () => { const t = prompt("Bearer access token"); if (t) { store.set("sp-token", t.trim()); refresh(); } };
+    document.getElementById("tok").onclick = () => { const t = prompt("Bearer access token (kept in memory only)"); if (t) { accessToken = t.trim(); refresh(); } };
   } else {
-    document.getElementById("signout").onclick = () => { try { localStorage.removeItem("sp-token"); } catch (e) {} refresh(); };
+    document.getElementById("signout").onclick = () => {
+      accessToken = null;
+      if (state.auth.end_session_endpoint) { const u = new URL(state.auth.end_session_endpoint); u.searchParams.set("post_logout_redirect_uri", redirectUri()); u.searchParams.set("client_id", state.auth.client_id || ""); location.assign(u.toString()); }
+      else refresh();
+    };
   }
+  return !!me;
 }
 
 async function renderSkills() {
@@ -286,8 +336,17 @@ document.getElementById("upload").onsubmit = async event => {
 document.getElementById("filter").oninput = () => renderSkills();
 document.getElementById("level").onchange = () => renderSkills();
 
-async function refresh() { await renderWho(); await renderSkills(); if (state.selected) select(state.selected); }
-refresh();
+async function refresh() {
+  const ready = await renderWho();
+  if (ready === false) { document.getElementById("skills").innerHTML = `<div class="empty">Sign in to see the catalogue.</div>`; return; }
+  await renderSkills(); if (state.selected) select(state.selected);
+}
+(async () => {
+  try { state.auth = await (await fetch("/api/v1/auth/config")).json(); } catch (e) { state.auth = { mode: "local" }; }
+  try { await finishSignIn(); } catch (e) { document.getElementById("who").innerHTML = `<span class="msg err">${esc(e.message)}</span>`; }
+  refresh();
+})();
+try { localStorage.removeItem("sp-token"); } catch (e) {}  // a token stored by an earlier version of this page
 </script>
 </body>
 </html>

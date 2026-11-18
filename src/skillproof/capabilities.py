@@ -108,7 +108,13 @@ CONTACT_NAME = re.compile(
     r"service|backend|target_url|request|nameserver|nameservers|dns|resolver)(?:$|[_.\-]|url|uri)|baseurl|apiurl|apibase|endpoint|serverurl")
 NOT_CONTACT_NAME = re.compile(r"(?i)signup|docs?(?:$|_)|help|homepage|website|repo(?:sitory)?(?:$|_)|license|support|console|dashboard|"
                               r"portal|page|learn|guide|reference|example|sample|about|privacy|terms|issues?(?:$|_)|changelog|"
-                              r"readme|tutorial|blog|profile|^link$|^href$|_link$|citation|credit")
+                              r"readme|tutorial|blog|profile|^link$|^href$|_link$|citation|credit|"
+                              # an OAuth scope or audience names a resource ("https://redis.azure.com/.default")
+                              r"scopes?$|audience|claims?(?:$|_)")
+# dict.get("https://api.x/auth") or {}: a lookup with an empty default reads a key (a JWT claim), not a host.
+DICT_LOOKUP_AFTER = re.compile(r"^[^)]*\)\s*(?:or\s*[{\[]|\?\?\s*[{\[])|^[^)]*,\s*(?:\{\}|\[\]|None|null)\s*\)")
+# "See https://... for details" points the reader at a page.
+REFERENCE_CUE = re.compile(r"\b(?:see|visit|refer to|read more at|learn more at|more at)\s*:?\s*[`'\"(\[<]*$", re.I)
 QUOTED_ITEM = r"(?:[\"'`][^\"'`]*[\"'`]\s*,\s*)*"
 ASSIGNED = re.compile(r"([A-Za-z_$][\w.$\-]*)(?:\[[^\]]*\])?[\"'\]]?\s*(?:=|:=|:|=>)\s*(?:[\(\[{]\s*)*"
                       r"(?:[\w.$\[\]\"']+\s*(?:\|\||\?\?|or)\s*)?" + QUOTED_ITEM + r"(?:[fbru]?[\"'`])?$")
@@ -303,6 +309,8 @@ def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[
     if NOT_CONTACTED_CONTEXT.search(prefix):
         return ""
     call = CONTACT_CALL.search(statement)
+    if call and re.search(r"\.get(?:_\w+)?\s*\(", call.group(0)) and DICT_LOOKUP_AFTER.search(line[url_start:]):
+        return ""
     if call:
         return f"argument of {call.group(0).strip()}"
     if HTML_LOAD.search(prefix):
@@ -333,6 +341,8 @@ def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[
         return ""
     if API_DOC_CUE.search(prefix) or (API_DOC_CUE.search(previous.rstrip() + " ") and len(prefix.strip(" `'\"")) <= 4):
         return "API base or request line in the docs"
+    if REFERENCE_CUE.search(prefix):
+        return ""
     if _prose_cue(line, url_start):
         return "an instruction to fetch or send"
     bare = URL_TOKEN.sub(" ", prefix).strip(" -*>`'\"→=:|")
@@ -569,7 +579,7 @@ def matcher_scope(matcher: str) -> str:
 # Real local skill files showed four more harmless groups (VS Code / Copilot, Codex, Kimi and Claude skill copies):
 # placeholder links ("github.com/owner/repo"), tool names inside a match pattern ("curl|wget|nc" in a hook that
 # blocks them), location variables read as "credentials" ($env:APPDATA), and Markdown tables describing rules.
-PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
+PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|team|company|acme|example|my-?team|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
 ALTERNATION = re.compile(r"(?<![\w|])[\w.-]+(?:\|[\w.-]+)+(?![\w|])")
 LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP|\w*_BASE_URL)$", re.I)
 # Third-party code copied into the skill. Its own READMEs and changelogs are full of install lines, example hosts and
@@ -582,7 +592,8 @@ PLACEHOLDER_HOST = re.compile(r"^(?:my|your)[-_]|(?:^|\.)example(?:\.|$)|\.(?:in
                               # third-party.com, sandbox-api.external-system.com in reference code
                               r"|(?:^|\.)(?:company|yourcompany|mycompany|ourcompany|ourapp|myapp|yourapp|yourdomain|mydomain|"
                               r"acme|acmecorp|contoso|fabrikam|third-party|external-system|external-service|other-service|provider|"
-                              r"target|victim|attacker|evil|somehost|somedomain)\.(?:com|net|org|io|dev|app)$|\.internal\.", re.I)
+                              r"target|victim|attacker|evil|somehost|somedomain)\.(?:com|net|org|io|dev|app)$|\.internal\."
+                              r"|^(?:ignored|placeholder|dummy|fake|unused)\.(?:host|local|com|net|org|io|dev|app)$", re.I)
 # Addresses in sample data: {"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"} describes a log record.
 IP_DATA_KEY = re.compile(r"[\"']?\w*(?:src|source|dst|dest|destination|remote|client|user|peer|origin|caller)_?(?:ip|addr|address)[\"']?\s*[:=]\s*[\"']?$", re.I)
 # A Content-Security-Policy lists hosts a browser may load from; nothing is fetched by the skill.

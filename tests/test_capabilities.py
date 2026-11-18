@@ -812,3 +812,27 @@ def test_a_env_file_the_skill_writes_itself_is_not_credential_access():
 def test_folder_variables_are_not_secrets():
     found, _ = _creds({"scripts/i.py": b'import os\nroot = os.environ["COOKIE_COPY_SKILL_DIR"]\ntok = os.environ["GITHUB_TOKEN"]\n'})
     assert "env:COOKIE_COPY_SKILL_DIR" not in found and "env:GITHUB_TOKEN" in found
+
+
+def _hosts(files):
+    manifest = build_manifest(files)
+    return manifest["capabilities"]["network_hosts"], manifest
+
+
+def test_oauth_scope_and_claim_keys_are_not_hosts():
+    script = (b'const TOKEN_SCOPE = "https://redis.azure.com/.default";\n'
+              b"const claims = payload.get('https://api.openai.com/auth') || {};\n")
+    found, manifest = _hosts({"scripts/a.js": script})
+    assert "redis.azure.com" not in found and "redis.azure.com" in manifest["mentions"]["network_hosts"]
+    found, _ = _hosts({"scripts/b.py": b"a = pl.get('https://api.openai.com/auth') or {}\nr = session.get('https://api.github.com/user')\n"})
+    assert "api.openai.com" not in found and "api.github.com" in found
+
+
+def test_see_link_and_placeholder_repos_are_not_hosts():
+    skill = (b"- If upload fails, tell the user: `To enable it, open settings. See https://developers.openai.com/codex/app for details.`\n"
+             b"\n```\n/plugin marketplace add https://gitlab.com/company/plugins.git\n```\n"
+             b"\n```js\nenv.ASSETS.fetch(\"https://ignored.host/logo.png\")\n```\n")
+    found, _ = _hosts({"SKILL.md": skill})
+    assert not ({"developers.openai.com", "gitlab.com", "ignored.host"} & set(found))
+    found, _ = _hosts({"SKILL.md": b"```\n/plugin marketplace add https://gitlab.com/acme-labs-real/tools.git\n```\n"})
+    assert "gitlab.com" in found

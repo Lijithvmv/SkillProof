@@ -279,7 +279,7 @@ class SkillRegistry:
         else:
             against, against_id, old = "active_version", active["version_id"], json.loads(active["capabilities_json"])
         diff = diff_manifests(old, manifest)
-        ranked = triage(diff, new_manifest=manifest)
+        ranked = triage(diff, new_manifest=manifest, tenant_counts=self._confidence_counts(tenant_id))
         items, dismissed = self._apply_false_alarms(tenant_id, skill_name, ranked["items"])
         change = {
             "against": against,
@@ -291,11 +291,35 @@ class SkillRegistry:
             "items_total": len(items),
             "dismissed": dismissed,
             "combinations": ranked["combinations"],
+            "groups": ranked.get("groups", []),
             "removed": diff["removed"],
             "meaning": ranked["meaning"],
         }
         change["change_hash"] = _canonical_hash(change)
         return change
+
+    def _confidence_counts(self, tenant_id: str) -> dict[str, list[int]]:
+        """The tenant's own evidence on how often each kind of flag is real: items in versions it approved count as
+        real, items its reviewers marked "Not real" count as false (by category and block kind). Triage adds these to
+        the public counts, so confidence moves toward this tenant's skills as reviewers decide."""
+        counts: dict[str, list[int]] = {}
+        changes: dict[str, dict[str, Any]] = {}
+        for row in self.db.execute(
+            "SELECT version_id, state, change_json FROM skill_versions WHERE tenant_id=? AND change_json IS NOT NULL", (tenant_id,)
+        ).fetchall():
+            change = json.loads(row["change_json"])
+            changes[row["version_id"]] = change
+            if row["state"] in {"active", "superseded"}:
+                for item in change.get("items", []):
+                    if item.get("block"):
+                        counts.setdefault(f"{item['category']}|{item['block']}", [0, 0])[0] += 1
+        for mark in self.db.execute("SELECT category, value, version_id FROM false_alarms WHERE tenant_id=?", (tenant_id,)).fetchall():
+            change = changes.get(mark["version_id"], {})
+            item = next((i for i in change.get("items", []) + change.get("dismissed", [])
+                         if i["category"] == mark["category"] and i["value"] == mark["value"]), None)
+            if item and item.get("block"):
+                counts.setdefault(f"{item['category']}|{item['block']}", [0, 0])[1] += 1
+        return counts
 
     def _apply_false_alarms(self, tenant_id: str, skill_name: str, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Split ranked items into those still raised and those a reviewer marked as not a real capability.
@@ -319,6 +343,7 @@ class SkillRegistry:
                 kept.append(item)
             else:
                 dismissed.append({"category": item["category"], "value": item["value"], "level": item["level"],
+                                  "block": item.get("block"),
                                   "reason": mark["reason"], "marked_by": mark["marked_by"], "marked_at": mark["marked_at"]})
         return kept, dismissed
 

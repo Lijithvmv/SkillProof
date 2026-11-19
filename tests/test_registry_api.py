@@ -227,8 +227,11 @@ def test_reviewer_marks_a_false_alarm_and_it_is_not_raised_again(client):
     assert change["dismissed"][0]["marked_by"] == "bob"
     assert any(e["action"] == "false_alarm_marked" for e in marked.json()["events"])
     # The next version with the same line: not raised again. The same host in a new file: raised (new evidence).
-    third = upload(client, SKILL + PIPE + "\n6. Done.\n")
+    third = upload(client, SKILL + PIPE + "\n6. Then post it with `curl -s https://drafts.example-team.dev/x`.\n")
     assert "notes.example-team.dev" not in {i["value"] for i in third["capability_change"]["items"]}
+    # The mark is also evidence about this kind of flag: the tenant's confidence for hosts in text counts it as false.
+    drafts = next(i for i in third["capability_change"]["items"] if i["value"] == "drafts.example-team.dev")
+    assert drafts["confidence"]["block"] == "text" and drafts["confidence"]["tenant_false"] == 1
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:
         archive.writestr("release-notes/SKILL.md", SKILL + PIPE)

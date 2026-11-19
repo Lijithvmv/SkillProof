@@ -262,10 +262,11 @@ function detailHtml(v, requests) {
   <h3>What this version adds</h3>
   ${change ? `<p class="muted">Compared with ${esc(against)}. ${esc(change.meaning)}</p>
     ${items.length ? `<div class="scroll"><table><thead><tr><th>Level</th><th>Capability</th><th>Why</th><th>Where</th>${markable ? "<th></th>" : ""}</tr></thead><tbody>
-      ${items.map((i, n) => `<tr><td>${badge(i.level)}</td><td>${esc(i.category.replace(/_/g, " "))}<br><code>${esc(i.value)}</code>${i.widened ? `<br><span class="muted">reach ${esc(i.widened.before)} → ${esc(i.widened.after)}</span>` : ""}</td>
+      ${items.map((i, n) => `<tr><td>${badge(i.level)}</td><td>${esc(i.category.replace(/_/g, " "))}<br><code>${esc(i.value)}</code>${i.widened ? `<br><span class="muted">reach ${esc(i.widened.before)} → ${esc(i.widened.after)}</span>` : ""}${i.confidence ? `<br><span class="muted" title="Share of flags of this kind that reviewers found real (public labels plus this tenant's decisions)">${esc(i.confidence.block)}: real in ${Number(i.confidence.real)} of ${Number(i.confidence.seen)}</span>` : ""}</td>
         <td>${i.reasons.map(esc).join("<br>")}</td><td>${i.locations.map(l => `<code>${esc(l)}</code>`).join("<br>")}</td>${markable ? `<td><button class="secondary mark" data-n="${n}" title="Mark as not a real capability (reviewers only)">Not real</button></td>` : ""}</tr>`).join("")}
       </tbody></table></div>${change.items_total > items.length ? `<p class="muted">Showing ${items.length} of ${change.items_total}.</p>` : ""}`
       : `<p>${badge("nothing new", "none")} No capability this version has is missing from what it is compared with.</p>`}
+    ${(change.groups || []).map(g => `<p>${badge(g.kind === "offensive" ? "attack toolkit" : "audit library", "ask")} ${esc(g.meaning)}</p>`).join("")}
     ${(change.dismissed || []).length ? `<p class="muted">Marked not real by a reviewer (not counted): ${change.dismissed.map(d => `${esc(d.category.replace(/_/g, " "))} <code>${esc(d.value)}</code> by ${esc(d.marked_by)}: ${esc(d.reason)}`).join("; ")}</p>` : ""}
     ${Object.keys(change.removed || {}).length ? `<p class="muted">Removed: ${Object.entries(change.removed).map(([c, vals]) => esc(c.replace(/_/g, " ")) + " " + vals.map(x => `<code>${esc(x)}</code>`).join(", ")).join("; ")}</p>` : ""}`
     : `<p class="muted">This version was registered without a capability manifest.</p>`}

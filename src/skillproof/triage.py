@@ -13,7 +13,11 @@ twenty facts at once (packages, hosts, tools), and most are routine. Triage turn
 3. **Rarity.** How often the same fact was added across real public skill updates (base rates shipped with the
    package). Something added in 1 of 10,000 updates is worth a closer look than something added in 800.
 4. **Place.** A fact found only in test files is capped at ``note``.
-5. **Reach.** ``rm -rf`` on a build folder is routine (note); on the home folder or the filesystem root it is
+5. **Confidence.** How often a flag of this category in this kind of block (a step to run, test code, text) was a
+   real capability on labelled public skills, updated with the tenant's own reviewer decisions. Below a cut set by
+   the cost of being wrong (0.1 for block, 0.5 for ask) the item is lowered one level with the numbers shown
+   (skillproof.confidence).
+6. **Reach.** ``rm -rf`` on a build folder is routine (note); on the home folder or the filesystem root it is
    ``block``. A fact both versions have whose reach grew (temp folder -> home folder, a hook on named tools -> every
    tool, ``Bash(git:*)`` -> ``Bash``) is reported as a widening with its own level.
 
@@ -27,6 +31,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from skillproof.confidence import LOWER_BELOW, confidence
 
 from skillproof.capabilities import source_kind
 
@@ -174,7 +180,8 @@ def _combinations(added: dict[str, dict[str, list[str]]], known_hosts: dict[str,
     return found
 
 
-def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_manifest: dict[str, Any] | None = None,
+           tenant_counts: dict[str, list[int]] | None = None) -> dict[str, Any]:
     """Rank the additions in a diff_manifests() result. Returns the decision (highest level), the ranked items,
     and the dangerous combinations found."""
     rates = base_rates if base_rates is not None else load_base_rates()
@@ -215,11 +222,17 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
             reasons.append("only in test files")
         opinion = ((new_manifest or {}).get("second_opinion") or {}).get(f"{category}|{value}")
         likely_mention = opinion == "mention" and not paired and not widening
-        if likely_mention and level != "note":
-            # The local model read the lines around it as a mention; lower one level, never hide. Items in a dangerous
-            # combination or a widening keep the level the rules gave them.
+        block = ((new_manifest or {}).get("blocks") or {}).get(f"{category}|{value}")
+        conf = confidence(category, block, tenant_counts=tenant_counts) if block and not widening else None
+        doubtful = bool(conf) and conf["p"] < LOWER_BELOW.get(level, 0.0) and not paired
+        if (likely_mention or doubtful) and level != "note":
+            # Lower one level at most, never hide. Items in a dangerous combination or a widening keep their level.
             level = {"block": "ask", "ask": "note"}[level]
-            reasons.append("lowered one level: a local model read these lines as a mention, not an action")
+            if likely_mention:
+                reasons.append("lowered one level: a local model read these lines as a mention, not an action")
+            if doubtful:
+                reasons.append(f"lowered one level: flags like this ({category} in {block}) were real in {conf['real']} of "
+                               f"{conf['seen']} reviewed cases")
         seen = rates.get("values", {}).get(f"{category}|{value}")
         rarity_bits = None
         if total and not widening:
@@ -233,14 +246,29 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
             item["widened"] = {"before": widening["before"], "after": widening["after"]}
         if likely_mention:
             item["second_opinion"] = "likely_mention"
+        if block:
+            item["block"] = block
+        if conf:
+            item["confidence"] = conf
         items.append(item)
     items.sort(key=lambda item: (-item["score"], item["category"], item["value"]))
     decision = max((item["level"] for item in items), key=LEVELS.get, default="none")
     counts = {level: sum(item["level"] == level for item in items) for level in LEVELS}
+    purpose = (new_manifest or {}).get("purpose") or {}
+    groups = []
+    for kind, label in (("offensive", "attack toolkit"), ("audit", "audit or rules library")):
+        in_text = [i for i in items if purpose.get(kind) and i.get("block") == "text"]
+        if in_text:
+            groups.append({"kind": kind, "items": len(in_text), "meaning": f"The skill describes itself as an {label}. "
+                           f"{len(in_text)} flagged items sit in its text (descriptions, payloads, examples, checklists) rather "
+                           "than in steps it runs; read them together: in such libraries most text flags describe what the "
+                           "skill looks for or sends to a target, not what it does on this computer."})
+            break
     return {
         "decision": decision,
         "counts": counts,
         "items": items,
+        "groups": groups,
         "combinations": combos,
         "base_rates": {"updates": total, "source": rates.get("source", "")},
         "meaning": "block = do not apply without reading these lines; ask = confirm this is expected; note = routine. "

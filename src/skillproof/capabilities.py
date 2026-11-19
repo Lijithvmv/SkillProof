@@ -1615,7 +1615,11 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     _FILE_CACHE.clear()
                 _FILE_CACHE[key] = manifest.ops
                 _replay(result, manifest.ops)
-    return result.to_dict()
+    from skillproof.confidence import add_blocks  # block kind and stated purpose, read by triage's confidence
+
+    out = result.to_dict()
+    add_blocks(out, files)
+    return out
 
 
 TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec)/", re.I)

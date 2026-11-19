@@ -19,6 +19,7 @@ from skillproof.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.capabilities import PackageError, build_manifest
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
+from skillproof.second_opinion import add_second_opinions
 from skillproof.installed import NAME, _read_installed, family_key, find_skill_dirs
 
 # Which agent a skill belongs to, from the folder it was found under. Used only to tell apart skills that share a name.
@@ -136,6 +137,7 @@ def import_installed(
         report["package_fingerprint"] = fingerprint
         report["metadata"] = dict(report.get("metadata") or {}, name=name)
         manifest = build_manifest(files)
+        add_second_opinions(manifest, files)
         manifest["not_scanned"] = sorted(oversize)
         security = report.get("security") or {}
         assurance = evaluate_assurance(AssuranceInput(

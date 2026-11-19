@@ -213,6 +213,13 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
         if kinds == ["test"]:
             level = "note"
             reasons.append("only in test files")
+        opinion = ((new_manifest or {}).get("second_opinion") or {}).get(f"{category}|{value}")
+        likely_mention = opinion == "mention" and not paired and not widening
+        if likely_mention and level != "note":
+            # The local model read the lines around it as a mention; lower one level, never hide. Items in a dangerous
+            # combination or a widening keep the level the rules gave them.
+            level = {"block": "ask", "ask": "note"}[level]
+            reasons.append("lowered one level: a local model read these lines as a mention, not an action")
         seen = rates.get("values", {}).get(f"{category}|{value}")
         rarity_bits = None
         if total and not widening:
@@ -224,6 +231,8 @@ def triage(diff: dict[str, Any], base_rates: dict[str, Any] | None = None, new_m
                 "rarity_bits": rarity_bits, "reasons": reasons, "locations": locations[:5]}
         if widening:
             item["widened"] = {"before": widening["before"], "after": widening["after"]}
+        if likely_mention:
+            item["second_opinion"] = "likely_mention"
         items.append(item)
     items.sort(key=lambda item: (-item["score"], item["category"], item["value"]))
     decision = max((item["level"] for item in items), key=LEVELS.get, default="none")

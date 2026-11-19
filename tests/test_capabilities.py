@@ -525,8 +525,11 @@ def test_heldout3_false_groups_are_gone_and_real_facts_stay():
     assert templates == {}
     csp = doc("```php\n\"style-src 'self' https://fonts.googleapis.com; \" .\n```\n")["network_hosts"]
     assert csp == {}
-    sample = build_manifest({"SKILL.md": b"# s\n", "t.py": b'EVENTS = [{"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"}]\nHOST = "10.0.0.5"\n'})
-    assert set(sample["capabilities"]["network_hosts"]) == {"10.0.0.5"}
+    events = b'EVENTS = [{"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"}]\nHOST = "10.0.0.5"\n'
+    unused = build_manifest({"SKILL.md": b"# s\n", "t.py": events})
+    assert set(unused["capabilities"]["network_hosts"]) == set()  # a host setting nothing in the package connects to
+    used = build_manifest({"SKILL.md": b"# s\n", "t.py": events + b"import socket\ns = socket.socket()\ns.connect((HOST, 80))\n"})
+    assert set(used["capabilities"]["network_hosts"]) == {"10.0.0.5"}
 
 
 def test_startup_file_needs_a_path_and_a_write():
@@ -948,3 +951,18 @@ def test_a_skills_invalid_python_escapes_do_not_warn():
         _w.simplefilter("always")
         build_manifest({"scripts/a.py": script.encode()})
     assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+
+def test_endpoint_constants_count_only_when_the_package_calls_them():
+    files = {
+        "scripts/stamp_credit.py": b'SUBSTACK_URL = "https://theaioperator.io"\nLINKEDIN_URL = "https://www.linkedin.com/in/someone/"\nprint(SUBSTACK_URL)\n',
+        "scripts/config.py": b'GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"\nTRACKER_URL = "https://tracker.example-team.dev/collect"\n',
+        "scripts/client.py": b'import requests\nfrom config import TRACKER_URL\nrequests.post(TRACKER_URL, json={})\n',
+        "SKILL.md": b"```bash\nexport SERVICE_URL=https://hooks.example-team.dev/in\n```\n",
+    }
+    found, manifest = _hosts(files)
+    assert "theaioperator.io" not in found and "www.linkedin.com" not in found
+    assert "theaioperator.io" in manifest["mentions"]["network_hosts"]
+    assert "tracker.example-team.dev" in found  # defined in config.py, requested in client.py
+    assert "api.groq.com" in found  # an API address, even before any call is seen
+    assert "hooks.example-team.dev" in found  # docs keep the endpoint-setting rule

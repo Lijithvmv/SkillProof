@@ -341,7 +341,7 @@ def called_names(lines: list[str]) -> set[str]:
 
 
 def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[str, ...] | list[str] = (), previous: str = "",
-                   called: set[str] | frozenset[str] = frozenset()) -> str:
+                   called: set[str] | frozenset[str] = frozenset(), package_called: frozenset[str] | None = None) -> str:
     """Why the URL starting at url_start is contacted by the skill, or "" when it is only mentioned. Contact positions:
     an argument of a network call or command, the value of an endpoint-named setting, a resource a page loads, an
     API base or HTTP-method line in docs, a fetch instruction in prose, or (in scripts) an API-shaped URL bound to
@@ -377,6 +377,14 @@ def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[
             return f"bound to {name}, which a network call in this file uses"
         if CONTACT_NAME.search(name):
             if record and name.lower() in {"url", "uri", "src", "source"}:
+                return ""
+            if package_called is not None and suffix in SCRIPT_SUFFIXES:
+                # In code, an endpoint-named constant is contacted only if some network call in the package uses that
+                # name (SUBSTACK_URL = "https://..." stamped into notes is a link) or its value is an API address.
+                if name in package_called:
+                    return f"value of {name}, which a network call in this package uses"
+                if API_SHAPED.search(url) and not record:
+                    return f"API address bound to {name}"
                 return ""
             return f"value of the endpoint setting {name}"
         if suffix in SCRIPT_SUFFIXES and API_SHAPED.search(url) and not record:
@@ -1262,14 +1270,27 @@ def _replay(manifest: "Manifest", ops: list[tuple]) -> None:
             manifest.decode_trail.extend(dict(step) for step in op[1])
 
 
+def _package_called_names(files: dict[str, bytes]) -> frozenset[str]:
+    """Names used inside network calls anywhere in the package's scripts (a constant defined in one module and
+    requested in another is still contacted)."""
+    names: set[str] = set()
+    for path, raw in files.items():
+        if PurePosixPath(path).suffix.lower() in SCRIPT_SUFFIXES and b"\x00" not in raw[:4096]:
+            names |= called_names(raw.decode("utf-8", "replace").splitlines())
+    return frozenset(names)
+
+
 def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
     """The capability manifest of a package. Each file is analysed on its own; its result (an ordered list of
     manifest calls) is cached by path and content, so a history of many versions re-reads only changed files.
     Replaying the calls in path order gives exactly the manifest a full scan gives."""
     result = Manifest(files=len(files))
+    package_called = _package_called_names(files)
+    package_digest = hashlib.sha256(" ".join(sorted(package_called)).encode()).digest()  # names hold no spaces
     for path in sorted(files):
         raw = files[path]
-        key = (path, hashlib.sha256(raw).digest())
+        is_script = PurePosixPath(path).suffix.lower() in SCRIPT_SUFFIXES
+        key = (path, hashlib.sha256(raw).digest(), package_digest if is_script else b"")
         cached = _FILE_CACHE.get(key)
         if cached is not None:
             _replay(result, cached)
@@ -1390,7 +1411,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                                 prose_before = original_line(number - 1, "") if number > 1 else ""
                                 reason = contact_reason(full_line, at, path, (), prose_before) if at >= 0 else ""
                             else:
-                                reason = contact_reason(line, match.start(), path, neighbours, previous, called)
+                                reason = contact_reason(line, match.start(), path, neighbours, previous, called, package_called)
                         else:
                             reason = "an instruction to fetch or send"
                         if not reason:
@@ -1407,7 +1428,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                                 continue  # a field of a sample log record, or a browser allowlist
                             if all(0 <= int(octet) <= 255 for octet in ip.split(".")) and not ip.startswith(("0.", "127.")) and not _not_a_target_ip(ip, suffix in DOC_SUFFIXES):
                                 reason = ("revealed by decoding hidden text" if number > original_lines
-                                          else contact_reason(line, ip_match.start(), path, neighbours, previous, called))
+                                          else contact_reason(line, ip_match.start(), path, neighbours, previous, called, package_called))
                                 if not reason:
                                     manifest.mention("network_hosts", ip, location)
                                     continue

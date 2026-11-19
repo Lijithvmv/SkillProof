@@ -22,6 +22,7 @@ from skillproof.security import scan_security
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.oidc import AuthenticationError, browser_login_config, verifier_from_environment
 from skillproof.evidence import EvidenceError, measured_evidence
+from skillproof.second_opinion import add_second_opinions
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -231,6 +232,7 @@ async def register_version(
         manifest = build_manifest(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    add_second_opinions(manifest, raw)
     security = report.get("security") or {}
     cited = [e.strip() for e in (experiment_ids or "").split(",") if e.strip()]
     if cited and evidence_json:

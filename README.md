@@ -15,6 +15,34 @@ uvicorn skillproof.api.main:app --reload
 
 Open `http://localhost:8000/docs`. Upload a ZIP containing a skill directory with `SKILL.md` to `POST /api/v1/skills/intelligence`.
 
+## Run as a service
+
+Copy `deploy/skillproof.example.toml` to `skillproof.toml`, set storage and sign-in, then:
+
+```powershell
+skillproof serve --config skillproof.toml                     # the API and the catalogue page
+skillproof backup --config skillproof.toml                    # a backup now (also scheduled while serving)
+skillproof restore --config skillproof.toml --from <backup>   # SQLite: hashes checked, server must be stopped
+skillproof service-file --config skillproof.toml --kind systemd       # or --kind windows-task
+```
+
+- **Storage.** `[storage] database_url` uses PostgreSQL (`pip install -e ".[postgres]"`); `data_dir` uses SQLite files on one machine. In PostgreSQL every table with tenant data has row-level security forced for every role, and every transaction sets its tenant first: a query with no tenant sees nothing and a row cannot be written for another tenant. Connect as a role that is neither superuser nor `BYPASSRLS`. Audit tables are append-only by trigger on both backends.
+- **Health.** `/health` is liveness; `/health/ready` queries every store and answers 503 when storage is missing or unreachable.
+- **Backups.** SQLite uses its online backup API (a consistent copy while serving), PostgreSQL uses `pg_dump`. A backup appears only when complete, carries a manifest of SHA-256 hashes, and the newest `keep` are retained.
+- **Sign-in.** With OIDC on, the page signs people in with the authorization code flow and PKCE as a public client (`[auth] client_id`, redirect URI `https://<host>/catalogue`). The access token is kept in memory only. `scripts/dev_oidc_provider.py` is a local provider for trying it; plain-HTTP issuers are accepted only on loopback and never with `environment = "production"`.
+- **Tests on PostgreSQL.** `python scripts/pg_test_server.py init` (with `SKILLPROOF_PG_BIN` pointing at a PostgreSQL bin folder) starts a loopback test server; with `SKILLPROOF_TEST_PG_URL` set, the whole test suite runs on PostgreSQL as well as SQLite.
+
+## How accurate the capability engine is
+
+Measured on public skill repositories the engine had never seen, with the sample, labels and pass rules written down before any result was read (single labeller; a second reader has not checked the labels):
+
+| Held-out test | Repositories | Precision, all items | Precision, risk categories only | Missed updates |
+|---|---|---|---|---|
+| 5 | 26 | 91.0% [86.2, 94.2] | 73.9% [62.5, 82.8] | 0 of 100 |
+| 6 | 26 | 89.5% [84.5, 93.0] | **77.0% [67.8, 84.2]** | 0 of 100 |
+
+"Risk categories" means hosts, installs, execution, credentials, agent-config writes, clients, hooks and similar, without declared tools and bundled files. About one risk alarm in four on unseen skills is a false alarm, mostly a command or address that is only mentioned, described or listed. Reviewers can mark those (below), and each mark becomes a labelled example for the next round.
+
 ## API
 
 `POST /api/v1/skills/intelligence` accepts a ZIP upload and returns the SHA-256 package fingerprint, selected skill path, file manifest, reference graph, progressive disclosure metrics, and structural findings. ZIP entries are checked for path traversal, symlinks, duplicate paths, and size limits before extraction into memory.
@@ -25,23 +53,29 @@ Open `http://localhost:8000/docs`. Upload a ZIP containing a skill directory wit
 
 `POST /api/v1/evaluations/assurance` checks supplied quality, security, behavioral, model-coverage, and cost evidence against a configurable policy. It reports blocked, not-ready, insufficient-evidence, human-review, or eligible-for-human-approval outcomes. It never automatically certifies a skill.
 
-The Python service `skillproof.approvals.SQLiteApprovalStore` accepts only eligible assurance reports and creates a pending approval request with a canonical report hash. A different authenticated principal must approve, reject, or request changes. The store appends immutable audit events in SQLite. Authentication and authorization are supplied by the embedding application; no unauthenticated approval API is exposed.
+The Python service `skillproof.approvals.ApprovalStore` (SQLite or PostgreSQL) accepts only eligible assurance reports and creates a pending approval request with a canonical report hash. A different authenticated principal must approve, reject, or request changes. The store appends immutable audit events (append-only by trigger). Authentication and authorization are supplied by the embedding application; no unauthenticated approval API is exposed.
 
-The Python service `skillproof.history.EvaluationHistoryStore` stores experiment fingerprints and summary metrics in append-only SQLite history. It omits raw model outputs by default and compares the latest report with the most recent report using the same benchmark fingerprint. This is a persistence layer; authenticated API routes and retention controls belong to the embedding application.
+The Python service `skillproof.history.EvaluationHistoryStore` stores experiment fingerprints and summary metrics in append-only history (SQLite or PostgreSQL). It omits raw model outputs by default and compares the latest report with the most recent report using the same benchmark fingerprint. This is a persistence layer; authenticated API routes and retention controls belong to the embedding application.
 
-The Python service `skillproof.registry.SQLiteSkillRegistry` catalogs immutable package fingerprints per tenant and skill name. New versions remain pending review (or are marked not eligible); promotion to active requires a separate human approval record matching the assurance report hash. The registry stores report summaries and an optional external `artifact_uri`, not skill package contents. The embedding application must authenticate and authorize tenant/actor IDs and resolve artifact URIs.
+The Python service `skillproof.registry.SkillRegistry` (SQLite or PostgreSQL) catalogs immutable package fingerprints per tenant and skill name. New versions remain pending review (or are marked not eligible); promotion to active requires a separate human approval record matching the assurance report hash. The registry stores report summaries and an optional external `artifact_uri`, not skill package contents. The embedding application must authenticate and authorize tenant/actor IDs and resolve artifact URIs.
 
 ### Skill catalogue API
 
 Set `SKILLPROOF_DATA_DIR` to a folder for the registry, approval and history databases. Then:
 
-1. `POST /api/v1/registry/versions` uploads a skill ZIP, with optional `evidence_json` for run results (lift, paired runs, models, cost). SkillProof analyses the package itself; static scores are never taken from the caller. It builds the capability manifest and compares it with the tenant's active version of the same skill, then ranks every addition block / ask / note. The assurance report is bound to this exact package, so approving one version can never promote another.
+1. `POST /api/v1/registry/versions` uploads a skill ZIP. Run evidence comes either from recorded experiments (`experiment_ids`, below; each must have run this exact `SKILL.md`) or, marked as declared rather than measured, from `evidence_json` (lift, paired runs, models, cost). SkillProof analyses the package itself; static scores are never taken from the caller. It builds the capability manifest and compares it with the tenant's active version of the same skill, then ranks every addition block / ask / note. The assurance report is bound to this exact package, so approving one version can never promote another.
 2. `POST /api/v1/registry/versions/{id}/approval-requests` sends an eligible version for review.
 3. `POST /api/v1/approvals/{request_id}/decision` lets a different person approve, reject or request changes.
 4. `POST /api/v1/registry/versions/{id}/promote` makes the version active. The capability change is compared again at this point, because another version may have become active in the meantime. If the change has a block-level addition, promotion also needs `capability_ack` set to that change's `change_hash`, so the approver confirms the exact lines they read. The acknowledgement is written to the append-only audit trail.
 5. `GET /api/v1/registry/catalogue` lists each skill with its active version and every version waiting for a decision. `GET /api/v1/registry/skills/{name}/versions` and `GET /api/v1/registry/versions/{id}` show the history and the full change.
 
 `skillproof catalogue-import --data-dir <same folder>` feeds the skills installed on the machine into the catalogue. It searches the common Claude, Codex, Cursor and VS Code locations, or the folders you pass with `--root`. A skill whose folder hasn't changed is recognised by its fingerprint and skipped before any analysis. A changed skill becomes a new version, compared with the active one, or with the previous version while nothing is approved yet. Skills that share a name across agents get the agent's label, for example `pptx (codex)`. Installed skills come with static evidence only, so they stay `insufficient_evidence` until run evidence is added. The command exits 1 when an update has a block-level addition, so it can run on a schedule.
+
+`skillproof catalogue-check` compares the skills installed on the machine with the versions the catalogue approved, without registering anything: `approved`, `never_approved`, or `running_unapproved` (the installed folder differs from its approved version), with what the installed version adds over the approved one when it was registered. It exits 1 on `running_unapproved` (and with `--strict` on `never_approved`), so it can run on a schedule as the enforcement side of the catalogue.
+
+A reviewer who reads a raised item and finds it is not a real capability marks it (`POST /api/v1/registry/versions/{id}/false-alarms`, or **Not real** on the page) with a reason. The person who registered the version cannot mark its items. The same item with evidence in the same files is not raised again for that skill; the same value in a new file is. Dismissed items are listed, do not count toward the decision, and are part of the change hash. Every mark is audited and exported as a labelled example (`GET /api/v1/registry/false-alarms`) for tuning the engine.
+
+`POST /api/v1/evaluations/experiments` records an `execute_experiment` result's metrics in the tenant's history for a skill, so versions can cite it. The assurance report says whether its behavioural evidence was measured (with experiment ids and models), declared by the uploader, or absent, and the page shows it.
 
 The page at `/catalogue` (`/` redirects there) lists skills with a search box and a level filter. Selecting a version shows what it adds, its assurance gates, its approval state and its audit trail, along with the actions your role allows.
 
@@ -73,6 +107,8 @@ SkillProof's main question is whether to replace one version of a skill with ano
 
 `POST /api/v1/evaluations/compare` accepts baseline and skill-enabled run scores on a 0–1 scale and reports mean score, population standard deviation, pass rate, absolute percentage-point lift, relative improvement, and negative lift.
 
+**Checks before judges.** A benchmark task can carry typed `checks` (text present or absent, regex, a JSON path value, a number recomputed within a tolerance, word limits, a heading) besides free-text `criteria`. `skillproof.checks.CheckedEvaluator` scores the checks exactly and asks the model judge only about the criteria; each criterion counts once, and every experiment reports its share of exact checks. When a benchmark has judged criteria, the grader must first pass labelled calibration answers (`calibration_cases`, graded with `grader_check`): more than one broken criterion passed, more than 15% disagreement, or grader failures withhold the lift, with the reason. A checks-only benchmark needs no calibration.
+
 Python integrations can call `skillproof.execution.execute_experiment(...)` with benchmark tasks, a runner implementing `run(prompt, context, skill_instructions)`, and an evaluator implementing `evaluate(task, output)`. It runs baseline and skill-enabled trials in seeded randomized order, records paired outputs, scores, model metadata, latency, usage and failures, then reports aggregate lift on complete pairs, its uncertainty with the task as the unit (exact sign-flip p-value, bootstrap interval over tasks, tasks improved/worse/unchanged; the interpretation is "positive" or "negative" only when the interval excludes zero and the exact p-value is at most 0.05), pass-rate changes, paired latency/token/cost overhead, per-condition telemetry summaries, and model-specific lift/variance. No persistent storage is configured by default.
 
 ## Current scope
@@ -98,4 +134,4 @@ Python integrations can call `skillproof.execution.execute_experiment(...)` with
 - Scheduled monitoring checks evaluation freshness, lift regressions, model coverage, run failures, and cost overhead, emitting machine-readable alerts.
 - Tenant role checks gate registry, approval, and evaluation history operations; approval records are tenant-scoped in SQLite.
 
-Scores are diagnostic summaries, not certification. The candidate benchmark has not been independently reviewed and no human annotations or live OpenAI results are included. Instruction, task, and security checks are heuristic; security scans do not execute adversarial tests or prove a skill safe. Execution isolation, production database operations, and external notification delivery still require integration work.
+Scores are diagnostic summaries, not certification. The candidate benchmark has not been independently reviewed and no human annotations or live OpenAI results are included. Instruction, task, and security checks are heuristic; security scans do not execute adversarial tests or prove a skill safe. Execution isolation and external notification delivery still require integration work; the capability engine's precision on unseen skills is measured above, not assumed.

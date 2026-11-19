@@ -454,7 +454,7 @@ PERSISTENCE = [
     ("startup folder", r"Start Menu\\+Programs\\+Startup"),
 ]
 CREDENTIALS = [
-    ("ssh keys", r"~?/\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b"), ("aws credentials", r"\.aws[/\\]credentials|\bAWS_SECRET_ACCESS_KEY\b"),
+    ("ssh keys", r"~?/\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b"), ("aws credentials", r"\.aws[/\\]credentials|(?-i:\bAWS_SECRET_ACCESS_KEY\b)"),
     ("netrc", r"\.netrc\b"), ("npmrc/pypirc", r"\.npmrc\b|\.pypirc\b"), ("keychain", r"\bsecurity\s+find-(?:generic|internet)-password\b|\bkeyring\.get_password\b"),
     # Chrome's files are "Login Data" and "Local State"; `local state` in a shell function is a variable.
     ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"(?-i:Login Data)|cookies\.sqlite|(?-i:Local State)"),
@@ -543,6 +543,8 @@ def is_secret_env(name: str) -> bool:
         return False
     if re.search(r"_(?:DIR|ROOT|FOLDER|HOME)$", name):
         return False  # COOKIE_COPY_SKILL_DIR names a folder, whatever word it contains
+    if re.search(r"(?:^|_)SESSION_ID$", name):
+        return False  # CLAUDE_CODE_SESSION_ID names a conversation; a SESSION_TOKEN or SESSION_KEY still counts
     parts = name.split("_")
     if "KEY" in parts and parts.index("KEY") + 1 < len(parts) and parts[parts.index("KEY") + 1] in {"VAULT", "VAULTS"}:
         parts = [p for i, p in enumerate(parts) if not (p == "KEY" and i + 1 < len(parts) and parts[i + 1] in {"VAULT", "VAULTS"})]
@@ -1619,6 +1621,9 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
 
     out = result.to_dict()
     add_blocks(out, files)
+    invoked = invoked_test_named(files)
+    if invoked:
+        out["invoked_test_named"] = invoked
     return out
 
 
@@ -1627,13 +1632,32 @@ TEST_NAME = re.compile(r"^(?:test_.*|.*_test\.\w+|.*\.(?:test|spec)\.\w+|conftes
 DOC_SUFFIXES = {".md", ".txt", ".rst"}
 
 
-def source_kind(location: str) -> str:
+def invoked_test_named(files: dict[str, bytes]) -> list[str]:
+    """Files named like tests (test_detectors.py, selftest.py) outside a tests folder that another, non-test file of
+    the package names: utilities the skill runs, not tests. Labelled held-outs 1-9: 3 real items were capped at note
+    by their name alone, 0 false ones would be raised (a file inside a tests folder stays a test however it is named)."""
+    out = []
+    for path in files:
+        name = PurePosixPath(path).name
+        if TEST_PATH.search(path) or not TEST_NAME.match(name):
+            continue
+        named = re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])")
+        for other, raw in files.items():
+            if other == path or TEST_PATH.search(other) or TEST_NAME.match(PurePosixPath(other).name):
+                continue
+            if named.search(raw.decode("utf-8", "replace")):
+                out.append(path)
+                break
+    return sorted(out)
+
+
+def source_kind(location: str, invoked: set[str] | frozenset[str] = frozenset()) -> str:
     """Where a capability lives: 'instructions' (Markdown the agent reads and follows), 'shipped' (scripts and
     files that ship and can run), or 'test' (test files only). Instructions are not lower risk than code: for a
-    skill they are what the agent is told to do."""
+    skill they are what the agent is told to do. ``invoked`` lists test-named files the package itself runs."""
     path = location.rsplit(":", 1)[0] if re.search(r":(?:\d+|decoded)$", location) else location
     name = PurePosixPath(path).name
-    if TEST_PATH.search(path) or TEST_NAME.match(name):
+    if (TEST_PATH.search(path) or TEST_NAME.match(name)) and path not in invoked:
         return "test"
     if PurePosixPath(name).suffix.lower() in DOC_SUFFIXES:
         return "instructions"
@@ -1696,6 +1720,7 @@ def _widenings(old: dict[str, Any], new: dict[str, Any], added: dict[str, dict[s
 
 def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Capabilities the new version has that the old one did not (and the reverse)."""
+    invoked = frozenset(new.get("invoked_test_named") or ())
     added: dict[str, dict[str, list[str]]] = {}
     removed: dict[str, list[str]] = {}
     repointed: list[str] = []
@@ -1714,7 +1739,7 @@ def diff_manifests(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     by_source = {"instructions": 0, "shipped": 0, "test": 0}
     for category, values in added.items():
         for value, locations in values.items():
-            kinds = sorted({source_kind(location) for location in locations})
+            kinds = sorted({source_kind(location, invoked) for location in locations})
             sources.setdefault(category, {})[value] = kinds
             # An item counts once, under the riskiest place it appears: shipped code, then instructions, then tests.
             by_source[next(k for k in ("shipped", "instructions", "test") if k in kinds)] += 1

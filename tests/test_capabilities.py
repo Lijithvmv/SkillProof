@@ -793,6 +793,37 @@ def test_searching_for_a_key_name_is_a_leak_scan():
     assert "aws credentials" in found
 
 
+def test_aws_key_keyword_argument_is_not_the_credentials_file():
+    # Decision: block-level "aws credentials" is raised only for the credentials file or the AWS_SECRET_ACCESS_KEY
+    # variable. Held-out 9: 3 of 6 block-level false alarms were boto3 keyword arguments in code the skill teaches.
+    found, _ = _creds({"SKILL.md": b'```python\ns = Session(aws_access_key_id="x", aws_secret_access_key=settings.key)\n```\n'})
+    assert "aws credentials" not in found
+    found, _ = _creds({"scripts/a.py": b'import os\nk = os.environ["AWS_SECRET_ACCESS_KEY"]\n'})
+    assert "aws credentials" in found
+
+
+def test_test_named_script_the_skill_runs_is_not_capped_as_a_test():
+    # Decision: a test-named file outside a tests folder that the skill's own text names is a tool it runs, so its
+    # capabilities are not capped at note (labelled held-outs 1-9: 3 real items were hidden this way, 0 false raised).
+    old = build_manifest({"SKILL.md": b"# s\n"})
+    files = {"SKILL.md": b"# s\nRun `python scripts/test_detectors.py` to score the text.\n",
+             "scripts/test_detectors.py": b'import os\nkey = os.environ["GPTZERO_API_KEY"]\n',
+             "tests/test_unit.py": b'import os\nk = os.environ["OTHER_API_KEY"]\n'}
+    diff = diff_manifests(old, build_manifest(files))
+    assert diff["added_sources"]["credential_access"]["env:GPTZERO_API_KEY"] == ["shipped"]
+    assert diff["added_sources"]["credential_access"]["env:OTHER_API_KEY"] == ["test"]  # a tests folder stays a test
+    files["SKILL.md"] = b"# s\n"
+    diff = diff_manifests(old, build_manifest(files))
+    assert diff["added_sources"]["credential_access"]["env:GPTZERO_API_KEY"] == ["test"]  # not named: still a test
+
+
+def test_session_id_variable_is_not_a_secret():
+    # Decision: an agent's conversation id is not a credential read (held-out 9: 2 false ask-level items).
+    from skillproof.capabilities import is_secret_env
+    assert not is_secret_env("CLAUDE_CODE_SESSION_ID") and not is_secret_env("COPILOT_SESSION_ID")
+    assert is_secret_env("SESSION_TOKEN") and is_secret_env("APP_SESSION_KEY") and is_secret_env("AWS_SESSION_TOKEN")
+
+
 def test_shell_local_state_variable_is_not_browser_data():
     found, _ = _creds({"scripts/h.sh": b"#!/bin/sh\nf() {\n  local state result\n}\n"})
     assert "browser data" not in found

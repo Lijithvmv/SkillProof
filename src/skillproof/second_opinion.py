@@ -4,7 +4,8 @@ mentioning it?
 Measured before it was built (169 labelled risk items from two unseen-repository tests, prompt frozen and hashed
 first): on execution, credentials, hooks, agent spawning, hiding and persistence it lowered 13 false alarms and
 1 of 128 real items. On hosts, installs and config writes it lowered real items (an API constant's use sits outside the
-window it reads), so it is not asked about those.
+window it reads), so it is not asked about those. Nor is it asked about a line holding a search command: on held-out 7
+all 5 real items it lowered were greps and finds whose pattern the rules now set aside and whose file reads are real.
 
 It only ever demotes: an item it calls a mention drops one level and says why; nothing is hidden. The model runs
 locally (Ollama on loopback); skill text is passed as quoted data.
@@ -15,6 +16,8 @@ import json
 import urllib.request
 from typing import Any, Callable
 from urllib.parse import urlparse
+
+from skillproof.capabilities import SEARCH_CMD
 
 SAFE_CATEGORIES = frozenset({"process_execution", "credential_access", "agent_spawning", "hiding_techniques", "hooks", "persistence"})
 DEFAULT_MODEL = "qwen2.5-coder-7b-ctx8k:latest"
@@ -81,6 +84,9 @@ def second_opinions(manifest: dict[str, Any], files: dict[str, bytes], ask: Call
             if not locations:
                 continue
             path, evidence = evidence_window(files, locations[0])
+            flagged = next((line for line in evidence.splitlines() if line.startswith(">> ")), "")
+            if SEARCH_CMD.search(flagged[3:]):
+                continue  # a search command: the rules already set its pattern aside and kept the files it reads
             prompt = PROMPT.format(meaning=MEANING[category].format(v=value), path=path, evidence=evidence)
             try:
                 answer = ask(prompt)

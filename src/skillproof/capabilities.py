@@ -461,9 +461,65 @@ CREDENTIALS = [
     # "{path}.env" is attribute access; ".Env.X" is a Go template field, not a file.
     (".env file", r"(?<![\w.}\])])(?-i:\.env)\b(?!\.example)"),
 ]
-# A key name given to a search command is looked FOR (a leak scan: grep -rn "aws_secret_access_key" .), not read.
-SEARCH_TERM = re.compile(r"\b(?:grep|egrep|rg|ag|git\s+grep|findstr|Select-String)\b[^|;&]*$", re.I)
-CREDENTIAL_FILE = re.compile(r"[/\\~]|\bid_(?:rsa|ed25519|ecdsa)\b")  # a path names a file that is opened
+# The pattern given to a search or query command is what it looks FOR, never what it does: `grep -rnE
+# 'os\.environ|--dangerously-skip-permissions|wget '` runs grep, not wget (held-out 7: 8 of 27 false alarms were names
+# inside grep/yq patterns of one audit-rule library). File selectors stay: `grep ... --include='*.env'` reads .env files.
+SEARCH_CMD = re.compile(r"(?:^|[|;&({`]|\$\(|\b(?:xargs|sudo|then|do|exec|time|nice|env)\b|!)\s*"
+                        r"(?:grep|egrep|fgrep|rg|ag|git\s+grep|findstr|Select-String|yq|jq)(?![\w-])", re.I | re.M)
+SEARCH_FILE_OPTION = re.compile(r"^(?:--(?:include|exclude|exclude-dir|exclude-from|include-dir|glob|iglob|type|type-add|file|from-file|files-from)|"
+                                r"-[gtf]|-(?:Path|LiteralPath|Include|Exclude|Filter)|/F)=?$", re.I)
+SEARCH_PATTERN_OPTION = re.compile(r"^(?:-e|--regexp|-Pattern|--arg|--argjson)=?$", re.I)
+
+
+def mask_search_patterns(text: str) -> str:
+    """`text` with the pattern or query arguments of search commands blanked (same length, so offsets still match)."""
+    if not SEARCH_CMD.search(text):
+        return text
+    out = list(text)
+    n = len(text)
+    for command in SEARCH_CMD.finditer(text):
+        i, pattern_done, previous = command.end(), False, ""
+        while i < n:
+            c = text[i]
+            if c in "|;&`)":
+                break
+            if c.isspace():
+                i += 1
+                continue
+            start = i
+            token_prefix = ""
+            while i < n and not text[i].isspace() and text[i] not in "'\"|;&`":
+                i += 1
+            token_prefix = text[start:i]
+            if i < n and text[i] in "'\"":
+                quote, q = text[i], i + 1
+                while q < n and text[q] != quote:
+                    q += 2 if text[q] == "\\" and quote == '"' else 1
+                selector = SEARCH_FILE_OPTION.match(token_prefix) or (not token_prefix and SEARCH_FILE_OPTION.match(previous))
+                if not selector:
+                    for k in range(i + 1, min(q, n)):
+                        out[k] = " "
+                    pattern_done = True
+                i = min(q + 1, n)
+                previous = token_prefix + "'"
+                continue
+            token = token_prefix
+            if token.startswith("-"):
+                previous = token
+                if "=" in token and SEARCH_PATTERN_OPTION.match(token.split("=", 1)[0] + "="):
+                    for k in range(start + token.index("=") + 1, i):
+                        out[k] = " "
+                    pattern_done = True
+                continue
+            if SEARCH_FILE_OPTION.match(previous):
+                previous = token
+                continue
+            if not pattern_done or SEARCH_PATTERN_OPTION.match(previous):
+                for k in range(start, i):
+                    out[k] = " "
+                pattern_done = True
+            previous = token
+    return "".join(out)
 ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|(?:os\.)?getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
 SECRETISH_ENV = re.compile(r"KEY|SECRET|TOKEN|PASS|AUTH|CRED|PRIVATE|COOKIE|SESSION", re.I)
 # Reading a variable is a credential access only when the variable holds a secret. Most variables a skill reads are
@@ -951,8 +1007,6 @@ def credential_reason(name: str, line: str, match: re.Match, own_env: set[str], 
     """Why a credential pattern match is an access, or "" when the secret is only named or is the skill's own file."""
     if name == ".env file" and own_env and (fixture_file or _path_token(line, match.start(), match.end()) in own_env):
         return ""  # a .env this file writes itself (in a test, any .env in it is the test's fixture)
-    if SEARCH_TERM.search(re.split(r"\|", line[: match.start()])[-1]) and not CREDENTIAL_FILE.search(match.group(0)):
-        return ""
     if line[: match.start()].endswith("\\"):
         return ""  # "^(?:\\.netrc|\\.npmrc)$": a pattern in a deny-list of sensitive names, not a file opened
     return "read or opened"
@@ -1378,8 +1432,12 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                 neighbours = [n for n in (previous, lines[index + 1][1] if index + 1 < len(lines) else "") if n]
                 hosts_apply = not is_test and not ECHO_LINE.match(line) and not (suffix in DOC_SUFFIXES and TABLE_ROW.match(full_line))
                 if cue and hosts_apply and PurePosixPath(path).name.lower() not in LOCKFILES:
+                    searched = mask_search_patterns(line) if is_code else line
                     for match in URL.finditer(line):
                         host = match.group(1).lower().strip("[]")
+                        if searched[match.start()] != line[match.start()]:
+                            manifest.mention("network_hosts", host, location)
+                            continue  # an address inside a search pattern is looked for, not contacted
                         if NAMESPACE_CONTEXT.search(line[: match.start()]) or NOT_EXTERNAL.match(host) or host in IDENTIFIER_HOSTS:
                             continue
                         if NOT_CONTACTED_CONTEXT.search(line[: match.start()]):
@@ -1456,6 +1514,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                              if not NEGATED.search((carried + full_line[: m.start()])[-60:])]
                     all_spans = " ; ".join(spans)
                     command_line = " ; ".join(s for s in spans if len(s.split()) > 1)
+                command_line, all_spans = mask_search_patterns(command_line), mask_search_patterns(all_spans)
                 alternation_free = ALTERNATION.sub(" ", command_line)  # "curl|wget|nc", "{zsh|bash|powershell}" are lists
                 _add_clients(manifest, alternation_free, location)
                 for name, pattern in PROCESS_EXEC:
@@ -1525,7 +1584,10 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     manifest.add("credential_access", "env:<all>", location)
                 if is_test:
                     continue  # an install command inside a test's string data is test input, not something run
+                searched = mask_search_patterns(line)
                 for match in INSTALL.finditer(line):
+                    if searched[match.start()] != line[match.start()]:
+                        continue  # `grep -E 'go (install|run) '`: an install command searched for, not run
                     full = original_line(number, line)
                     command = " ".join(match.group(0).split()[:2])  # e.g. "npm install", findable in the original line
                     if NEGATED.search(full[: max(0, full.find(command))][-40:]):

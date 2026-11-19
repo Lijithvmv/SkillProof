@@ -788,7 +788,7 @@ def test_go_template_env_field_is_not_a_env_file():
 
 def test_searching_for_a_key_name_is_a_leak_scan():
     found, manifest = _creds({"references/scan.md": b'```bash\ngrep -rn "aws_secret_access_key" .\n```\n'})
-    assert "aws credentials" not in found and "aws credentials" in manifest["mentions"]["credential_access"]
+    assert "aws credentials" not in found  # the pattern of a search is set aside before credentials are read
     found, _ = _creds({"scripts/s.sh": b"#!/bin/sh\ngrep aws_secret_access_key ~/.aws/credentials\n"})
     assert "aws credentials" in found
 
@@ -966,3 +966,23 @@ def test_endpoint_constants_count_only_when_the_package_calls_them():
     assert "tracker.example-team.dev" in found  # defined in config.py, requested in client.py
     assert "api.groq.com" in found  # an API address, even before any call is seen
     assert "hooks.example-team.dev" in found  # docs keep the endpoint-setting rule
+
+
+def test_names_inside_a_search_pattern_are_looked_for_but_searched_files_are_read():
+    # Held-out 7: an audit-rule library's grep/yq patterns named wget, PowerShell, os.environ and agent bypass flags.
+    doc = (b"```bash\n"
+           b"grep -rnE '^//go:generate[[:space:]]+(go run [^ ]+@|sh |bash |curl |wget )' --include='*.go' .\n"
+           rb"grep -rnE 'System\.Management\.Automation|Microsoft\.PowerShell\.SDK' --include='*.cs' ." b"\n"
+           rb'grep -rn "\.parts\|os.environ\|gethostname" .' b"\n"
+           b"grep -rnE -- '--dangerously-skip-permissions|--yolo' .\n"
+           b"yq '(.env // {} | to_entries)' .github/workflows/ci.yml\n"
+           b"grep -rnE -- '-mod=mod|go get |go (install|run) [^ ]+@' Makefile\n"
+           b"```\n")
+    caps = build_manifest({"rules/audit.md": doc})["capabilities"]
+    assert not caps.get("network_clients") and not caps.get("process_execution") and not caps.get("agent_spawning")
+    assert not caps.get("credential_access") and not caps.get("package_installs")
+    # The files a search reads are still read, and a command outside the pattern still runs.
+    reads = build_manifest({"rules/audit.md": b"```bash\ngrep -rnE 'APP_DEBUG' --include='.env*' .\n```\n"})["capabilities"]
+    assert ".env file" in reads.get("credential_access", {})
+    runs = build_manifest({"rules/audit.md": b"```bash\ngrep -rl 'x' . | xargs wget -i -\n```\n"})["capabilities"]
+    assert "wget" in runs.get("network_clients", {})

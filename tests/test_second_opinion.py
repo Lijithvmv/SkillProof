@@ -38,3 +38,11 @@ def test_model_must_be_local_and_failures_keep_the_level():
 
     assert second_opinions(build_manifest(NEW), NEW, broken) == {}
     assert "network_hosts" not in SAFE_CATEGORIES and "package_installs" not in SAFE_CATEGORIES
+
+
+def test_search_command_lines_are_not_asked():
+    files = {**OLD, "rules/a.md": b"```bash\ngrep -rnE 'FORWARDED' --include='*.env' .\n```\n"}
+    asked = []
+    new = build_manifest(files)
+    assert ".env file" in new["capabilities"]["credential_access"]
+    assert second_opinions(new, files, lambda p: asked.append(p) or "MENTION") == {} and asked == []

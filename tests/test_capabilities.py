@@ -937,3 +937,14 @@ def test_joined_install_path_in_a_copying_script_is_a_config_write():
 def test_wildcard_tools_keep_their_star():
     skill = b"---\nname: x\nallowed-tools: Bash(*), Read, mcp__zotero__*\n---\nBody.\n"
     assert "mcp__zotero__*" in build_manifest({"SKILL.md": skill})["capabilities"]["declared_tools"]
+
+
+def test_a_skills_invalid_python_escapes_do_not_warn():
+    import warnings as _w
+
+    backslash = chr(92)
+    script = f'x = "{backslash}%d"\nimport re\nre.sub("{backslash}k", "", x)\n'
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        build_manifest({"scripts/a.py": script.encode()})
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]

@@ -28,6 +28,7 @@ import hashlib
 import re
 import stat
 import unicodedata
+import warnings
 import zipfile
 
 import yaml
@@ -808,6 +809,8 @@ def decode_text(text: str, location: str, trail: list[dict[str, str]], max_round
 
     def fold(match: re.Match[str]) -> str:
         word = match.group(0)
+        if word.isascii():  # nothing to fold; the check below would find no character above 127
+            return word
         # Only words that mix plain Latin letters with lookalike letters (e.g. a Cyrillic "і" in "gіthub.com").
         # Math and typographic symbols such as "²" or "ℝ" are ordinary text, not disguise.
         if re.search(r"[A-Za-z]", word) and any(ord(ch) > 127 and ch.isalpha() for ch in word):
@@ -817,7 +820,8 @@ def decode_text(text: str, location: str, trail: list[dict[str, str]], max_round
                 return plain
         return word
 
-    text = re.sub(r"[^\s`'\"<>()\[\]]+", fold, text)
+    if not text.isascii():  # an all-ASCII text has no lookalike letters to fold
+        text = re.sub(r"[^\s`'\"<>()\[\]]+", fold, text)
 
     current = text
     for _ in range(max_rounds):
@@ -990,6 +994,12 @@ def _add_clients(manifest: Manifest, line: str, location: str) -> None:
             manifest.mention("network_clients", name, location)
 
 
+# Prefilters: a line that matches none of these patterns cannot match the scan that follows them, so the costly
+# WRITE_CUE gate runs only on the few lines that name a startup file or a persistence mechanism.
+SHELL_RC_ANY = re.compile("|".join(f"(?:{pattern})" for _, pattern in SHELL_RC), re.I)
+PERSISTENCE_ANY = re.compile("|".join(f"(?:{pattern})" for _, pattern in PERSISTENCE + SHELL_RC), re.I)
+
+
 def _scan_patterns(manifest: Manifest, category: str, patterns: list[tuple[str, str]], line: str, location: str) -> None:
     for name, pattern in patterns:
         if re.search(pattern, line, re.I if category != "agent_config_writes" else 0):
@@ -1038,7 +1048,9 @@ def _mask_python(text: str) -> str:
     a docstring about removed `npx` behaviour, or os\\.environ inside a regex is not the skill doing it. Strings
     handed to other calls (subprocess, os.system, requests, b64decode...) stay, so payloads are still scanned."""
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():  # a skill's own invalid escapes ("\%") are its problem, not log noise here
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
     except (SyntaxError, ValueError, RecursionError):
         return text
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -1408,7 +1420,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     # of tools are common and harmless.
                     if not TABLE_ROW.match(original_line(number, line)):
                         _add_config_writes(manifest, line, location, prose=True)
-                    if WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
+                    if PERSISTENCE_ANY.search(line) and WRITE_CUE.search(line) and not TABLE_ROW.match(original_line(number, line)):
                         _scan_patterns(manifest, "persistence", PERSISTENCE + SHELL_RC, line, location)
                     continue
                 command_line = all_spans = line
@@ -1451,7 +1463,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     manifest.add("process_execution", name, location)
                     manifest.reasons.setdefault(f"process_execution|{name}", reason)
                 _scan_patterns(manifest, "persistence", PERSISTENCE, command_line, location)
-                if WRITE_CUE.search(command_line):
+                if SHELL_RC_ANY.search(command_line) and WRITE_CUE.search(command_line):
                     _scan_patterns(manifest, "persistence", SHELL_RC, command_line, location)
                 _add_credentials(manifest, command_line, location, own_env, is_test)
                 _scan_patterns(manifest, "destructive_operations", DESTRUCTIVE, command_line, location)
@@ -1488,7 +1500,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         manifest.mention("credential_access", "env:" + name, location)
                         continue  # os.environ["TOKEN"] = value SETS the variable; nothing is read
                     manifest.add("credential_access", "env:" + name, location)
-                if ENV_ALL.search(command_line):
+                if "env" in command_line and ENV_ALL.search(command_line):  # every ENV_ALL branch contains "env"
                     manifest.add("credential_access", "env:<all>", location)
                 if is_test:
                     continue  # an install command inside a test's string data is test input, not something run

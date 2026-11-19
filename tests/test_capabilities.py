@@ -986,3 +986,11 @@ def test_names_inside_a_search_pattern_are_looked_for_but_searched_files_are_rea
     assert ".env file" in reads.get("credential_access", {})
     runs = build_manifest({"rules/audit.md": b"```bash\ngrep -rl 'x' . | xargs wget -i -\n```\n"})["capabilities"]
     assert "wget" in runs.get("network_clients", {})
+
+
+def test_launchctl_setenv_is_a_session_variable_not_persistence():
+    # Held-out 8: one line copied into 38 skills passed an API key to `launchctl setenv`; nothing is made to run later.
+    caps = build_manifest({"SKILL.md": b"# s\n```bash\nlaunchctl setenv SOCIALDATAX_API_KEY \"$KEY\"\n```\n"})["capabilities"]
+    assert "launchd" not in caps.get("persistence", {})
+    caps = build_manifest({"SKILL.md": b"# s\n```bash\nlaunchctl load -w ~/Library/LaunchAgents/com.x.plist\nlaunchctl bootstrap gui/501 x.plist\n```\n"})["capabilities"]
+    assert "launchd" in caps.get("persistence", {})

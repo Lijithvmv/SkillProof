@@ -447,7 +447,7 @@ AGENT_CONFIG = [
 SHELL_RC = [("shell rc", r"(?<![\w?)\]])\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b(?!\s*[(.]\w)")]
 PERSISTENCE = [
     ("cron", r"\bcrontab\b|/etc/cron"),
-    ("systemd", r"\bsystemctl\s+(?:--user\s+)?(?:enable|start)\b|/etc/systemd|\.config/systemd"), ("launchd", r"\blaunchctl\b|LaunchAgents|LaunchDaemons"),
+    ("systemd", r"\bsystemctl\s+(?:--user\s+)?(?:enable|start)\b|/etc/systemd|\.config/systemd"), ("launchd", r"\blaunchctl\s+(?:-\w+\s+)*(?:load|bootstrap|enable|submit|kickstart|start)\b|LaunchAgents|LaunchDaemons"),
     # A schedule handed to an API ("expression": "0 20 * * 5") runs an agent on a timer just like crontab does.
     ("cron schedule", r"[\"']?(?:expression|cron|schedule)[\"']?\s*[:=]\s*[\"'][0-9*/,\- ]{9,}[\"']"),
     ("windows run key", r"CurrentVersion\\+Run\b"), ("scheduled task", r"\bschtasks\b|Register-ScheduledTask"),

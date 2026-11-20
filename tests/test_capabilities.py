@@ -817,6 +817,21 @@ def test_test_named_script_the_skill_runs_is_not_capped_as_a_test():
     assert diff["added_sources"]["credential_access"]["env:GPTZERO_API_KEY"] == ["test"]  # not named: still a test
 
 
+def test_inherited_environment_is_not_a_read_but_dumping_it_is():
+    # Decision 2026-11-20 (the user's): passing the environment on unchanged to a child process is not a secret read;
+    # serialising, printing, sending or looping over it stays one. Held-outs 1-9 had this construct labelled both ways.
+    caps = lambda text: build_manifest({"SKILL.md": b"# s\n", "scripts/a.py": text})["capabilities"].get("credential_access", {})
+    for text in (b'import os, subprocess\nsubprocess.run(["git"], env={**os.environ, "HOME": h})\n',
+                 b'import os, subprocess\nsubprocess.run(["git"], env=os.environ, check=True)\n',
+                 b'import os\ndef run(cmd, env=os.environ):\n    pass\n'):
+        assert "env:<all>" not in caps(text), text
+    assert "env:<all>" not in build_manifest({"SKILL.md": b"# s\n", "scripts/a.mjs": b'spawn(node, args, { env: { ...process.env, X: 1 } });\n'})["capabilities"].get("credential_access", {})
+    for text in (b'import os, json, requests\nrequests.post(u, data=json.dumps({**os.environ}))\n',
+                 b'import os\nfor k, v in {**os.environ}.items(): print(k, v)\n',
+                 b'import os\nprint(os.environ)\n'):
+        assert "env:<all>" in caps(text), text
+
+
 def test_session_id_variable_is_not_a_secret():
     # Decision: an agent's conversation id is not a credential read (held-out 9: 2 false ask-level items).
     from skillproof.capabilities import is_secret_env

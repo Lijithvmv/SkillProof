@@ -558,6 +558,13 @@ def is_secret_env(name: str) -> bool:
 ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
 DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
 STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
+# The whole environment handed on unchanged: to a child process (env=os.environ, env: process.env, {**os.environ, ...},
+# {...process.env}) or as a parameter default (def f(env=os.environ)). Decision 2026-11-20: inheritance is not a read.
+ENV_INHERIT = re.compile(r"\benv\s*[=:]\s*(?:\{\s*(?:\*\*|\.\.\.)\s*)?(?:os\.environ|process\.env)\b(?!\s*[\[.])|"
+                         r"(?:\*\*|\.\.\.)\s*(?:os\.environ|process\.env)\b(?!\s*[\[.])|"
+                         r"Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\b")
+ENV_OUT = re.compile(r"json\.dumps|JSON\.stringify|\bprint\(|console\.\w+\(|\.write\(|\bpost\(|\bsend\(|\bfetch\(|requests\.|"
+                     r"\bfor\s+\w+(?:\s*,\s*\w+)?\s+(?:in|of)\b|\.items\(\)|\.keys\(\)|Object\.(?:keys|entries|values)\(", re.I)
 ENV_ALL = re.compile(r"(?<!in )(?<!dict\()(?<!dict\(\")(?<!dict\(')\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
 INSTALL = re.compile(
     r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
@@ -1583,7 +1590,12 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                         continue  # os.environ["TOKEN"] = value SETS the variable; nothing is read
                     manifest.add("credential_access", "env:" + name, location)
                 if "env" in command_line and ENV_ALL.search(command_line):  # every ENV_ALL branch contains "env"
-                    manifest.add("credential_access", "env:<all>", location)
+                    if not ENV_INHERIT.search(command_line) or ENV_OUT.search(command_line) or ENV_ALL.search(ENV_INHERIT.sub(" ", command_line)):
+                        manifest.add("credential_access", "env:<all>", location)
+                    else:
+                        # env={**os.environ, "HOME": h}: the child gets the environment every child gets by default.
+                        # Nothing is read or enumerated; a line that also dumps, prints, sends or loops over it stays a read.
+                        manifest.mention("credential_access", "env:<all>", location)
                 if is_test:
                     continue  # an install command inside a test's string data is test input, not something run
                 searched = mask_search_patterns(line)

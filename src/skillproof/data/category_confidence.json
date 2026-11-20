@@ -6,48 +6,48 @@
  },
  "counts": {
   "agent_config_writes|step": [
-   2,
+   3,
    3
   ],
   "agent_config_writes|test": [
    0,
-   2
+   6
   ],
   "agent_config_writes|text": [
-   10,
-   4
+   12,
+   5
   ],
   "agent_spawning|step": [
-   5,
+   6,
    2
   ],
   "agent_spawning|text": [
    0,
-   5
+   6
   ],
   "credential_access|step": [
-   38,
-   12
+   32,
+   11
   ],
   "credential_access|test": [
-   6,
-   0
+   2,
+   2
   ],
   "credential_access|text": [
-   36,
-   5
+   35,
+   14
   ],
   "destructive_operations|step": [
-   12,
+   13,
    0
   ],
   "destructive_operations|test": [
    1,
-   1
+   7
   ],
   "destructive_operations|text": [
-   2,
-   0
+   3,
+   1
   ],
   "hiding_techniques|test": [
    0,
@@ -62,32 +62,32 @@
    1
   ],
   "network_clients|step": [
-   51,
-   3
+   55,
+   4
   ],
   "network_clients|test": [
    1,
-   5
+   9
   ],
   "network_clients|text": [
    28,
-   11
+   14
   ],
   "network_hosts|step": [
-   76,
+   83,
    7
   ],
   "network_hosts|text": [
-   92,
-   16
+   101,
+   19
   ],
   "package_installs|step": [
-   199,
+   206,
    3
   ],
   "package_installs|text": [
-   98,
-   7
+   102,
+   8
   ],
   "persistence|step": [
    2,
@@ -102,21 +102,27 @@
    2
   ],
   "process_execution|step": [
-   32,
-   3
+   38,
+   5
   ],
   "process_execution|test": [
    6,
-   5
+   10
   ],
   "process_execution|text": [
-   14,
+   15,
    17
   ]
  },
  "provenance": {
-  "labels": "risk items the extractor flags in eight held-out tests of public skill updates (226 public repositories), labelled real or mention by one reader; counts are [real, false]",
-  "items": 857,
+  "labels": "risk items the extractor flags in nine held-out tests of public skill updates, labelled real or mention by one reader; counts are [real, false]; items the extractor no longer raises after the 2026-11-20 definition changes are left out",
+  "items": 932,
+  "left_out": {
+   "env inheritance|T": 12,
+   "env inheritance|F": 8,
+   "session id|F": 2,
+   "aws keyword argument|F": 3
+  },
   "validation": {
    "h1": {
     "alarm_precision": [
@@ -126,22 +132,23 @@
     ],
     "rules_precision": [
      97.8,
-     92.3,
+     92.2,
      99.4
     ],
     "real_lowered": [
-     3,
-     88
+     2,
+     87
     ],
     "false_lowered": [
      0,
      2
-    ]
+    ],
+    "real_lowered_block": 0
    },
    "h2": {
     "alarm_precision": [
      99.2,
-     95.9,
+     95.8,
      99.9
     ],
     "rules_precision": [
@@ -150,104 +157,109 @@
      99.9
     ],
     "real_lowered": [
-     1,
+     2,
      133
     ],
     "false_lowered": [
      0,
      1
-    ]
+    ],
+    "real_lowered_block": 0
    },
    "h3": {
     "alarm_precision": [
-     96.2,
-     90.6,
-     98.5
+     96.0,
+     90.3,
+     98.4
     ],
     "rules_precision": [
-     94.7,
-     89.0,
-     97.6
+     94.5,
+     88.6,
+     97.5
     ],
     "real_lowered": [
      7,
-     108
+     104
     ],
     "false_lowered": [
      2,
      6
-    ]
+    ],
+    "real_lowered_block": 0
    },
    "h4": {
     "alarm_precision": [
-     96.4,
-     91.0,
-     98.6
+     96.2,
+     90.7,
+     98.5
     ],
     "rules_precision": [
      96.5,
-     91.4,
+     91.3,
      98.6
     ],
     "real_lowered": [
-     5,
-     111
+     8,
+     110
     ],
     "false_lowered": [
      0,
      4
-    ]
+    ],
+    "real_lowered_block": 0
    },
    "h5": {
     "alarm_precision": [
-     90.7,
-     80.1,
-     96.0
+     88.9,
+     77.8,
+     94.8
     ],
     "rules_precision": [
-     86.4,
-     75.5,
-     93.0
-    ],
-    "real_lowered": [
-     2,
-     51
-    ],
-    "false_lowered": [
-     3,
-     8
-    ]
-   },
-   "h6": {
-    "alarm_precision": [
-     81.9,
-     72.9,
-     88.4
-    ],
-    "rules_precision": [
-     78.6,
-     69.5,
-     85.5
+     87.3,
+     76.0,
+     93.7
     ],
     "real_lowered": [
      0,
-     77
+     48
+    ],
+    "false_lowered": [
+     1,
+     7
+    ],
+    "real_lowered_block": 0
+   },
+   "h6": {
+    "alarm_precision": [
+     81.3,
+     72.1,
+     88.0
+    ],
+    "rules_precision": [
+     77.9,
+     68.6,
+     85.1
+    ],
+    "real_lowered": [
+     0,
+     74
     ],
     "false_lowered": [
      4,
      21
-    ]
+    ],
+    "real_lowered_block": 0
    },
    "h7": {
     "alarm_precision": [
+     82.8,
+     74.2,
+     89.0
+    ],
+    "rules_precision": [
      82.0,
      73.3,
      88.3
-    ],
-    "rules_precision": [
-     81.2,
-     72.5,
-     87.6
     ],
     "real_lowered": [
      0,
@@ -255,79 +267,74 @@
     ],
     "false_lowered": [
      1,
-     19
-    ]
+     18
+    ],
+    "real_lowered_block": 0
    },
    "h8": {
     "alarm_precision": [
-     61.4,
-     53.2,
-     69.1
+     64.7,
+     56.2,
+     72.3
     ],
     "rules_precision": [
-     59.6,
-     51.5,
-     67.2
+     60.0,
+     51.9,
+     67.6
     ],
     "real_lowered": [
      1,
      87
     ],
     "false_lowered": [
-     5,
-     59
-    ]
+     11,
+     58
+    ],
+    "real_lowered_block": 0
+   },
+   "h9": {
+    "alarm_precision": [
+     53.8,
+     42.9,
+     64.3
+    ],
+    "rules_precision": [
+     50.0,
+     39.9,
+     60.1
+    ],
+    "real_lowered": [
+     2,
+     45
+    ],
+    "false_lowered": [
+     8,
+     45
+    ],
+    "real_lowered_block": 0
    },
    "all": {
     "alarm_precision": [
-     87.2,
-     84.8,
-     89.3
+     84.7,
+     82.2,
+     86.9
     ],
     "rules_precision": [
-     86.0,
-     83.5,
-     88.2
+     82.6,
+     80.1,
+     84.9
     ],
     "real_lowered": [
-     19,
-     737
+     22,
+     770
     ],
     "false_lowered": [
-     15,
-     120
-    ]
+     27,
+     162
+    ],
+    "real_lowered_block": 0
    }
   },
-  "validation_method": "each held-out scored by a table built without it",
-  "decision_rule": "lower one level when the posterior mean share of real flags (Beta(1,1) prior) is below 0.1 for block-level items and 0.5 for ask-level items (missing a real block item weighted nine times a false alarm)",
-  "validation_cost_weighted": {
-   "method": "each held-out scored by a table built without it",
-   "alarm_precision_all": [
-    86.8,
-    84.3,
-    88.9
-   ],
-   "real_lowered": [
-    16,
-    737
-   ],
-   "real_block_level_lowered": 0,
-   "false_lowered": [
-    10,
-    120
-   ],
-   "per_heldout_alarm_precision": {
-    "h1": 97.8,
-    "h2": 99.2,
-    "h3": 96.2,
-    "h4": 96.4,
-    "h5": 89.3,
-    "h6": 80.2,
-    "h7": 82.0,
-    "h8": 60.6
-   }
-  },
-  "validation_note": "'validation' above is the earlier single 0.5 cut, kept for comparison"
+  "validation_method": "each held-out scored by a table built without it, with the cost-weighted cut per level (lower_below)"
  }
 }

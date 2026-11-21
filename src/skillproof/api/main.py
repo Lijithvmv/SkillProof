@@ -27,6 +27,7 @@ from skillproof.evidence import EvidenceError, measured_evidence
 from skillproof.second_opinion import add_second_opinions
 from skillproof.evaluation_jobs import EvaluationSettings, start_worker
 from skillproof.jobs import JobError, JobStore
+from skillproof.notify import EVENTS, NotificationStore, NotifyError, start_deliverer
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -155,7 +156,7 @@ def governance_from_environment() -> GovernanceAccess | None:
     url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()
     if url:
         return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url),
-                                history=EvaluationHistoryStore(url), jobs=JobStore(url))
+                                history=EvaluationHistoryStore(url), jobs=JobStore(url), notifications=NotificationStore(url))
     data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
     if not data_dir:
         return None
@@ -165,6 +166,7 @@ def governance_from_environment() -> GovernanceAccess | None:
         approvals=SQLiteApprovalStore(root / "approvals.db"),
         history=EvaluationHistoryStore(root / "history.db"),
         jobs=JobStore(root / "jobs.db"),
+        notifications=NotificationStore(root / "notify.db"),
     )
 
 
@@ -174,9 +176,16 @@ _worker_stop = threading.Event()
 @app.on_event("startup")
 def _start_evaluation_worker() -> None:
     """With SKILLPROOF_EVAL_MODEL set, this server runs evaluation jobs in the background (one at a time)."""
+    if governance_from_environment() is None:
+        return
+    _worker_stop.clear()
+    def notifications() -> NotificationStore | None:
+        governance = governance_from_environment()
+        return governance.notifications if governance else None
+
+    start_deliverer(notifications, _worker_stop)
     settings = EvaluationSettings.from_env()
-    if settings is not None and governance_from_environment() is not None:
-        _worker_stop.clear()
+    if settings is not None:
         start_worker(governance_from_environment, settings, _worker_stop)
 
 
@@ -207,7 +216,7 @@ def _guarded(call):
         return call()
     except AuthorizationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except (RegistryError, ApprovalError, JobError) as exc:
+    except (RegistryError, ApprovalError, JobError, NotifyError) as exc:
         status = 404 if "not found" in str(exc) else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
@@ -315,6 +324,42 @@ def put_policy(policy: AssurancePolicy, request: Request) -> dict[str, Any]:
     principal = _principal(request)
     governance = _governance(request)
     return {"tenant_id": principal.tenant_id, **_guarded(lambda: governance.set_tenant_policy(principal, policy))}
+
+
+class WebhookRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    events: list[str] = Field(min_length=1, max_length=len(EVENTS))
+
+
+@app.get("/api/v1/webhooks")
+def list_webhooks(request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"events": list(EVENTS), "webhooks": _guarded(lambda: governance.list_webhooks(principal))}
+
+
+@app.post("/api/v1/webhooks")
+def add_webhook(body: WebhookRequest, request: Request) -> dict[str, Any]:
+    """Register an alert endpoint (tenant admins). The response carries its signing secret once; store it."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.add_webhook(principal, body.url, body.events))
+
+
+@app.delete("/api/v1/webhooks/{webhook_id}")
+def delete_webhook(webhook_id: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    _guarded(lambda: governance.remove_webhook(principal, webhook_id))
+    return {"deleted": webhook_id}
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(request: Request) -> dict[str, Any]:
+    """Recent alerts and their delivery state."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"notifications": _guarded(lambda: governance.list_notifications(principal))}
 
 
 @app.post("/api/v1/registry/versions/{version_id}/evaluate")

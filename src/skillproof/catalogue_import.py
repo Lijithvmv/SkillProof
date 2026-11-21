@@ -74,6 +74,12 @@ def check_installed(governance: GovernanceAccess, principal: Principal, roots: l
                                            "against": change.get("against")}
         skills.append(entry)
     counts = {s: sum(e["status"] == s for e in skills) for s in ("approved", "running_unapproved", "never_approved")}
+    import socket
+
+    for entry in (e for e in skills if e["status"] == "running_unapproved"):
+        governance.emit(principal.tenant_id, "fleet.running_unapproved", {
+            "skill_name": entry["skill_name"], "host": socket.gethostname(), "installed_fingerprint": entry["installed_fingerprint"],
+            "approved_version_id": entry["approved_version_id"], "adds_over_approved": entry.get("adds_over_approved")})
     return {"method": "installed_vs_approved", "tenant_id": principal.tenant_id, "roots": [str(r) for r in roots],
             "skills_found": len(skills), **counts,
             "alerts": [e for e in skills if e["status"] == "running_unapproved"], "skills": skills, "errors": errors}

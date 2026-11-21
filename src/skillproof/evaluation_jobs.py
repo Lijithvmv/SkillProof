@@ -101,9 +101,15 @@ def work_once(governance: GovernanceAccess, settings: EvaluationSettings, **kwar
     if claimed is None:
         return None
     tenant_id, job = claimed
+    base = {"job_id": job["job_id"], "version_id": job["version_id"], "skill_name": job["skill_name"]}
     try:
-        return jobs.finish(tenant_id, job["job_id"], run_job(governance, tenant_id, job, settings, **kwargs))
+        done = jobs.finish(tenant_id, job["job_id"], run_job(governance, tenant_id, job, settings, **kwargs))
+        result = done["result"] or {}
+        governance.emit(tenant_id, "evaluation.finished", {**base, **{k: result.get(k) for k in (
+            "outcome", "adherence_rate", "baseline_rate", "broken_claims", "lift_pp", "assurance")}})
+        return done
     except Exception as exc:  # a failed job is recorded with its reason; the worker keeps going
+        governance.emit(tenant_id, "evaluation.failed", {**base, "error": f"{type(exc).__name__}: {exc}"[:300]})
         return jobs.fail(tenant_id, job["job_id"], f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
 
 

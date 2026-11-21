@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db")
+STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db", "notify.db")
 ENV_KEYS = {
     ("storage", "database_url"): "SKILLPROOF_DATABASE_URL",
     ("storage", "data_dir"): "SKILLPROOF_DATA_DIR",

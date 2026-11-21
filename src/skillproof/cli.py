@@ -149,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--tenant", default="local")
     evaluate.add_argument("--output", default="-")
 
+    report = commands.add_parser("fleet-report", help="Send this machine's installed skills (names and package fingerprints, never contents) to a SkillProof server, which compares them with the approved versions. Exit 1 when a skill runs unapproved.")
+    report.add_argument("--server", required=True, help="Server base URL, e.g. https://skillproof.example.org")
+    report.add_argument("--token-env", default="SKILLPROOF_TOKEN", help="Environment variable holding the bearer access token (a reporter-role token).")
+    report.add_argument("--host", default=None, help="Machine name to report as (default: this computer's name).")
+    report.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
+    report.add_argument("--output", default="-")
+
     check = commands.add_parser("catalogue-check", help="Compare the skills installed on this machine with the versions the catalogue approved. Registers nothing. Exit 1 when an installed skill differs from its approved version (running unapproved); with --strict also when a skill was never approved.")
     check.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
     check.add_argument("--tenant", default="local")
@@ -287,6 +294,15 @@ def main(argv: list[str] | None = None) -> int:
                 governance.approvals.close()
             exit_code = 1 if result["updates_with_block"] else 0
         except (OSError, ValueError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "fleet-report":
+        try:
+            roots = [Path(r) for r in args.root] or default_roots()
+            if not roots:
+                raise ValueError("No skill folders found; pass --root.")
+            result = _fleet_report(args.server, os.environ.get(args.token_env, "").strip(), args.host, roots)
+            exit_code = 1 if result.get("counts", {}).get("running_unapproved") else 0
+        except (OSError, ValueError, RuntimeError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "benchmark-draft":
         try:
@@ -512,6 +528,38 @@ def _import_installed(governance, principal, roots, policy=None):
     from skillproof.catalogue_import import import_installed
 
     return import_installed(governance, principal, roots, policy)
+
+
+def _fleet_report(server: str, token: str, host: str | None, roots: list[Path], *, send=None) -> dict[str, Any]:
+    """Collect installed skills (catalogue names and folder fingerprints, as catalogue-import computes them) and POST them."""
+    import socket
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlparse
+
+    from skillproof.catalogue_import import _installed_families
+
+    parsed = urlparse(server)
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
+        raise ValueError("the server must be an https URL (plain http only to this machine)")
+    _, names, packages, errors = _installed_families(roots)
+    body = json.dumps({"host": host or socket.gethostname(),
+                       "skills": [{"skill_name": name, "fingerprint": packages[key][2]} for key, name in sorted(names.items(), key=lambda p: p[1])]}).encode()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    else:  # a local development server with sign-in off
+        headers.update({"X-SkillProof-Dev-User": f"reporter@{host or socket.gethostname()}", "X-SkillProof-Dev-Role": "reporter"})
+    if send is not None:
+        return send(server.rstrip("/") + "/api/v1/fleet/reports", body, headers)
+    request = urllib.request.Request(server.rstrip("/") + "/api/v1/fleet/reports", data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"server answered HTTP {exc.code}: {exc.read()[:300].decode('utf-8', 'replace')}") from exc
+    result["unreadable"] = errors
+    return result
 
 
 def _skill_text(folder: str) -> str:

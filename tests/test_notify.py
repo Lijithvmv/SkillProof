@@ -81,3 +81,37 @@ def test_catalogue_events_reach_subscribed_endpoints(tmp_path):
         assert sorted(events) == ["version.block_level_addition", "version.promoted"]
     finally:
         app.state.governance = None
+
+
+def test_machines_report_and_the_server_flags_unapproved_skills(tmp_path):
+    # Decision: the catalogue owner sees, per machine, which installed skills are not the approved version.
+    from skillproof.fleet import FleetStore
+
+    gov = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "r.db"), approvals=SQLiteApprovalStore(tmp_path / "a.db"),
+                           history=EvaluationHistoryStore(tmp_path / "h.db"), notifications=NotificationStore(tmp_path / "n.db"),
+                           fleet=FleetStore(tmp_path / "f.db"))
+    app.state.governance = gov
+    try:
+        client = TestClient(app)
+        client.post("/api/v1/webhooks", json={"url": "https://a.example.org/h", "events": ["fleet.running_unapproved"]},
+                    headers=as_user("root", "tenant_admin"))
+        evidence = {"evidence_json": json.dumps({"behavioral_lift_pp": 10, "paired_runs": 5, "measured_models": 1, "cost_overhead_percent": 20})}
+        approved = client.post("/api/v1/registry/versions", files={"file": ("s.zip", zip_of(SKILL))}, data=evidence,
+                               headers=as_user("alice", "evaluator")).json()["version"]
+        client.post(f"/api/v1/registry/versions/{approved['version_id']}/promote", headers=as_user("bob", "approver"),
+                    json={"approval_request_id": approve(client, approved["version_id"])})
+        report = {"host": "build-07", "skills": [{"skill_name": "release-notes", "fingerprint": "b" * 64},
+                                                 {"skill_name": "unknown-skill", "fingerprint": "c" * 64}]}
+        assert client.post("/api/v1/fleet/reports", json=report, headers=as_user("carol", "viewer")).status_code == 403
+        first = client.post("/api/v1/fleet/reports", json=report, headers=as_user("agent@build-07", "reporter")).json()
+        assert first["counts"] == {"approved": 0, "running_unapproved": 1, "never_approved": 1}
+        again = client.post("/api/v1/fleet/reports", json=report, headers=as_user("agent@build-07", "reporter")).json()
+        assert again["newly_unapproved"] == []  # alerted once, not on every report
+        fixed = {"host": "build-07", "skills": [{"skill_name": "release-notes", "fingerprint": approved["package_fingerprint"]}]}
+        assert client.post("/api/v1/fleet/reports", json=fixed, headers=as_user("agent@build-07", "reporter")).json()["counts"]["approved"] == 1
+        [host] = client.get("/api/v1/fleet", headers=as_user("carol", "viewer")).json()["hosts"]
+        assert host["host"] == "build-07" and host["running_unapproved"] == []
+        events = [n["event"] for n in client.get("/api/v1/notifications", headers=as_user("carol", "viewer")).json()["notifications"]]
+        assert events == ["fleet.running_unapproved"]
+    finally:
+        app.state.governance = None

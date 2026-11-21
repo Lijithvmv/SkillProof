@@ -28,6 +28,7 @@ from skillproof.second_opinion import add_second_opinions
 from skillproof.evaluation_jobs import EvaluationSettings, start_worker
 from skillproof.jobs import JobError, JobStore
 from skillproof.notify import EVENTS, NotificationStore, NotifyError, start_deliverer
+from skillproof.fleet import FleetError, FleetStore
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -156,7 +157,7 @@ def governance_from_environment() -> GovernanceAccess | None:
     url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()
     if url:
         return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url),
-                                history=EvaluationHistoryStore(url), jobs=JobStore(url), notifications=NotificationStore(url))
+                                history=EvaluationHistoryStore(url), jobs=JobStore(url), notifications=NotificationStore(url), fleet=FleetStore(url))
     data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
     if not data_dir:
         return None
@@ -167,6 +168,7 @@ def governance_from_environment() -> GovernanceAccess | None:
         history=EvaluationHistoryStore(root / "history.db"),
         jobs=JobStore(root / "jobs.db"),
         notifications=NotificationStore(root / "notify.db"),
+        fleet=FleetStore(root / "fleet.db"),
     )
 
 
@@ -216,7 +218,7 @@ def _guarded(call):
         return call()
     except AuthorizationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except (RegistryError, ApprovalError, JobError, NotifyError) as exc:
+    except (RegistryError, ApprovalError, JobError, NotifyError, FleetError) as exc:
         status = 404 if "not found" in str(exc) else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
@@ -352,6 +354,32 @@ def delete_webhook(webhook_id: str, request: Request) -> dict[str, Any]:
     governance = _governance(request)
     _guarded(lambda: governance.remove_webhook(principal, webhook_id))
     return {"deleted": webhook_id}
+
+
+class InstalledSkill(BaseModel):
+    skill_name: str = Field(min_length=1, max_length=200)
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class FleetReport(BaseModel):
+    host: str = Field(min_length=1, max_length=253)
+    skills: list[InstalledSkill] = Field(max_length=2000)
+
+
+@app.post("/api/v1/fleet/reports")
+def fleet_report(body: FleetReport, request: Request) -> dict[str, Any]:
+    """A machine reports the skills installed on it (names and fingerprints only); the server answers with each one's status."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.report_fleet(principal, body.host, [s.model_dump() for s in body.skills]))
+
+
+@app.get("/api/v1/fleet")
+def fleet(request: Request) -> dict[str, Any]:
+    """Every reporting machine: when it last reported and which skills it runs that the catalogue did not approve."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"hosts": _guarded(lambda: governance.fleet_hosts(principal))}
 
 
 @app.get("/api/v1/notifications")

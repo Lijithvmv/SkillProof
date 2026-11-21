@@ -105,7 +105,7 @@ class OIDCAccessTokenVerifier:
         role_value = claims.get(self.settings.role_claim)
         tenant_id = claims.get(self.settings.tenant_claim)
         subject = claims.get("sub")
-        if not isinstance(role_value, str) or role_value not in {"tenant_admin", "evaluator", "approver", "viewer"}:
+        if not isinstance(role_value, str) or role_value not in {"tenant_admin", "evaluator", "approver", "viewer", "reporter"}:
             raise AuthenticationError("access token has no single recognized SkillProof role")
         if not isinstance(tenant_id, str) or not tenant_id.strip() or not isinstance(subject, str) or not subject.strip():
             raise AuthenticationError("access token lacks a valid subject or tenant claim")

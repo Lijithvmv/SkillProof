@@ -92,6 +92,8 @@ ol.events li { margin: 2px 0; }
       </select>
     </div>
     <div id="skills"><div class="empty">Loading…</div></div>
+    <h2 style="margin-top:18px">Fleet <span class="muted" id="fleetCount"></span></h2>
+    <div id="fleet"><div class="empty">No machine has reported yet. Run <code>skillproof fleet-report --server …</code> on each machine.</div></div>
   </section>
   <section class="panel" id="detail"><div class="empty">Pick a version to see what it adds and to approve or promote it.</div></section>
 </main>
@@ -172,7 +174,7 @@ async function renderWho() {
   }
   let me = null;
   try { me = await api("/api/v1/whoami"); } catch (e) { who.innerHTML = `<span class="msg err">${esc(e.message)}</span>`; }
-  const roles = ["tenant_admin", "evaluator", "approver", "viewer"];
+  const roles = ["tenant_admin", "evaluator", "approver", "viewer", "reporter"];
   const dev = !me || me.dev_identity;
   state.dev = dev;
   who.innerHTML = dev
@@ -400,6 +402,21 @@ async function refresh() {
   const ready = await renderWho();
   if (ready === false) { document.getElementById("skills").innerHTML = `<div class="empty">Sign in to see the catalogue.</div>`; return; }
   await renderSkills(); if (state.selected) select(state.selected);
+  renderFleet();
+}
+
+async function renderFleet() {
+  // Which machines run skills the catalogue did not approve (from skillproof fleet-report on each machine).
+  try {
+    const { hosts } = await api("/api/v1/fleet");
+    document.getElementById("fleetCount").textContent = hosts.length ? `(${hosts.length} machine${hosts.length === 1 ? "" : "s"})` : "";
+    if (!hosts.length) return;
+    document.getElementById("fleet").innerHTML = hosts.map(h => `<div class="skill">
+      <strong>${esc(h.host)}</strong> <span class="muted">${esc(h.reported_at)}</span><br>
+      ${badge(h.counts.approved + " approved", "pass")} ${h.counts.running_unapproved ? badge(h.counts.running_unapproved + " running unapproved", "block") : ""} ${h.counts.never_approved ? badge(h.counts.never_approved + " never approved", "ask") : ""}
+      ${h.running_unapproved.map(s => `<div class="muted">${esc(s.skill_name)}: installed <code>${esc(s.installed_fingerprint.slice(0, 12))}</code> is not the approved version${s.adds_over_approved ? ` (adds ${esc(s.adds_over_approved.decision)})` : ""}</div>`).join("")}
+    </div>`).join("");
+  } catch (e) { /* fleet reporting not enabled or not visible to this role */ }
 }
 (async () => {
   try { state.auth = await (await fetch("/api/v1/auth/config")).json(); } catch (e) { state.auth = { mode: "local" }; }

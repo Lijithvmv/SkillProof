@@ -9,17 +9,19 @@ from skillproof.history import EvaluationHistoryStore
 from skillproof.registry import SQLiteSkillRegistry
 
 
-Role = Literal["tenant_admin", "evaluator", "approver", "viewer"]
+Role = Literal["tenant_admin", "evaluator", "approver", "viewer", "reporter"]
 Permission = Literal[
-    "skill.read", "skill.register", "skill.promote",
+    "skill.read", "skill.register", "skill.promote", "fleet.report",
     "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage",
 ]
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
-    "tenant_admin": frozenset({"skill.read", "skill.register", "skill.promote", "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage"}),
+    "tenant_admin": frozenset({"skill.read", "skill.register", "skill.promote", "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage", "fleet.report"}),
     "evaluator": frozenset({"skill.read", "skill.register", "evaluation.read", "evaluation.run", "approval.submit"}),
     "approver": frozenset({"skill.read", "skill.promote", "evaluation.read", "approval.decide"}),
     "viewer": frozenset({"skill.read", "evaluation.read"}),
+    # A machine that reports which skills it runs: nothing else.
+    "reporter": frozenset({"skill.read", "fleet.report"}),
 }
 
 
@@ -55,12 +57,33 @@ class GovernanceAccess:
     """
 
     def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore,
-                 jobs: Any | None = None, notifications: Any | None = None):
+                 jobs: Any | None = None, notifications: Any | None = None, fleet: Any | None = None):
         self.registry = registry
         self.approvals = approvals
         self.history = history
         self.jobs = jobs  # skillproof.jobs.JobStore, when the service runs evaluations
         self.notifications = notifications  # skillproof.notify.NotificationStore, when alerts are configured
+        self.fleet = fleet  # skillproof.fleet.FleetStore, when machines report to this server
+
+    def report_fleet(self, principal: Principal, host: str, installed: list[dict[str, Any]]) -> dict[str, Any]:
+        """A machine's installed skills, compared with the approved versions; alerts on skills newly running unapproved."""
+        from skillproof.fleet import compare
+
+        authorize(principal, principal.tenant_id, "fleet.report")
+        if self.fleet is None:
+            from skillproof.registry import RegistryError
+
+            raise RegistryError("fleet reporting is not enabled on this server")
+        names = {str(item.get("skill_name", "")).strip() for item in installed}
+        versions = {name: self.registry.list_versions(principal.tenant_id, name) for name in names if name}
+        result = self.fleet.record(principal.tenant_id, host, compare(versions, installed), reported_by=principal.user_id)
+        for entry in result["newly_unapproved"]:
+            self.emit(principal.tenant_id, "fleet.running_unapproved", {"host": host, **entry})
+        return result
+
+    def fleet_hosts(self, principal: Principal) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return [] if self.fleet is None else self.fleet.hosts(principal.tenant_id)
 
     def emit(self, tenant_id: str, event: str, payload: dict[str, Any]) -> None:
         """Queue an alert. Never raises: an alert must not block or undo the action it reports."""

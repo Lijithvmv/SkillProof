@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,10 +21,12 @@ from skillproof.ingestion import PackageError, read_skill_zip, read_skill_zip_by
 from skillproof.registry import RegistryError, SQLiteSkillRegistry
 from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
 from skillproof.security import scan_security
-from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
+from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version, evaluate_assurance
 from skillproof.oidc import AuthenticationError, browser_login_config, verifier_from_environment
 from skillproof.evidence import EvidenceError, measured_evidence
 from skillproof.second_opinion import add_second_opinions
+from skillproof.evaluation_jobs import EvaluationSettings, start_worker
+from skillproof.jobs import JobError, JobStore
 
 app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
@@ -150,7 +154,8 @@ def governance_from_environment() -> GovernanceAccess | None:
     SKILLPROOF_DATA_DIR. None when neither is set."""
     url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()
     if url:
-        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url), history=EvaluationHistoryStore(url))
+        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url),
+                                history=EvaluationHistoryStore(url), jobs=JobStore(url))
     data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
     if not data_dir:
         return None
@@ -159,7 +164,25 @@ def governance_from_environment() -> GovernanceAccess | None:
         registry=SQLiteSkillRegistry(root / "registry.db"),
         approvals=SQLiteApprovalStore(root / "approvals.db"),
         history=EvaluationHistoryStore(root / "history.db"),
+        jobs=JobStore(root / "jobs.db"),
     )
+
+
+_worker_stop = threading.Event()
+
+
+@app.on_event("startup")
+def _start_evaluation_worker() -> None:
+    """With SKILLPROOF_EVAL_MODEL set, this server runs evaluation jobs in the background (one at a time)."""
+    settings = EvaluationSettings.from_env()
+    if settings is not None and governance_from_environment() is not None:
+        _worker_stop.clear()
+        start_worker(governance_from_environment, settings, _worker_stop)
+
+
+@app.on_event("shutdown")
+def _stop_evaluation_worker() -> None:
+    _worker_stop.set()
 
 
 def _principal(request: Request) -> Principal:
@@ -184,7 +207,7 @@ def _guarded(call):
         return call()
     except AuthorizationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except (RegistryError, ApprovalError) as exc:
+    except (RegistryError, ApprovalError, JobError) as exc:
         status = 404 if "not found" in str(exc) else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
@@ -204,6 +227,7 @@ async def register_version(
     evidence_json: str | None = Form(default=None),
     artifact_uri: str | None = Form(default=None),
     experiment_ids: str | None = Form(default=None, description="Comma-separated ids of recorded experiments that ran this SKILL.md."),
+    evaluate: bool = Form(default=False, description="Queue a run-evidence job for this version (server runs evaluations)."),
 ) -> dict[str, Any]:
     principal = _principal(request)
     governance = _governance(request)
@@ -255,14 +279,69 @@ async def register_version(
         security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
         **behaviour_fields,
     )
-    assurance_report = evaluate_assurance(evidence, AssurancePolicy())
+    assurance_report = assess_version(evidence, AssurancePolicy())
     assurance_report["evidence"] = provenance
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance_report["subject"] = {"tenant_id": principal.tenant_id, "skill_name": report["metadata"]["name"],
                                    "package_fingerprint": report["package_fingerprint"]}
     version = _guarded(lambda: governance.register_skill(
         principal, report, assurance_report, artifact_uri=artifact_uri, capability_manifest=manifest))
-    return {"version": version, "analysis": report}
+    result = {"version": version, "analysis": report}
+    if evaluate:
+        skill_md = min((p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"), key=len)
+        result["job"] = _guarded(lambda: governance.request_evaluation(principal, version["version_id"], text[skill_md]))
+    return result
+
+
+@app.post("/api/v1/registry/versions/{version_id}/evaluate")
+async def registry_evaluate(version_id: str, request: Request, file: UploadFile | None = File(default=None)) -> dict[str, Any]:
+    """Queue a run-evidence job for a version. The SKILL.md comes from the uploaded ZIP of this exact version, or from
+    the installed folder the version was imported from; either must match the version's package fingerprint."""
+    principal = _principal(request)
+    governance = _governance(request)
+    version = _guarded(lambda: governance.get_skill(principal, version_id))
+    if file is not None:
+        data = await file.read(10_000_001)
+        if len(data) > 10_000_000:
+            raise HTTPException(status_code=413, detail="ZIP upload exceeds 10 MB.")
+        try:
+            text = read_skill_zip(data)
+        except PackageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if analyze_files(text).get("package_fingerprint") != version["package_fingerprint"]:
+            raise HTTPException(status_code=409, detail="The uploaded package is not this version.")
+        paths = [p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"]
+        skill_md = text[min(paths, key=len)] if paths else ""
+    else:
+        skill_md = _installed_skill_md(version)
+    return _guarded(lambda: governance.request_evaluation(principal, version_id, skill_md))
+
+
+def _installed_skill_md(version: dict[str, Any]) -> str:
+    """SKILL.md of an imported version, read from its folder after checking the folder is still that version."""
+    from urllib.parse import unquote, urlparse
+
+    from skillproof.catalogue_import import _package
+
+    uri = version.get("artifact_uri") or ""
+    if not uri.startswith("file:"):
+        raise HTTPException(status_code=422, detail="Upload this version's ZIP to evaluate it (no local folder is known).")
+    path = unquote(urlparse(uri).path)
+    folder = Path(path[1:] if re.match(r"^/[A-Za-z]:", path) else path)
+    try:
+        files, _, fingerprint = _package(folder)
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"The installed folder cannot be read: {exc}") from exc
+    if fingerprint != version["package_fingerprint"]:
+        raise HTTPException(status_code=409, detail="The installed folder has changed since this version was registered.")
+    return files.get("SKILL.md", b"").decode("utf-8-sig")
+
+
+@app.get("/api/v1/registry/versions/{version_id}/jobs")
+def registry_version_jobs(version_id: str, request: Request) -> dict[str, Any]:
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"version_id": version_id, "jobs": _guarded(lambda: governance.version_jobs(principal, version_id))}
 
 
 @app.get("/api/v1/registry/catalogue")

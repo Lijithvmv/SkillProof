@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STORE_FILES = ("registry.db", "approvals.db", "history.db")
+STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db")
 ENV_KEYS = {
     ("storage", "database_url"): "SKILLPROOF_DATABASE_URL",
     ("storage", "data_dir"): "SKILLPROOF_DATA_DIR",
@@ -38,6 +38,11 @@ ENV_KEYS = {
     ("auth", "role_claim"): "SKILLPROOF_OIDC_ROLE_CLAIM",
     ("auth", "tenant_claim"): "SKILLPROOF_OIDC_TENANT_CLAIM",
     ("server", "environment"): "SKILLPROOF_ENV",
+    ("evaluation", "model"): "SKILLPROOF_EVAL_MODEL",
+    ("evaluation", "draft_model"): "SKILLPROOF_EVAL_DRAFT_MODEL",
+    ("evaluation", "ollama_url"): "SKILLPROOF_OLLAMA_URL",
+    ("evaluation", "tasks"): "SKILLPROOF_EVAL_TASKS",
+    ("evaluation", "repeats"): "SKILLPROOF_EVAL_REPEATS",
 }
 
 

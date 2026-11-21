@@ -478,11 +478,14 @@ def _catalogue_governance(data: Path):
     from skillproof.registry import SQLiteSkillRegistry
 
     url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()  # PostgreSQL, the same database the API uses
+    from skillproof.jobs import JobStore
+
     if url:
-        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url), history=HistoryStore(url))
+        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url), history=HistoryStore(url),
+                                jobs=JobStore(url))
     return GovernanceAccess(registry=SQLiteSkillRegistry(data / "registry.db"),
                             approvals=SQLiteApprovalStore(data / "approvals.db"),
-                            history=HistoryStore(data / "history.db"))
+                            history=HistoryStore(data / "history.db"), jobs=JobStore(data / "jobs.db"))
 
 
 def _import_principal(tenant: str):

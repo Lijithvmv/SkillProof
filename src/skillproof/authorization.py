@@ -54,10 +54,29 @@ class GovernanceAccess:
     claims. Never accept caller-supplied role or tenant values directly.
     """
 
-    def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore):
+    def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore,
+                 jobs: Any | None = None):
         self.registry = registry
         self.approvals = approvals
         self.history = history
+        self.jobs = jobs  # skillproof.jobs.JobStore, when the service runs evaluations
+
+    def request_evaluation(self, principal: Principal, version_id: str, skill_md: str) -> dict[str, Any]:
+        """Queue a run-evidence job for a version, given the exact SKILL.md text the version holds."""
+        authorize(principal, principal.tenant_id, "evaluation.run")
+        if self.jobs is None:
+            from skillproof.registry import RegistryError
+
+            raise RegistryError("evaluation jobs are not enabled on this server")
+        from skillproof.evidence import instructions_fingerprint
+
+        version = self.registry.get_version(principal.tenant_id, version_id)
+        payload = {"skill_md": skill_md, "instructions_fingerprint": instructions_fingerprint(skill_md)}
+        return self.jobs.enqueue(principal.tenant_id, version_id, version["skill_name"], payload, requested_by=principal.user_id)
+
+    def version_jobs(self, principal: Principal, version_id: str) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "evaluation.read")
+        return [] if self.jobs is None else self.jobs.for_version(principal.tenant_id, version_id)
 
     @staticmethod
     def _history_key(tenant_id: str, skill_key: str) -> str:

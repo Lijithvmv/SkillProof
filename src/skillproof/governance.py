@@ -35,6 +35,30 @@ class AssuranceInput(BaseModel):
     adherence_rate: float | None = Field(default=None, ge=0, le=1, description="Share of the skill's own claims the agent followed with the skill loaded (conformance checks).")
 
 
+STATIC_FIELDS = ("structural_score", "instruction_quality_score", "security_score", "security_findings")
+
+
+def assess_version(evidence: AssuranceInput, policy: AssurancePolicy | None = None) -> dict[str, Any]:
+    """evaluate_assurance, plus the static inputs and the policy it was judged on, so the same version can be assessed
+    again when run evidence arrives later (reassess_with_runs)."""
+    policy = policy or AssurancePolicy()
+    report = evaluate_assurance(evidence, policy)
+    report["inputs"] = evidence.model_dump(include=set(STATIC_FIELDS))
+    report["policy"] = policy.model_dump()
+    return report
+
+
+def reassess_with_runs(previous: dict[str, Any], measured: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """The same static inputs and policy as `previous`, with measured run evidence added."""
+    if "inputs" not in previous:
+        raise ValueError("this version's report predates stored inputs; register it again to assess it on runs")
+    report = assess_version(AssuranceInput(**previous["inputs"], **measured), AssurancePolicy(**previous.get("policy", {})))
+    report["evidence"] = provenance
+    if "subject" in previous:
+        report["subject"] = previous["subject"]
+    return report
+
+
 def evaluate_assurance(evidence: AssuranceInput, policy: AssurancePolicy | None = None) -> dict[str, Any]:
     policy = policy or AssurancePolicy()
     gates: list[dict[str, str]] = []

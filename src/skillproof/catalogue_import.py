@@ -19,7 +19,7 @@ from skillproof.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.capabilities import PackageError, build_manifest
 from skillproof.evidence import instructions_fingerprint, measured_evidence
-from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
+from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version
 from skillproof.second_opinion import add_second_opinions
 from skillproof.installed import NAME, _read_installed, family_key, find_skill_dirs
 
@@ -208,7 +208,7 @@ def _assurance(report: dict[str, Any], records: list[dict[str, Any]], cited: lis
         provenance = measured.pop("provenance")
         behaviour = measured
     security = report.get("security") or {}
-    assurance = evaluate_assurance(AssuranceInput(
+    assurance = assess_version(AssuranceInput(
         structural_score=report.get("structural_score"),
         instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
         security_score=security.get("security_score"),

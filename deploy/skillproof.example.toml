@@ -27,3 +27,12 @@ dir = "backups"
 keep = 14                 # newest backups kept
 interval_hours = 24       # scheduled backups while serving; 0 = only on demand (skillproof backup)
 # pg_dump = "/usr/bin/pg_dump"
+
+[evaluation]
+# With a model set, the server produces run evidence itself: tests built from each skill's own rules, run with and
+# without the skill on this local model, recorded, and the version assessed again. One job at a time.
+# model = "gemma4-e4b-ctx16k:latest"          # the agent model skills are measured on (local Ollama)
+# draft_model = "qwen2.5-coder-7b-ctx16k:latest"  # writes the request and background of each generated test
+# ollama_url = "http://127.0.0.1:11434"
+# tasks = 6
+# repeats = 2

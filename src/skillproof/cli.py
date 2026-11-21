@@ -127,7 +127,10 @@ def main(argv: list[str] | None = None) -> int:
     draft.add_argument("skill", help="Skill folder (holding SKILL.md).")
     draft.add_argument("--model", required=True, help="Local Ollama model that drafts the tasks.")
     draft.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
-    draft.add_argument("--tasks", type=int, default=3)
+    draft.add_argument("--tasks", type=int, default=8)
+    draft.add_argument("--mode", choices=("templates", "model"), default="templates",
+                       help="templates: tests built from the rule's own words, the model writes only background (default); "
+                            "model: the model drafts whole tests (needs review).")
     draft.add_argument("--seed", type=int, default=0)
     draft.add_argument("--output-dir", required=True, help="Writes claims.json, benchmark.jsonl, manifest.json and draft-review.json here.")
     draft.add_argument("--output", default="-", help="Summary destination; use - for stdout.")
@@ -523,13 +526,24 @@ def _benchmark_draft(args) -> dict[str, Any]:
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "claims.json").write_text(json.dumps(claims, indent=2, ensure_ascii=False), encoding="utf-8")
-    drafted = draft_benchmark(text, claims, ollama_json_asker(args.model, args.ollama_url, seed=args.seed), tasks=args.tasks)
-    write_benchmark(out / "benchmark.jsonl", drafted["tasks"], skill=claims["skill"], claims_file="claims.json", generator=args.model)
-    review = {"dropped": drafted["dropped"], "task_reviews": drafted["reviews"]}
+    ask = ollama_json_asker(args.model, args.ollama_url, seed=args.seed)
+    if args.mode == "templates":
+        from skillproof.templates import generate_benchmark
+
+        drafted = generate_benchmark(text, claims, ask, tasks=args.tasks)
+        status = "generated_from_rules"
+        review = {"coverage": drafted["coverage"], "rejected": drafted["rejected"], "uncovered": drafted["uncovered"],
+                  "task_reviews": drafted["reviews"]}
+    else:
+        drafted = draft_benchmark(text, claims, ask, tasks=args.tasks)
+        status = "draft_needs_review"
+        review = {"dropped": drafted["dropped"], "task_reviews": drafted["reviews"]}
+    write_benchmark(out / "benchmark.jsonl", drafted["tasks"], skill=claims["skill"], claims_file="claims.json",
+                    generator=f"{args.mode}:{args.model}", status=status)
     (out / "draft-review.json").write_text(json.dumps(review, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {"skill": claims["skill"], "claims": len(claims["claims"]), "tasks": len(drafted["tasks"]),
-            "checks": sum(len(t.checks) for t in drafted["tasks"]), "dropped": len(drafted["dropped"]),
-            "status": "draft_needs_review", "output_dir": str(out)}
+    return {"skill": claims["skill"], "claims": len(claims["claims"]), "mode": args.mode, "tasks": len(drafted["tasks"]),
+            "checks": sum(len(t.checks) for t in drafted["tasks"]), "coverage": drafted.get("coverage"),
+            "status": status, "output_dir": str(out)}
 
 
 def _evaluate_skill(args) -> dict[str, Any]:

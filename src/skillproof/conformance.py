@@ -329,16 +329,19 @@ def draft_benchmark(skill_text: str, claims: dict[str, Any], ask: Callable[[str,
     return {"tasks": kept, "dropped": dropped, "reviews": reviews}
 
 
-def write_benchmark(path: str | Path, tasks: list[BenchmarkTask], *, skill: str, claims_file: str, generator: str) -> None:
+def write_benchmark(path: str | Path, tasks: list[BenchmarkTask], *, skill: str, claims_file: str, generator: str,
+                    status: str = "draft_needs_review") -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("".join(task.model_dump_json(exclude_none=True) + "\n" for task in tasks), encoding="utf-8")
     tmp.replace(path)
-    manifest = {"benchmark_id": f"{skill}-conformance", "version": "draft", "status": "draft_needs_review",
-                "skill": skill, "claims": claims_file, "generator": generator,
-                "review": "A person must read every task and check, fix or delete them, then set status to 'reviewed'. "
-                          "Results from a draft benchmark are labelled as such."}
+    review = ("Checks come from the skill's own rule wording; the model wrote only the request and background, each "
+              "verified to trigger its rule. Spot-check before relying on it." if status == "generated_from_rules" else
+              "A person must read every task and check, fix or delete them, then set status to 'reviewed'. "
+              "Results from a draft benchmark are labelled as such.")
+    manifest = {"benchmark_id": f"{skill}-conformance", "version": "draft", "status": status,
+                "skill": skill, "claims": claims_file, "generator": generator, "review": review}
     (path.parent / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 

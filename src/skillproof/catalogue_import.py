@@ -92,7 +92,7 @@ def _installed_families(roots: list[Path]):
     by_name: dict[str, list[str]] = defaultdict(list)
     errors: list[dict[str, str]] = []
     packages: dict[str, tuple[dict[str, bytes], dict[str, str], str]] = {}
-    for key, (root, skill_dir) in sorted(families.items()):
+    for key, (_root, skill_dir) in sorted(families.items()):
         try:
             packages[key] = _package(skill_dir)
         except (OSError, PackageError) as exc:

@@ -81,7 +81,6 @@ def test_cli_feeds_the_catalogue_and_flags_block_updates(tmp_path):
 
 
 def test_check_reports_installed_skills_that_are_not_the_approved_version(tmp_path, capsys):
-    import sqlite3
     from skillproof.catalogue_import import check_installed
 
     claude = tmp_path / ".claude"

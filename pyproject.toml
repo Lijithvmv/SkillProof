@@ -27,3 +27,12 @@ skillproof = ["data/*.json", "web/*.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+
+[tool.ruff]
+line-length = 200
+target-version = "py311"
+
+[tool.ruff.lint]
+# Real defects only: undefined names, unused imports and variables, syntax errors, and bugbear checks.
+select = ["F", "E9", "B"]
+ignore = ["B008"]  # FastAPI declares File()/Form() parameters as defaults by design

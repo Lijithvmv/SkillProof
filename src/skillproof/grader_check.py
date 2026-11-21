@@ -58,7 +58,7 @@ def check_grader(tasks: list[BenchmarkTask], cases: list[GraderCase], evaluator:
             failed_cases.append({"case_id": case.case_id, "error": f"{type(exc).__name__}: {exc}"[:500]})
             continue
         named = {item.get("criterion"): item for item in grade.criterion_scores}
-        for index, (criterion, label) in enumerate(zip(task.criteria, case.expected)):
+        for index, (criterion, label) in enumerate(zip(task.criteria, case.expected, strict=False)):
             item = named.get(criterion) or (grade.criterion_scores[index] if index < len(grade.criterion_scores) else None)
             if item is None:
                 failed_cases.append({"case_id": case.case_id, "error": f"no score for criterion: {criterion}"})
@@ -95,6 +95,3 @@ def check_grader(tasks: list[BenchmarkTask], cases: list[GraderCase], evaluator:
         ),
     }
 
-
-def write_json(data: Any, path: str | Path) -> None:
-    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

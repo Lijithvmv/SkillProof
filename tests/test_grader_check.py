@@ -21,7 +21,7 @@ class ScriptedGrader:
     def evaluate(self, *, task, output):
         if output == "boom":
             raise ValueError("grader scored 0 of 2 criteria")
-        return Grade(score=0.5, criterion_scores=[{"criterion": c, "score": s, "evidence": f"e-{c}"} for c, s in zip(task.criteria, self.scores[output])])
+        return Grade(score=0.5, criterion_scores=[{"criterion": c, "score": s, "evidence": f"e-{c}"} for c, s in zip(task.criteria, self.scores[output], strict=False)])
 
 
 def test_counts_false_pass_and_false_fail_with_grader_evidence():

@@ -25,7 +25,7 @@ from typing import Any
 
 from skillproof import package
 from skillproof.capabilities import build_manifest, diff_manifests
-from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, PackageError
+from skillproof.ingestion import MAX_FILE_SIZE, PackageError
 from skillproof.triage import triage
 
 STATE_VERSION = 1
@@ -200,7 +200,7 @@ def scan_installed(roots: list[str | Path], state_path: str | Path) -> dict[str,
                 distinct.append(copy)
         previous = known.get(key)
         if previous is None:
-            for old, new in zip(distinct, distinct[1:]):
+            for old, new in zip(distinct, distinct[1:], strict=False):
                 changes.append(_change(old, new, "on_disk_history"))
             caps = {c: sorted(v) for c, v in distinct[-1]["manifest"]["capabilities"].items() if v}
             if not (key.startswith("plugin::") and plugins_baseline):

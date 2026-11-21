@@ -1408,8 +1408,8 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
             own_env = own_env_files([text for _, text, code in lines if code], written)
             source_lines = decoded.splitlines()
 
-            def original_line(number: int, fallback: str) -> str:
-                return source_lines[number - 1] if 0 < number <= len(source_lines) else fallback
+            def original_line(number: int, fallback: str) -> str:  # used within this iteration only
+                return source_lines[number - 1] if 0 < number <= len(source_lines) else fallback  # noqa: B023
             for index, (number, line, is_code) in enumerate(lines):
                 location = f"{path}:{number}" if number <= original_lines else f"{path}:decoded"
                 if number > original_lines:

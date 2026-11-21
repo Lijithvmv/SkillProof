@@ -3,7 +3,7 @@ from skillproof.compatibility import analyze_model_compatibility
 
 def _records(provider, model, base, enabled):
     rows = []
-    for index, (before, after) in enumerate(zip(base, enabled), 1):
+    for index, (before, after) in enumerate(zip(base, enabled, strict=False), 1):
         trial_id = f"task:{index}"
         rows.extend([
             {"provider": provider, "model": model, "condition": "baseline", "trial_id": trial_id, "score": before},

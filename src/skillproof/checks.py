@@ -141,7 +141,7 @@ class CheckedEvaluator:
             scores = list(judged.criterion_scores)
             if len(scores) != len(task.criteria):  # a judge that only gives an overall score covers every criterion alike
                 scores = [{"criterion": c, "score": judged.score, "evidence": "; ".join(judged.evidence)[:500]} for c in task.criteria]
-            for criterion, item in zip(task.criteria, scores):
+            for criterion, item in zip(task.criteria, scores, strict=False):
                 items.append({"criterion": criterion, "kind": "judge", "score": float(item.get("score", 0)),
                               "evidence": item.get("evidence", "")})
         score = sum(item["score"] for item in items) / len(items)

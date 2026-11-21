@@ -135,7 +135,7 @@ def template_for(claim: dict[str, Any]) -> dict[str, Any] | None:
                 Check(kind="regex", value="(?is)" + ".*".join(r"\b" + j for j in joins),
                       description=tag(f"lists them in the order {' > '.join(words)}"))],
                 "instruction": "The background must involve every one of these, each named in plain words: " + "; ".join(words) + ".",
-                "verify": lambda context: next((f"the background does not mention '{w}'" for w, j in zip(words, joins)
+                "verify": lambda context: next((f"the background does not mention '{w}'" for w, j in zip(words, joins, strict=False)
                                                 if not re.search(j, context, re.I)), None)}
     # A single common word ("shared") is used for other things in a normal answer; only specific phrases are tested.
     never = [c for c in literal_checks(claim) if c.kind == "not_contains" and (len(c.value.split()) > 1 or re.search(r"\d", c.value))]

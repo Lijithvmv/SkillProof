@@ -21,22 +21,20 @@ from skillproof.errors import NotFound, SkillProofError
 from skillproof.logs import log
 from skillproof.analyzer import analyze_files
 from skillproof.services import catalogue
-from skillproof.approvals import ApprovalError, SQLiteApprovalStore
+from skillproof.approvals import SQLiteApprovalStore
 from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal
-from skillproof.capabilities import build_manifest
 from skillproof.history import EvaluationHistoryStore
-from skillproof.ingestion import PackageError, read_skill_zip, read_skill_zip_bytes
-from skillproof.registry import RegistryError, SQLiteSkillRegistry
+from skillproof.ingestion import PackageError, read_skill_zip
+from skillproof.registry import SQLiteSkillRegistry
 from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
 from skillproof.security import scan_security
-from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version, evaluate_assurance
+from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.oidc import AuthenticationError, browser_login_config, verifier_from_environment
-from skillproof.evidence import EvidenceError, measured_evidence
-from skillproof.second_opinion import add_second_opinions
+from skillproof.evidence import EvidenceError
 from skillproof.evaluation_jobs import EvaluationSettings, start_worker
-from skillproof.jobs import JobError, JobStore
-from skillproof.notify import EVENTS, NotificationStore, NotifyError, start_deliverer
-from skillproof.fleet import FleetError, FleetStore
+from skillproof.jobs import JobStore
+from skillproof.notify import EVENTS, NotificationStore, start_deliverer
+from skillproof.fleet import FleetStore
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):

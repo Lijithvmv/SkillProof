@@ -301,7 +301,7 @@ def compare_decision_agreement(rows: list[dict[str, str]], *, predicted_key: str
         per_label[label] = {"precision": round(precision, 4), "recall": round(recall, 4), "f1": round(2 * precision * recall / (precision + recall), 4) if precision + recall else 0.0}
     human_marginals = [sum(matrix[label][predicted] for predicted in labels) for label in labels]
     predicted_marginals = [sum(matrix[actual][label] for actual in labels) for label in labels]
-    expected = sum(a * b for a, b in zip(human_marginals, predicted_marginals)) / (total * total)
+    expected = sum(a * b for a, b in zip(human_marginals, predicted_marginals, strict=False)) / (total * total)
     return {
         "sample_count": total,
         "accuracy": round(accuracy, 4),

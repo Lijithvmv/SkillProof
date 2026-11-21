@@ -131,7 +131,7 @@ def test_failed_runs_do_not_inflate_grader_agreement():
     bundle = create_blind_review_bundle(_failure_experiment(), tasks)
     samples = bundle["review_samples"]
     human_scores = [0.2, 0.9, 0.9, 0.2, 0.0]  # grader disagrees on 2 of 4 real samples; last is the grader failure
-    annotations = [HumanAnnotation(sample_id=s["sample_id"], human_score=h, reviewer_id="r1") for s, h in zip(samples, human_scores)]
+    annotations = [HumanAnnotation(sample_id=s["sample_id"], human_score=h, reviewer_id="r1") for s, h in zip(samples, human_scores, strict=False)]
     result = compare_score_agreement(annotations, bundle["sealed_unblinding_key"])
     assert result["sample_count"] == 4
     assert result["pass_fail_metrics"]["agreement_rate"] == 0.5
@@ -159,7 +159,7 @@ def test_krippendorff_alpha_matches_published_reliability_example():
         [None, 3, 3, 3, 2, 3, 4, 2, 2, 5, 1, None],
         [1, 2, 3, 3, 2, 4, 4, 1, 2, 5, 1, None],
     ]
-    units = [[value for value in unit if value is not None] for unit in zip(*coders)]
+    units = [[value for value in unit if value is not None] for unit in zip(*coders, strict=False)]
     assert round(krippendorff_alpha(units, metric="nominal"), 3) == 0.743
     assert round(krippendorff_alpha(units, metric="interval"), 3) == 0.849
 

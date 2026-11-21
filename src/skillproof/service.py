@@ -19,7 +19,6 @@ import sqlite3
 import subprocess
 import sys
 import threading
-import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path

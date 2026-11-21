@@ -1,7 +1,6 @@
 """OIDC JWT access-token verification and RBAC principal mapping."""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -11,6 +10,7 @@ from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientError, PyJWTError
 
 from skillproof.authorization import Principal
+from skillproof.config import settings
 
 
 class AuthenticationError(ValueError):
@@ -38,7 +38,7 @@ class OIDCSettings:
             parsed = urlparse(value)
             # Plain HTTP only to this machine's loopback outside production (a local development provider).
             loopback_http = (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-                             and os.getenv("SKILLPROOF_ENV", "").lower() != "production")
+                             and not settings().production)
             if (parsed.scheme != "https" and not loopback_http) or not parsed.netloc or parsed.username or parsed.password:
                 raise ValueError(f"{label} must be an HTTPS URL without embedded credentials")
         if not self.audience.strip():
@@ -50,22 +50,13 @@ class OIDCSettings:
 
     @classmethod
     def from_env(cls) -> "OIDCSettings | None":
-        issuer = os.getenv("SKILLPROOF_OIDC_ISSUER")
-        audience = os.getenv("SKILLPROOF_OIDC_AUDIENCE")
-        jwks_url = os.getenv("SKILLPROOF_OIDC_JWKS_URL")
-        if not any((issuer, audience, jwks_url)):
+        oidc = settings().oidc
+        if not oidc.configured:
             return None
-        if not all((issuer, audience, jwks_url)):
+        if not all((oidc.issuer, oidc.audience, oidc.jwks_url)):
             raise ValueError("OIDC issuer, audience, and JWKS URL must be configured together")
-        return cls(
-            issuer=issuer,
-            audience=audience,
-            jwks_url=jwks_url,
-            role_claim=os.getenv("SKILLPROOF_OIDC_ROLE_CLAIM", "skillproof_role"),
-            tenant_claim=os.getenv("SKILLPROOF_OIDC_TENANT_CLAIM", "tenant_id"),
-            leeway_seconds=int(os.getenv("SKILLPROOF_OIDC_LEEWAY_SECONDS", "30")),
-            jwks_timeout_seconds=float(os.getenv("SKILLPROOF_OIDC_JWKS_TIMEOUT_SECONDS", "5")),
-        )
+        return cls(issuer=oidc.issuer, audience=oidc.audience, jwks_url=oidc.jwks_url, role_claim=oidc.role_claim,
+                   tenant_claim=oidc.tenant_claim, leeway_seconds=oidc.leeway_seconds, jwks_timeout_seconds=oidc.jwks_timeout_seconds)
 
 
 class OIDCAccessTokenVerifier:
@@ -116,18 +107,17 @@ class OIDCAccessTokenVerifier:
 
 
 def verifier_from_environment() -> OIDCAccessTokenVerifier | None:
-    settings = OIDCSettings.from_env()
-    auth_mode = os.getenv("SKILLPROOF_AUTH_MODE", "local").lower()
-    deployment = os.getenv("SKILLPROOF_ENV", "development").lower()
-    if auth_mode not in {"local", "oidc"}:
+    oidc_settings = OIDCSettings.from_env()
+    current = settings()
+    if current.auth_mode not in {"local", "oidc"}:
         raise ValueError("SKILLPROOF_AUTH_MODE must be 'local' or 'oidc'")
-    if deployment == "production" and auth_mode != "oidc":
+    if current.production and current.auth_mode != "oidc":
         raise RuntimeError("production mode requires SKILLPROOF_AUTH_MODE=oidc")
-    if auth_mode == "oidc" and settings is None:
+    if current.auth_mode == "oidc" and oidc_settings is None:
         raise RuntimeError("OIDC mode requires issuer, audience, and JWKS URL settings")
-    if auth_mode == "local" and settings is not None:
+    if current.auth_mode == "local" and oidc_settings is not None:
         raise RuntimeError("OIDC settings are present while auth mode is local; set SKILLPROOF_AUTH_MODE=oidc")
-    return OIDCAccessTokenVerifier(settings) if settings is not None else None
+    return OIDCAccessTokenVerifier(oidc_settings) if oidc_settings is not None else None
 
 
 _DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
@@ -140,15 +130,14 @@ def browser_login_config() -> dict[str, Any]:
     provider with the page's address as its redirect URI. Endpoints come from the issuer's discovery document unless
     SKILLPROOF_OIDC_AUTHORIZATION_URL / SKILLPROOF_OIDC_TOKEN_URL set them."""
     settings = OIDCSettings.from_env()
-    client_id = os.getenv("SKILLPROOF_OIDC_CLIENT_ID", "").strip()
+    oidc = settings().oidc
+    client_id = oidc.client_id
     if settings is None:
         return {"mode": "local"}
     config: dict[str, Any] = {"mode": "oidc", "issuer": settings.issuer, "client_id": client_id or None,
-                              "scope": os.getenv("SKILLPROOF_OIDC_SCOPE", "openid profile"),
+                              "scope": oidc.scope,
                               "audience": settings.audience}
-    authorization = os.getenv("SKILLPROOF_OIDC_AUTHORIZATION_URL", "").strip()
-    token = os.getenv("SKILLPROOF_OIDC_TOKEN_URL", "").strip()
-    end_session = os.getenv("SKILLPROOF_OIDC_END_SESSION_URL", "").strip()
+    authorization, token, end_session = oidc.authorization_url, oidc.token_url, oidc.end_session_url
     if not (authorization and token):
         discovered = _discover(settings.issuer)
         authorization = authorization or discovered.get("authorization_endpoint", "")

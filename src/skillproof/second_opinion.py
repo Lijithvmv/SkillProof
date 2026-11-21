@@ -102,11 +102,11 @@ def second_opinions(manifest: dict[str, Any], files: dict[str, bytes], ask: Call
 def add_second_opinions(manifest: dict[str, Any], files: dict[str, bytes]) -> None:
     """When SKILLPROOF_SECOND_OPINION_MODEL names a local model, store its verdicts in the manifest (triage lowers the
     items it reads as mentions). Off by default."""
-    import os
+    from skillproof.config import settings
 
-    model = os.environ.get("SKILLPROOF_SECOND_OPINION_MODEL", "").strip()
+    current = settings()
+    model, url = current.second_opinion_model, current.second_opinion_url
     if not model:
         return
-    url = os.environ.get("SKILLPROOF_SECOND_OPINION_URL", "http://127.0.0.1:11434")
     manifest["second_opinion"] = second_opinions(manifest, files, ollama_asker(model, url))
     manifest["second_opinion_model"] = model

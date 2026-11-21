@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from datetime import datetime, timezone
 
@@ -33,7 +32,9 @@ def configure(level: str | None = None) -> None:
         handler.setFormatter(JsonFormatter())
         handler._skillproof = True  # type: ignore[attr-defined]
         logger.addHandler(handler)
-    logger.setLevel((level or os.environ.get("SKILLPROOF_LOG_LEVEL", "info")).upper())
+    from skillproof.config import settings
+
+    logger.setLevel((level or settings().log_level).upper())
     logger.propagate = False
 
 

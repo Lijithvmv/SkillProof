@@ -21,7 +21,6 @@ import hmac
 import ipaddress
 import json
 import logging
-import os
 import secrets
 import socket
 import threading
@@ -33,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from skillproof.config import settings
 from skillproof.logs import log
 from skillproof.storage import Database, migrate, tenant_policy
 
@@ -90,7 +90,7 @@ def check_endpoint(url: str, *, resolve: Callable[[str], list[str]] | None = Non
     """HTTPS only; plain HTTP only to this machine outside production. In production an endpoint whose host resolves
     to a private, loopback or link-local address is refused, so a webhook cannot be aimed at the internal network."""
     parsed = urlparse(url)
-    production = os.environ.get("SKILLPROOF_ENV", "").lower() == "production"
+    production = settings().production
     host = parsed.hostname or ""
     if parsed.username or parsed.password or not host:
         raise NotifyError("the endpoint must be a URL with a host and no embedded credentials")

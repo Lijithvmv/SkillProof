@@ -44,7 +44,6 @@ class Database:
         self.target = str(target)
         self._lock = threading.RLock()
         if is_postgres_url(self.target):
-            import os
 
             import psycopg2.extras
             import psycopg2.pool
@@ -52,7 +51,9 @@ class Database:
             self.dialect = "postgres"
             self._extras = psycopg2.extras
             self._local = threading.local()
-            size = max(2, int(os.environ.get("SKILLPROOF_DB_POOL_SIZE", "10")))
+            from skillproof.config import settings
+
+            size = max(2, settings().db_pool_size)
             self._pool = psycopg2.pool.ThreadedConnectionPool(1, size, self.target)
         else:
             self.dialect = "sqlite"
@@ -162,14 +163,15 @@ def migrate(db: Database, store: str, steps: list[Step]) -> list[int]:
     SKILLPROOF_SCHEMA=apply (default) applies pending steps at start; =verify refuses to start while any step is
     pending, for deployments where `skillproof migrate` runs separately with a schema-owning role and the service role
     has no CREATE privilege. Steps are applied in version order; a step is never applied twice."""
-    import os
     from datetime import datetime, timezone
 
     db.script("CREATE TABLE IF NOT EXISTS schema_migrations (store TEXT NOT NULL, version INTEGER NOT NULL, "
               "description TEXT NOT NULL, applied_at TEXT NOT NULL, PRIMARY KEY (store, version))")
     applied = {row["version"] for row in db.execute("SELECT version FROM schema_migrations WHERE store = ?", (store,)).fetchall()}
     pending = [s for s in sorted(steps, key=lambda s: s[0]) if s[0] not in applied]
-    if pending and os.environ.get("SKILLPROOF_SCHEMA", "apply").lower() == "verify":
+    from skillproof.config import settings
+
+    if pending and settings().schema_mode == "verify":
         raise SchemaError(f"{store}: schema steps {[s[0] for s in pending]} are not applied; run `skillproof migrate`")
     done = []
     for version, description, sqlite_step, postgres_step in pending:

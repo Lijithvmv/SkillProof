@@ -206,6 +206,13 @@ def migrate_all(config: dict[str, Any]) -> dict[str, Any]:
 def serve(config: dict[str, Any]) -> None:
     apply_config(config)
     configure_logging((config.get("server") or {}).get("log_level"))
+    from skillproof import config as settings_module
+
+    found = settings_module.problems()
+    for problem in found:
+        log("configuration_problem", logging.WARNING, problem=problem)
+    if found and settings_module.settings().production:
+        raise ServiceError("refusing to start in production: " + "; ".join(found))
     import uvicorn
 
     from skillproof.api.main import app

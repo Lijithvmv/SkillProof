@@ -2,8 +2,9 @@
 place typed errors become HTTP status (NotFound 404, other refusals 409, authorization 403)."""
 from __future__ import annotations
 
+from skillproof.config import settings
 
-import os
+
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -40,11 +41,12 @@ def current_governance(request: Request) -> GovernanceAccess:
 def governance_from_environment() -> GovernanceAccess | None:
     """PostgreSQL when SKILLPROOF_DATABASE_URL is set (one database, tenant row-level security), else SQLite files in
     SKILLPROOF_DATA_DIR. None when neither is set."""
-    url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()
+    current = settings()
+    url = current.database_url
     if url:
         return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url),
                                 history=EvaluationHistoryStore(url), jobs=JobStore(url), notifications=NotificationStore(url), fleet=FleetStore(url))
-    data_dir = os.environ.get("SKILLPROOF_DATA_DIR", "").strip()
+    data_dir = current.data_dir
     if not data_dir:
         return None
     root = Path(data_dir)
@@ -62,7 +64,7 @@ def current_principal(request: Request) -> Principal:
     principal = getattr(request.state, "principal", None)
     if principal is not None:
         return principal
-    if request.app.state.oidc_verifier is not None or os.environ.get("SKILLPROOF_ENV", "").lower() == "production":
+    if request.app.state.oidc_verifier is not None or settings().production:
         raise HTTPException(status_code=401, detail="Authenticated principal required.")
     # Local development only (OIDC off): one tenant, identity from headers so the two-person rule can be exercised.
     try:

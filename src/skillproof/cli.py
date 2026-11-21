@@ -12,6 +12,7 @@ from typing import Any, TextIO
 from pydantic import ValidationError
 
 from skillproof import __version__
+from skillproof.config import settings
 from skillproof.analyzer import analyze_files
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.evaluation import validate_benchmark_task
@@ -84,6 +85,7 @@ def assurance_gate(document: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _conf = settings()
     parser = argparse.ArgumentParser(prog="skillproof", description="Analyze agent skill packages and enforce assurance gates.")
     parser.add_argument("--version", action="version", version=f"SkillProof {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -116,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--output", default="-")
 
     feed = commands.add_parser("catalogue-import", help="Register the skills installed on this machine in the catalogue. Unchanged skills are skipped; a changed skill becomes a new version ranked block / ask / note against the one before. Exit 1 when an update has a block-level addition.")
-    feed.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
+    feed.add_argument("--data-dir", default=_conf.data_dir or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
     feed.add_argument("--tenant", default="local", help="Catalogue tenant to register into (the API's local development tenant is 'local').")
     feed.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
     feed.add_argument("--output", default="-")
@@ -126,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     draft = commands.add_parser("benchmark-draft", help="Read what a skill says about itself (claims) and draft a conformance benchmark that tests them, with a local model. The draft must be reviewed before its results count.")
     draft.add_argument("skill", help="Skill folder (holding SKILL.md).")
     draft.add_argument("--model", required=True, help="Local Ollama model that drafts the tasks.")
-    draft.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
+    draft.add_argument("--ollama-url", default=_conf.ollama_url)
     draft.add_argument("--tasks", type=int, default=8)
     draft.add_argument("--mode", choices=("templates", "model"), default="templates",
                        help="templates: tests built from the rule's own words, the model writes only background (default); "
@@ -140,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--benchmark", required=True, help="benchmark.jsonl (claims.json beside it is used for adherence).")
     evaluate.add_argument("--model", required=True, help="Agent model (local Ollama).")
     evaluate.add_argument("--grader-model", help="Judge for free-text criteria; not needed for a checks-only benchmark.")
-    evaluate.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
+    evaluate.add_argument("--ollama-url", default=_conf.ollama_url)
     evaluate.add_argument("--repeats", type=int, default=2)
     evaluate.add_argument("--seed", type=int, default=0)
     evaluate.add_argument("--max-output-tokens", type=int, default=3000)
@@ -157,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--output", default="-")
 
     check = commands.add_parser("catalogue-check", help="Compare the skills installed on this machine with the versions the catalogue approved. Registers nothing. Exit 1 when an installed skill differs from its approved version (running unapproved); with --strict also when a skill was never approved.")
-    check.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
+    check.add_argument("--data-dir", default=_conf.data_dir or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
     check.add_argument("--tenant", default="local")
     check.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
     check.add_argument("--strict", action="store_true", help="Also fail when an installed skill has no approved version.")
@@ -215,14 +217,14 @@ def main(argv: list[str] | None = None) -> int:
     pilot = commands.add_parser("pilot", help="Run a paired agent/grader pilot on a JSONL benchmark (OpenAI or local Ollama).")
     pilot.add_argument("--skill-file", required=True)
     pilot.add_argument("--benchmark", required=True)
-    pilot.add_argument("--provider", choices=["openai", "ollama"], default=os.getenv("SKILLPROOF_PROVIDER", "openai"), help="openai needs OPENAI_API_KEY; ollama runs locally with no key.")
-    pilot.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"), help="Loopback Ollama server for --provider ollama.")
+    pilot.add_argument("--provider", choices=["openai", "ollama"], default=_conf.pilot_provider, help="openai needs OPENAI_API_KEY; ollama runs locally with no key.")
+    pilot.add_argument("--ollama-url", default=_conf.ollama_url, help="Loopback Ollama server for --provider ollama.")
     pilot.add_argument("--seed", type=int, default=0, help="Order randomization seed, and the sampling seed for Ollama.")
     pilot.add_argument("--temperature", type=float, default=0.7, help="Ollama agent sampling temperature (the grader always uses 0).")
     pilot.add_argument("--distractor-skills", help="JSONL of other skills (name, description). Turns on the load-rate test (Ollama only).")
     pilot.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for (false activation).")
-    pilot.add_argument("--model", default=os.getenv("SKILLPROOF_MODEL") or os.getenv("SKILLPROOF_OPENAI_MODEL"), help="Agent model ID; defaults to SKILLPROOF_MODEL or SKILLPROOF_OPENAI_MODEL.")
-    pilot.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"), help="Grader model ID; defaults to SKILLPROOF_GRADER_MODEL or SKILLPROOF_OPENAI_GRADER_MODEL.")
+    pilot.add_argument("--model", default=_conf.pilot_model or None, help="Agent model ID; defaults to SKILLPROOF_MODEL or SKILLPROOF_OPENAI_MODEL.")
+    pilot.add_argument("--grader-model", default=_conf.pilot_grader_model or None, help="Grader model ID; defaults to SKILLPROOF_GRADER_MODEL or SKILLPROOF_OPENAI_GRADER_MODEL.")
     pilot.add_argument("--repeats", type=int, default=2)
     pilot.add_argument("--output", required=True, help="Experiment report JSON path.")
     pilot.add_argument("--review-output", required=True, help="Blind review bundle JSON path.")
@@ -231,9 +233,9 @@ def main(argv: list[str] | None = None) -> int:
     gcheck = commands.add_parser("grader-check", help="Grade answers with known per-criterion labels and list where the grader disagrees. Exit 1 on any disagreement or grader failure.")
     gcheck.add_argument("--benchmark", required=True)
     gcheck.add_argument("--cases", required=True, help="JSONL of case_id, task_id, output, expected (one 0/1 per criterion), note.")
-    gcheck.add_argument("--provider", choices=["openai", "ollama"], default=os.getenv("SKILLPROOF_PROVIDER", "openai"))
-    gcheck.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
-    gcheck.add_argument("--grader-model", default=os.getenv("SKILLPROOF_GRADER_MODEL") or os.getenv("SKILLPROOF_OPENAI_GRADER_MODEL"))
+    gcheck.add_argument("--provider", choices=["openai", "ollama"], default=_conf.pilot_provider)
+    gcheck.add_argument("--ollama-url", default=_conf.ollama_url)
+    gcheck.add_argument("--grader-model", default=_conf.pilot_grader_model or None)
     gcheck.add_argument("--seed", type=int, default=0)
     gcheck.add_argument("--output", default="-")
 
@@ -502,7 +504,7 @@ def _catalogue_governance(data: Path):
     from skillproof.history import EvaluationHistoryStore as HistoryStore
     from skillproof.registry import SQLiteSkillRegistry
 
-    url = os.environ.get("SKILLPROOF_DATABASE_URL", "").strip()  # PostgreSQL, the same database the API uses
+    url = settings().database_url  # PostgreSQL, the same database the API uses
     from skillproof.jobs import JobStore
     from skillproof.notify import NotificationStore
 

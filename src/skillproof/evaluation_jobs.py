@@ -7,7 +7,6 @@ again on every run recorded for its exact SKILL.md. Settings come from the envir
 """
 from __future__ import annotations
 
-import os
 import logging
 import threading
 import traceback
@@ -17,6 +16,7 @@ from typing import Any, Callable
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.checks import CheckedEvaluator
 from skillproof.conformance import adherence, extract_claims
+from skillproof.config import settings
 from skillproof.evidence import instructions_fingerprint
 from skillproof.execution import execute_experiment
 from skillproof.jobs import JobStore
@@ -37,12 +37,11 @@ class EvaluationSettings:
 
     @classmethod
     def from_env(cls) -> "EvaluationSettings | None":
-        model = os.environ.get("SKILLPROOF_EVAL_MODEL", "").strip()
-        if not model:
+        current = settings()
+        if not current.evaluation.enabled:
             return None
-        return cls(model=model, draft_model=os.environ.get("SKILLPROOF_EVAL_DRAFT_MODEL", "").strip() or model,
-                   ollama_url=os.environ.get("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"),
-                   tasks=int(os.environ.get("SKILLPROOF_EVAL_TASKS", "6")), repeats=int(os.environ.get("SKILLPROOF_EVAL_REPEATS", "2")))
+        return cls(model=current.evaluation.model, draft_model=current.evaluation.draft_model or current.evaluation.model,
+                   ollama_url=current.ollama_url, tasks=current.evaluation.tasks, repeats=current.evaluation.repeats)
 
 
 def run_job(governance: GovernanceAccess, tenant_id: str, job: dict[str, Any], settings: EvaluationSettings, *,

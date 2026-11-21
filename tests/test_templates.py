@@ -44,6 +44,14 @@ def test_never_write_uses_specific_phrases_only():
     assert template_for(claim('Never "shared," never "posted."')) is None  # one common word is not a test
 
 
+def test_do_not_invent_rule_builds_a_case_without_the_thing():
+    # Decision: rules like "do not invent numbers" get an automatic test instead of no evidence.
+    t = template_for(claim("Do not invent holidays or relabel a week-ending date as a week start."))
+    assert t["shape"] == "do_not_invent" and t["thing"] == "holidays"
+    assert all(passes(t, "No holiday calendar was provided, so none are marked.")) and not all(passes(t, "Holidays: 25 Dec, 1 Jan."))
+    assert t["verify"]("Shift plan for December; the plant closes on the holiday.") is not None
+
+
 def test_always_state_and_uncovered_rules():
     t = template_for(claim("Always state the assumption behind the downtime rate."))
     assert t["shape"] == "always_state" and all(passes(t, "Assumption: 8 h shifts.")) and not all(passes(t, "Downtime 12%."))

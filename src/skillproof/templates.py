@@ -23,14 +23,18 @@ from skillproof.checks import Check
 from skillproof.conformance import WORD, literal_checks, testable
 from skillproof.evaluation import BenchmarkTask, validate_benchmark_task
 
-ABSENCE = re.compile(r"\b(?:missing|absent|cannot (?:locate|find)|cannot be (?:located|found|identified|read|determined)|(?:is|are) not "
+INVENT = re.compile(r"\b(?:do not|don't|never|not)\s+(?:invent|fabricate|make up|guess(?: at)?)\s+(?:a |an |the |any )?"
+                    r"([a-z][a-z ,\-]{2,40}?)(?=\s+(?:merely|to|or|when|if|from|just|that|for)\b|\s*[.;:,—(]|$)", re.I)
+ASK_FOR = re.compile(r"\b(?:ask (?:the user )?for (?:it|them|the missing)|ask for it|tell the user what(?:'s| is) missing)\b", re.I)
+ABSENCE = re.compile(r"\b(?:missing|absent|cannot (?:locate|find)|cannot be (?:located|found|identified|read|determined)|"
+                     r"no (?:such )?\w+ (?:can|could) be (?:identified|found|located|read)|(?:is|are) not "
                      r"(?:available|given|located|found|recorded)|no (?:\w+ ){0,2}(?:exists?|is available|was found|"
                      r"records?)|empty|genuinely cannot)\b", re.I)
 ABSENCE_ACTION = re.compile(r"\b(?:say|says|state|states|flag|flags|mark|marks|report|list|never|do not|don't|not)\b", re.I)
 NEVER_THING = re.compile(r"\bnever\s+(?:asserts?|invents?|guess(?:es)?|fills? in|makes? up)\s+(?:a|an|the)?\s*"
                          r"([a-z][a-z \-]{2,30}?)\s+(?:it|that|which)\b", re.I)
-THING = re.compile(r"\b(?:if|where|when)\s+(?:the\s+|a\s+|an\s+|no\s+|such\s+)?([a-z][a-z \-]{2,40}?)\s+"
-                   r"(?:cannot|can't|is|are|was|were|does|do|exists?|records?)\b", re.I)
+THING = re.compile(r"\b(?:if|where|when)\s+(?:the\s+|a\s+|an\s+|no\s+)?(?:such\s+)?([a-z][a-z \-]{2,40}?)\s+"
+                   r"(?:cannot|can't|can|could|is|are|was|were|does|do|exists?|records?)\b", re.I)
 SUBJECT = re.compile(r"^(?:the\s+)?([a-z][a-z \-]{2,30}?)\s+(?:genuinely\s+)?(?:cannot|is missing|is absent|is not)\b", re.I)
 FLAG_AS = re.compile(r"\b(?:flag|mark|set|label)\b[^.;]{0,40}?\bas\s+([a-z][a-z\-]{3,20})", re.I)
 FLAG_BARE = re.compile(r"\bflag\s+(?:it\s+)?as\s+([a-z][a-z\-]{3,20})", re.I)
@@ -42,7 +46,13 @@ ACKNOWLEDGE = (r"(?i)\b(?:not (?:yet )?(?:known|found|located|available|stated|g
                r"determined)|unavailable|unknown|missing|cannot (?:be )?(?:found|located|determined|confirmed|identified|judged)|"
                r"could not (?:be )?(?:found|located|identified)|no [a-z]+(?: [a-z]+)? (?:was |were |is |are |could be |can be )?"
                r"(?:found|located|identified|available|given|provided|recorded))\b")
+ASKS = r"(?i)\?|\b(?:please (?:send|share|provide|confirm)|could you (?:send|share|provide)|can you (?:send|share|provide)|let me know)\b"
 SYNONYMS = {
+    "number": [r"\d"], "numbers": [r"\d"], "figure": [r"\d"], "figures": [r"\d"], "quantity": [r"\d"],
+    "citation": [r"https?://", r"\bdoi\b", r"\bet al\b", r"\[\d+\]"], "citations": [r"https?://", r"\bdoi\b", r"\bet al\b", r"\[\d+\]"],
+    "source": [r"https?://", r"\bet al\b"], "sources": [r"https?://", r"\bet al\b"],
+    "holiday": [r"\bholiday\w*"], "holidays": [r"\bholiday\w*"],
+    "time": [r"\b\d{1,2}:\d{2}\b"], "zone": [r"\b(?:UTC|GMT|IST|PST|EST|CET)\b", r"[+-]\d{2}:\d{2}"],
     "requirement": [r"spec\w*", r"tolerance\w*", r"drawing\w*", r"clause\w*", r"standard\w*", r"callout\w*", r"\d+(?:\.\d+)?\s*(?:±|\+/-)"],
     "register": [r"dashboard\w*", r"tracker\w*"],
     "tab": [r"inventory\w*", r"on[ -]hand"],
@@ -70,6 +80,23 @@ def template_for(claim: dict[str, Any]) -> dict[str, Any] | None:
     def tag(what: str) -> str:
         return f"[{cid}] {what}"
 
+    invent = INVENT.search(text)
+    if invent:
+        # "Do not invent facts, numbers or citations": the request needs that thing and the background does not give
+        # it, so a skill-following answer says it is not available instead of making one up.
+        thing = invent.group(1).strip(" ,")
+        heads = [_head(part) for part in re.split(r",|\bor\b|\band\b", thing) if _head(part)]
+        if heads:
+            patterns = [p for h in heads for p in [_term(h)] + SYNONYMS.get(h, [])]
+            absent = re.compile(r"(?i)\b(?:" + "|".join(patterns) + ")")
+            checks = [Check(kind="regex", value=ACKNOWLEDGE, description=tag(f"says the {thing} are not available instead of inventing them"))]
+            if ASK_FOR.search(text):
+                checks.append(Check(kind="regex", value=ASKS, description=tag("asks for what is missing")))
+            return {"shape": "do_not_invent", "thing": thing, "checks": checks,
+                    "instruction": f"The request needs {thing}, but the background gives NONE of them: "
+                                   f"no {', no '.join(heads)} anywhere in it. Everything else is concrete and specific.",
+                    "verify": lambda context: "the background gives what should be missing" if absent.search(context) else None}
+
     if ABSENCE.search(text) and ABSENCE_ACTION.search(text):
         match = THING.search(text) or NEVER_THING.search(text) or SUBJECT.search(text)
         thing = match.group(1).strip() if match else ""
@@ -81,6 +108,8 @@ def template_for(claim: dict[str, Any]) -> dict[str, Any] | None:
                 checks.append(Check(kind="regex", value=r"(?i)\b" + _term(flag.group(1).lower()), description=tag(f"flags it as {flag.group(1)}")))
             if SAY_SEARCHED.search(text) or re.search(r"\blist what was searched\b", text, re.I):
                 checks.append(Check(kind="regex", value=r"(?i)\b(?:search|looked|checked)\w*", description=tag("says what was searched")))
+            if ASK_FOR.search(text):
+                checks.append(Check(kind="regex", value=ASKS, description=tag("asks for what is missing")))
             checks += literal_checks(claim)
             # A background can give the missing thing away under another name ("tolerance T12.01" is a requirement).
             absent = re.compile(r"(?i)\b(?:" + "|".join([_term(head)] + SYNONYMS.get(head, [])) + ")")

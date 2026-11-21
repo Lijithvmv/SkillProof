@@ -1,0 +1,32 @@
+# SkillProof with PostgreSQL. Copy to docker-compose.yml, set the passwords, and write config/skillproof.toml from
+# deploy/skillproof.example.toml with:
+#   [server]  host = "0.0.0.0", port = 8045, environment = "production"
+#   [storage] database_url = "postgresql://skillproof_app:<app password>@db:5432/skillproof"
+#   [backup]  dir = "/backups"
+# The app role must not be a superuser and must not bypass row-level security (created by db/init.sql below).
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: skillproof
+      POSTGRES_USER: skillproof_owner
+      POSTGRES_PASSWORD: change-me-owner
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillproof_owner -d skillproof"]
+      interval: 10s
+  skillproof:
+    build: ..
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8045:8045"   # publish through your TLS proxy, not directly
+    volumes:
+      - ./config:/config:ro
+      - backups:/backups
+volumes:
+  pgdata:
+  backups:

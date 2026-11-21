@@ -15,6 +15,10 @@ uvicorn skillproof.api.main:app --reload
 
 Open `http://localhost:8000/docs`. Upload a ZIP containing a skill directory with `SKILL.md` to `POST /api/v1/skills/intelligence`.
 
+## Run in a container
+
+`Dockerfile` builds the service image (non-root user, PostgreSQL support, `git` for lock checks, `pg_dump` for backups, a health check on `/health/ready`). Mount the configuration at `/config/skillproof.toml` with `[server] host = "0.0.0.0"`; `deploy/docker-compose.example.yml` runs it with PostgreSQL, and `deploy/db/init.sql` creates the application role without superuser or row-level-security bypass. The image has not been built in this repository's CI yet.
+
 ## Run as a service
 
 Copy `deploy/skillproof.example.toml` to `skillproof.toml`, set storage and sign-in, then:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from skillproof import __version__
 from skillproof.analyzer import analyze_files
 from skillproof.approvals import ApprovalError, SQLiteApprovalStore
 from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal
@@ -30,7 +32,15 @@ from skillproof.jobs import JobError, JobStore
 from skillproof.notify import EVENTS, NotificationStore, NotifyError, start_deliverer
 from skillproof.fleet import FleetError, FleetStore
 
-app = FastAPI(title="SkillProof API", version="1.7.0", description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _start_background()
+    yield
+    _worker_stop.set()
+
+
+app = FastAPI(title="SkillProof API", version="1.8.0", lifespan=_lifespan,
+              description="OIDC-authenticated, role-protected skill evaluation and assurance APIs.")
 app.state.oidc_verifier = verifier_from_environment()
 CATALOGUE_PAGE = Path(__file__).resolve().parent.parent / "web" / "catalogue.html"
 
@@ -67,7 +77,7 @@ class AnalyzeRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     """Liveness: the process answers."""
-    return {"status": "ok", "version": "1.7.0"}
+    return {"status": "ok", "version": __version__}
 
 
 @app.get("/health/ready")
@@ -175,12 +185,12 @@ def governance_from_environment() -> GovernanceAccess | None:
 _worker_stop = threading.Event()
 
 
-@app.on_event("startup")
-def _start_evaluation_worker() -> None:
-    """With SKILLPROOF_EVAL_MODEL set, this server runs evaluation jobs in the background (one at a time)."""
+def _start_background() -> None:
+    """Alert delivery always; evaluation jobs when SKILLPROOF_EVAL_MODEL is set (one at a time)."""
     if governance_from_environment() is None:
         return
     _worker_stop.clear()
+
     def notifications() -> NotificationStore | None:
         governance = governance_from_environment()
         return governance.notifications if governance else None
@@ -189,11 +199,6 @@ def _start_evaluation_worker() -> None:
     settings = EvaluationSettings.from_env()
     if settings is not None:
         start_worker(governance_from_environment, settings, _worker_stop)
-
-
-@app.on_event("shutdown")
-def _stop_evaluation_worker() -> None:
-    _worker_stop.set()
 
 
 def _principal(request: Request) -> Principal:

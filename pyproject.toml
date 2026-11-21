@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skillproof"
-version = "1.7.0"
+version = "1.8.0"
 description = "Evidence-backed structural and intelligence analysis for agent skills."
 readme = "README.md"
 requires-python = ">=3.11"

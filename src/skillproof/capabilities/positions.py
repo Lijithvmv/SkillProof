@@ -1,0 +1,734 @@
+"""Patterns and position rules: where a host, command, secret, config write or deletion counts as something the
+skill does, and where it is only mentioned. Also scopes (how far a delete or a tool grant reaches) and declared tools."""
+from __future__ import annotations
+
+import re
+
+import yaml
+from pathlib import PurePosixPath
+
+
+
+MANIFEST_VERSION = "0.3.0"  # 0.3.0: hooks category; 0.2.0: agent_spawning, secret-only env reads, vendored folders
+
+SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".psm1", ".rb", ".pl", ".bat", ".cmd", ".php", ".lua", ".go"}
+BINARY_SUFFIXES = {".exe", ".dll", ".so", ".dylib", ".bin", ".elf", ".msi", ".app", ".jar", ".class", ".pyc", ".node", ".wasm"}
+TEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".csv", ".xml", ".html", ".css", *SCRIPT_SUFFIXES}
+
+ZERO_WIDTH = re.compile("[​-‏⁠-⁤﻿­]")
+# Letters that render like Latin ones; enough for domains and command names, not a full confusables table.
+CONFUSABLES = str.maketrans({
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y", "і": "i", "ѕ": "s", "ј": "j",
+    "ԁ": "d", "ɡ": "g", "ո": "n", "Α": "A", "Β": "B", "Ε": "E", "Κ": "K", "Μ": "M", "Ο": "O", "Ρ": "P",
+    "Τ": "T", "Χ": "X", "ο": "o", "ν": "v",
+})
+ESCAPES = re.compile(r"(?:\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}){3,}")
+CHR_CHAIN = re.compile(r"(?:chr\(\s*\d{2,3}\s*\)\s*\+?\s*){3,}")
+FROM_CHAR_CODE = re.compile(r"fromCharCode\(\s*(\d{2,3}(?:\s*,\s*\d{2,3}){2,})\s*\)")
+QUOTED = r"(?:\"[^\"\n]{0,200}\"|'[^'\n]{0,200}')"
+SPLIT_LITERALS = re.compile(QUOTED + r"(?:\s*\+\s*" + QUOTED + r")+")
+BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])")
+HEX_RUN = re.compile(r"(?<![0-9a-fA-F])(?:[0-9a-fA-F]{2}){16,}(?![0-9a-fA-F])")
+
+URL = re.compile(r"\b(?:https?|ftp|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?::\d+)?", re.I)
+# Not part of a longer dotted number: "1.2.840.10008.1.2.4.201" is a DICOM identifier, not an address.
+IPV4 = re.compile(r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\dA-Za-z]|\.\d)")
+PROSE_FENCES = {"markdown", "md"}
+MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
+ANY_URL = re.compile(r"\S+://\S+")
+SENTENCE_END = re.compile(r"[.!?](?:\*\*)?\s+")
+
+
+def _prose_cue(line: str, start: int) -> bool:
+    """In prose, a URL is a place the skill reaches only when an action word comes before it in the same sentence
+    ("fetch https://...", "fetch and read the [guide](https://...)"). A cue word inside link text ("[Download
+    Agent](...)"), inside a URL (".../guide/webhooks"), or in another sentence does not count (held-out test 2:
+    14 of 29 false items)."""
+    before = SENTENCE_END.split(line[:start])[-1]
+    before = ANY_URL.sub(" ", MD_LINK.sub(" ", before))
+    before = re.sub(r"\[[^\]]*(?:\]\()?$", " ", before)  # the URL's own link text: "[Download Agent](" + URL
+    return bool(FETCH_CUE.search(before))
+FETCH_CUE = re.compile(r"\b(curl|wget|fetch|download|upload|requests\.(?:get|post|put|patch|delete|request|Session)|webhook|send (?:it |the \w+ )?to|post (?:it |the \w+ )?to|invoke-webrequest|iwr|irm)\b", re.I)
+# Held-out 4: a URL in an error or log message ("Get one from https://..."), a signup/docs link constant, a
+# postMessage origin check and a CSS attribute selector name a place; the skill does not connect to it.
+NOT_CONTACTED_CONTEXT = re.compile(
+    r"(?:\bthrow\s+new\s+\w*Error\s*\(|\bconsole\.(?:log|error|warn|info)\s*\(|\braise\s+\w+\s*\(|\blogger?\.\w+\s*\()[^)]*$"
+    r"|\b\w*(?:SIGNUP|DOCS?|HELP|HOMEPAGE|WEBSITE|REPO|LICENSE|SUPPORT|ORIGIN)_?(?:URL|URI|LINK|PAGE)?\s*[:=]\s*[\"'`]$"
+    r"|\borigin[\"']?\s*[:=]\s*[\"'`]$|\^=\s*\\?[\"']$", re.I)
+# ------------------------------------------------------------------ contact positions (held-outs 1-4 root cause)
+# A URL in code-like text is a host the skill CONTACTS only in a contact position. Every other URL is a mention.
+# Deciding by exclusion (every URL counts unless an exception matches) never converged across fresh corpora: there
+# are endless ways to mention a URL, and few ways to contact one. These are the few.
+CONTACT_CALL = re.compile(
+    r"\b(?:curl(?:\.exe)?|wget|https?ie|xh|Invoke-RestMethod|Invoke-WebRequest|iwr|irm|aria2c|"
+    r"fetch\s*\(|axios(?:\.\w+)?|urlopen|urlretrieve|getJson|get_json|fetchJson|fetch_json|"
+    r"requests\.\w+|httpx\.\w+|aiohttp\.\w+|session\.(?:get|post|put|patch|delete|request)|client\.(?:get|post|put|patch|delete|request)|"
+    r"\$http\.\w+|https?\.(?:get|request)|new\s+WebSocket|EventSource|io\.connect|socket\.connect|"
+    r"git\s+(?:clone|remote\s+add|fetch|pull|submodule\s+add|ls-remote)|kubectl\s+(?:apply|create)|helm\s+(?:repo\s+add|install)|"
+    r"docker\s+(?:pull|run|login)|podman\s+pull|skills?\s+add|marketplace\s+add|"
+    r"pip3?\s+install|uv\s+(?:pip\s+install|add)|npm\s+(?:install|i)|go\s+(?:install|get)|cargo\s+install|brew\s+(?:tap|install)|"
+    r"navigate|goto|page\.goto|browser\s+open|webbrowser\.open|"
+    r"dig|nslookup|ssh|scp|sftp|rsync|ncat|telnet|ping|traceroute|sqlmap|nmap|"
+    r"source\s+<\(|bash\s+<\(|\.package\(url|import\s*\(|importScripts|load(?:Script|Image|URL)?\s*\(|"
+    r"new\s+URL\s*\(|createClient\s*\(|OpenAI\s*\(|connect\s*\("
+    r")|--(?:index-url|extra-index-url|registry|url|endpoint|server|base-url|api-url)\b|"
+    r"\b(?:from|import)\s+[\"']$|@import\s+(?:url\()?[\"']?$|\b(?:Client|Session)\s*\([^)]*$|"
+    r"\b\w+\.(?:get|post|put|patch|delete|head|fetch|request|download|upload|send)(?:_\w+)?\s*\(\s*[fbru]?[\"'`]$", re.I)
+CONTACT_NAME = re.compile(
+    r"(?i)(?:^|[_.\-])(?:base|api|endpoint|endpoints|server|servers|host|webhook|gateway|registry|index|mirror|proxy|upload|download|"
+    r"auth|token|oauth|callback|tiles?|style|feed|rss|root|remote|ws|wss|socket|mcp|url|uri|urls|uris|src|"
+    r"service|backend|target_url|request|nameserver|nameservers|dns|resolver)(?:$|[_.\-]|url|uri)|baseurl|apiurl|apibase|endpoint|serverurl")
+NOT_CONTACT_NAME = re.compile(r"(?i)signup|docs?(?:$|_)|help|homepage|website|repo(?:sitory)?(?:$|_)|license|support|console|dashboard|"
+                              r"portal|page|learn|guide|reference|example|sample|about|privacy|terms|issues?(?:$|_)|changelog|"
+                              r"readme|tutorial|blog|profile|^link$|^href$|_link$|citation|credit|"
+                              # an OAuth scope or audience names a resource ("https://redis.azure.com/.default")
+                              r"scopes?$|audience|claims?(?:$|_)")
+# dict.get("https://api.x/auth") or {}: a lookup with an empty default reads a key (a JWT claim), not a host.
+DICT_LOOKUP_AFTER = re.compile(r"^[^)]*\)\s*(?:or\s*[{\[]|\?\?\s*[{\[])|^[^)]*,\s*(?:\{\}|\[\]|None|null)\s*\)")
+# "See https://... for details" points the reader at a page.
+REFERENCE_CUE = re.compile(r"\b(?:see|visit|refer to|read more at|learn more at|more at)\s*:?\s*[`'\"(\[<]*$", re.I)
+QUOTED_ITEM = r"(?:[\"'`][^\"'`]*[\"'`]\s*,\s*)*"
+ASSIGNED = re.compile(r"([A-Za-z_$][\w.$\-]*)(?:\[[^\]]*\])?[\"'\]]?\s*(?:=|:=|:|=>)\s*(?:[\(\[{]\s*)*"
+                      r"(?:[\w.$\[\]\"']+\s*(?:\|\||\?\?|or)\s*)?" + QUOTED_ITEM + r"(?:[fbru]?[\"'`])?$")
+DATA_RECORD = re.compile(r"[\"']?(?:title|snippet|author|authors|published|published_at|summary|abstract|excerpt|"
+                         r"headline|score|rank|position|date|timestamp|status_code|remote_address|destination_ip|"
+                         r"referer|user_agent|children|caption|alt|description)[\"']?\s*[:=]", re.I)
+HTML_LOAD = re.compile(r"<(?:script|link|img|iframe|source|video|audio|embed|object)\b[^>]*\b(?:src|href|data)\s*=\s*[\"']?$|"
+                       r"\.src\s*=\s*[\"'`]$", re.I)
+API_DOC_CUE = re.compile(r"(?:(?i:\b(?:base(?:\s+url)?|endpoint|api\s+root|public\s+root|default\s+(?:public\s+)?root|"
+                         r"use\s+(?:the\s+)?url|served\s+(?:at|from)|routes?\s+(?:use|are)|under)\b)[^.;]{0,40}?|"
+                         r"\b(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+(?:of\s+)?|(?i:\b(?:use|open|visit|call|query|hit)\s+(?:an?\s+[\w-]+\s+|the\s+)?))[`\"'<(]*$")
+API_SHAPED = re.compile(r"^(?:https?|wss?)://(?:api[.\-]|[^/]*\.api\.|mcp\.|[^?#\s]*/(?:api|graphql|rest|rpc|xrpc|v\d+(?:beta|alpha)?\d*|"
+                        r"oauth2?|token)(?:/|\b))|[?&][\w.-]+=|\$\{|\{\w+\}|\.(?:js|mjs|css|json|ya?ml|sh|ps1|py|git|tar\.gz|tgz|zip|whl|"
+                        r"traineddata)(?:$|[?#\s\"'`)])|/llms(?:-full)?\.txt$", re.I)
+URL_TOKEN = re.compile(r"\S+://\S+")
+
+
+# ------------------------------------------------------------------ writes and executions that happen (held-outs 1-4)
+# The same root cause as hosts: a config path or an execution pattern was counted wherever it was NAMED (in a list of
+# folders, an `ls`, a grep, an error message, a test fixture string). It now counts only where it is DONE.
+PROSE_WRITE = re.compile(r"\b(?:write|writes|writing|append|appends|add|adds|save|saves|create|creates|put|insert|"
+                         r"update|edit|modify|copy|place|register|merge|drop|overwrite|replace|generate|commit|"
+                         r"clean(?:ing)?\s+up|cleans\s+up|remov(?:e|es|ing)|rewrit(?:e|es|ing)|trim(?:s|ming)?|"
+                         r"prun(?:e|es|ing)|fix(?:es|ing)?|edits|editing|updates|updating|modif(?:y|ies|ying))\b"
+                         r"[^.;!?]{0,90}$", re.I)
+SHELL_WRITE_BEFORE = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?|\bsed\s+-i\S*\s(?:[^;|&\n]*\s)?|"
+                                r"\b(?:Set-Content|Add-Content|Out-File)\b[^;|&\n]*?(?:-(?:Path|FilePath|LiteralPath)\s+)?|"
+                                r"\b(?:writeFileSync|writeFile|appendFileSync|appendFile|outputFile|outputJson|writeJson)\s*\(\s*|"
+                                r"\bcat\s*>>?\s*)\s*[\"'`]?[^\s\"'`]*$")
+COPY_TO = re.compile(r"\b(?:cp|mv|ln|install|rsync|Copy-Item|Move-Item|copyFileSync|copyFile|shutil\.copy\w*|shutil\.move|"
+                     r"fs\.cp\w*|cpSync)\b")
+WRITE_AFTER = re.compile(r"^[^\s\"'`),]*[\"'`]?\s*\)?\s*(?:\.(?:write_text|write_bytes|write|open\s*\(\s*[\"'][wax])|"
+                         r",\s*[\"'][wax]b?\+?[\"']|,\s*(?:[^,)]*,\s*)?mode\s*=\s*[\"'][wax])")
+WRITTEN_NAME = re.compile(r"(?:\bopen\s*\(\s*|\b(?:writeFileSync|writeFile|appendFileSync|appendFile)\s*\(\s*)([A-Za-z_$][\w$]*)\s*[,)]|"
+                          r"\b([A-Za-z_$][\w$]*)\.(?:write_text|write_bytes|open\s*\(\s*[\"'][wax])|"
+                          r"(?:>>?|\btee\s+(?:-a\s+)?)\s*\"?\$\{?([A-Za-z_]\w*)")
+YAML_TEXT_VALUE = re.compile(r"^\s*(?:-\s+)?(?:description|short-description|summary|when_to_use|usage|instructions?|purpose|"
+                             r"title|notes?)\s*:\s+[\"']?[A-Za-z]", re.I)
+ASSIGN_NAME = re.compile(r"([A-Za-z_$][\w$]*)\s*(?::\s*[\w\[\]. ]+)?\s*=\s*[^=]")
+PROSE_TEXT = re.compile(r"[A-Za-z]{2,}[,:]?\s+[a-z]{2,}\s+[a-z]{2,}|[A-Za-z]:\s|\w\.\s")
+
+
+def written_names(lines: list[str]) -> set[str]:
+    """Names a file writes to: open(x, "w"), x.write_text(...), writeFile(x, ...), echo ... >> "$x"."""
+    names: set[str] = set()
+    for line in lines:
+        for match in WRITTEN_NAME.finditer(line):
+            name = next(g for g in match.groups() if g)
+            if name.startswith("open") is False and (name not in {"f", "fh", "fp"} or ".write" in line):
+                names.add(name)
+    return names
+
+
+def in_message_string(line: str, position: int, backtick_is_string: bool = True) -> bool:
+    """True when position sits inside a string literal whose text before it reads like a sentence ("Use the
+    PowerShell script", "Proof: `sh -c ...`"): a message or fixture, not a command."""
+    prefix = line[:position]
+    quotes = ('"', "'", "`") if backtick_is_string else ('"', "'")
+    quote = max(prefix.rfind(q) for q in quotes)
+    if quote < 0 or prefix.count(prefix[quote]) % 2 == 0:
+        return False
+    return bool(PROSE_TEXT.search(prefix[quote + 1:]))
+
+
+# Execution positions. A pattern inside a string literal is data (a fixture, a sample, a code snippet held as text)
+# unless the string is itself run: an argument of an exec-style call or remote/wrapper command, a name such a call
+# uses, or a command string that already starts an interpreter (python3 -c '...subprocess...').
+EXEC_OPENER = re.compile(
+    r"(?:\bsubprocess\.\w+|\bos\.(?:system|popen|exec\w*|spawn\w*)|\.(?:exec\w*|spawn\w*|system|popen)|(?<![\w.])(?:exec\w*|eval|spawn\w*|system|popen|Popen|"
+    r"check_output|check_call|shell_exec|passthru|execSync|execFile\w*|run|call)|\bRuntime\.getRuntime\(\)\.exec)\s*\(|"
+    r"(?<![\w-])(?:exec|eval|ssh(?:\s+-\S+)*\s+\S+|sudo|nohup|xargs|(?:python3?|node|perl|ruby|bash|sh|zsh|pwsh|powershell)\s+-[ceC])\s*$")
+EXEC_IN_STRING = re.compile(r"(?<![\w-])(?:(?:python3?|node|perl|ruby|bash|sh|zsh|pwsh|powershell)(?:\.exe)?\s+-[ceC]\b|exec\s|eval\s)|\|\s*(?:ba|z)?sh\b")
+EXEC_CALL = re.compile(r"\bsubprocess\.\w+\s*\(|\bos\.(?:system|popen|exec\w*)\s*\(|(?<!\w)\.?(?:exec|eval|execSync|spawn\w*|execFile\w*|Popen)\s*\(")
+# A fenced example under "// VULNERABLE", "# BAD:", "❌ Don't" shows what NOT to write; it is not run.
+# Only a label counts ("// VULNERABLE - Node.js", "# BAD:", "# ❌ wrong"); "# Never run as root" heads a real command.
+ANTI_EXAMPLE = re.compile(r"^\s*(?:#|//|--)\s*(?:❌|(?i:vulnerable|insecure|unsafe|bad|wrong|anti-?pattern)(?:\s*$|\s*[:(]|\s+[-–—])|DON'?T\b)")
+MODULE_LOAD = re.compile(r"(?:\bfrom|\brequire\s*\(|\bimport\s*\(?)\s*$")  # import { spawn } from "node:child_process"
+# A command span that is the SUBJECT of its sentence is described, not instructed: "`npx skills add` copies the skill
+# folder and nothing else", "which is what `npx skills add` does". "Install it with `npx x init`" instructs.
+DESCRIBE_AFTER = re.compile(r"^\s*(?:\([^)]*\)\s*)?(?:copies|does|did|installs|installed|runs|ran|fetches|downloads|adds|creates|writes|"
+                            r"puts|works|is|was|are|were|will|would|only|just|alone|also|now|then|still|no longer|used to|"
+                            r"behaves|fails|succeeds|leaves|skips|prints|returns)\b", re.I)
+INSTRUCT_BEFORE = re.compile(r"\b(?:install|run|use|execute|type|call|invoke|enter|paste|try|with|via|using|then|first|do)\b", re.I)
+CHANGELOG_FILE = re.compile(r"(?:^|/)(?:CHANGELOG|CHANGES|HISTORY|RELEASE[-_ ]?NOTES|NEWS)[^/]*\.(?:md|txt|rst)$", re.I)
+
+
+def describes_span(full: str, needle: str) -> bool:
+    """True when the inline-code span holding `needle` is the subject of a describing sentence in prose."""
+    for span in INLINE_CODE.finditer(full):
+        if needle in span.group(1):
+            before = SENTENCE_END.split(full[: span.start()])[-1]
+            before = INLINE_CODE.sub(" ", before)
+            if DESCRIBE_AFTER.match(full[span.end():]) and not INSTRUCT_BEFORE.search(before):
+                return True
+    return False
+
+
+LOCATE_BEFORE = re.compile(r"(?:\b(?:which|whereis|where(?:\.exe)?|Get-Command(?:\s+-\w+)*|command\s+-v|type\s+-[aPp])\s*\(?\s*[\"']?)$", re.I)
+# Path segments joined in code — join(homedir(), ".claude", "skills", name), Path.home() / ".claude" / "settings.json".
+JOINED_SEGMENTS = re.compile(r"[\"'][.\w*-]+[\"'](?:\s*(?:,|/)\s*[\"'][.\w*-]+[\"'])+")
+AGENT_INSTALL_DIR = re.compile(r"\.(?:claude|codex|cursor|agents|gemini)/(?:skills|commands|agents|rules|plugins)\b")
+FILE_COPY = re.compile(r"\b(?:cpSync|copyFileSync|copyFile|cp|copytree|copy2?|copyfile|move|rename(?:Sync)?|symlink(?:Sync)?|"
+                       r"writeFile(?:Sync)?|write_text|write_bytes)\s*\(|\bcp\s+-[rR]|\bshutil\.", re.I)
+
+
+def joined_path_line(line: str) -> str:
+    """The line with joined quoted path segments rewritten as one path string, or "" when it has none."""
+    if not JOINED_SEGMENTS.search(line):
+        return ""
+    return JOINED_SEGMENTS.sub(lambda m: '"' + "/".join(re.findall(r"[\"']([^\"']+)[\"']", m.group(0))) + '"', line)
+
+
+NEGATED_LABEL = re.compile(r"^\s*(?:#+\s*)?(?:\*\*|__)?\s*(?:[✗❌🚫×]\s*)?(?:don'?t|do not|never|avoid|bad|wrong)\b[^.!?:]{0,30}:?\s*(?:\*\*|__)?\s*:?\s*$", re.I)
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+# A bin the file itself runs as already installed (npx --no-install X, pnpm exec X): npx/bunx X runs that local bin.
+LOCAL_BIN = re.compile(r"\b(?:npx\s+(?:--no-install|--no)\s+|(?:pnpm|yarn)\s+exec\s+|npm\s+exec\s+--no\s+(?:--\s+)?|bun\s+x\s+--no-install\s+)(@?[\w./@-]+)")
+# The only argument is a slot: an all-caps word (TRIGGER, CMD), <cmd>, {cmd} or an ellipsis. "$CMD" is a real value.
+PLACEHOLDER_ARG = re.compile(r"^\s*([\"']?)(?:[A-Z][A-Z_]{2,}|<[^>\s]+>|\{[^}\s]+\}|\.\.\.|…)\1\s*(?:$|[`;)/|]|\s(?:/|or\b))")
+SETTING_SHELL = re.compile(r"\bshell\s*:\s*[\"']?$")  # `shell: pwsh` names a CI step's shell; nothing is launched by the skill
+SHELL_SCRIPT_SUFFIXES = {".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd"}
+
+
+def exec_names(lines: list[str]) -> set[str]:
+    """Names used inside the parentheses of an exec-style call in one file (cmd = "bash -c ..."; os.system(cmd))."""
+    names: set[str] = set()
+    for line in lines:
+        call = EXEC_CALL.search(line)
+        if call:
+            for group in CALL_ARGS.findall(line[call.start():]):
+                names.update(IDENTIFIER.findall(group))
+    return names
+
+
+def _open_string(prefix: str, quotes: tuple[str, ...]) -> int:
+    """Index of the opening quote of the string literal that prefix ends inside, or -1 when it ends outside one."""
+    opened, quote, index = -1, "", 0
+    while index < len(prefix):
+        char = prefix[index]
+        if char == "\\" and quote:
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                opened, quote = -1, ""
+        elif char in quotes:
+            opened, quote = index, char
+        index += 1
+    return opened
+
+
+def exec_reason(line: str, start: int, *, previous: str = "", names: set[str] | frozenset[str] = frozenset(),
+                quotes: tuple[str, ...] = ('"', "'")) -> str:
+    """Why the execution pattern at line[start] runs something, or "" when it sits in a string that is only data."""
+    opened = _open_string(line[:start], quotes)
+    if opened < 0:
+        return "called in code"
+    text, before = line[opened + 1:start], line[:opened]
+    if MODULE_LOAD.search(before):
+        return "loads the process module"
+    if EXEC_IN_STRING.search(text):
+        return "inside a command string that is run"
+    statement = re.split(r";\s|&&|\|\|", before)[-1]
+    if EXEC_OPENER.search(statement):
+        return "a string passed to a command runner"
+    if not statement.strip(" \t([{,") and previous.rstrip().endswith(("(", "[", ",")):
+        # A continuation line: count it when the line above opens an exec-style call outside any string.
+        call = EXEC_CALL.search(previous) or EXEC_OPENER.search(previous)
+        if call and _open_string(previous[:call.start()], quotes) < 0:
+            return "a string passed to a command runner"
+    assigned = ASSIGN_NAME.search(statement)
+    if assigned and assigned.group(1) in names:
+        return "a command string later run"
+    return ""
+
+
+def config_write(line: str, start: int, end: int, *, prose: bool, written: set[str] | frozenset[str] = frozenset()) -> str:
+    """Why the agent-config path at line[start:end] is WRITTEN, or "" when it is only named or read."""
+    token_start = start
+    while token_start > 0 and line[token_start - 1] not in " \t\"'`(=,[{<":
+        token_start -= 1
+    token_end = end
+    while token_end < len(line) and line[token_end] not in " \t\"'`),;]}>|&":
+        token_end += 1
+    before, after = line[:token_start], line[token_end:]
+    if prose:
+        # Code spans and file names hold dots ("`AGENTS.md` (or `CLAUDE.md`"): neutralise them before reading the
+        # sentence, or the write verb before them is cut off.
+        sentence = re.sub(r"`[^`]*`|\b[\w.-]+\.(?:md|json|toml|ya?ml|txt)\b", " X ", SENTENCE_END.split(before)[-1])
+        sentence = SENTENCE_END.split(sentence)[-1]
+        if NEGATED.search(sentence):
+            return ""
+        return "an instruction to write it" if PROSE_WRITE.search(sentence) else ""
+    if SHELL_WRITE_BEFORE.search(before):
+        return "the target of a write"
+    if WRITE_AFTER.search(line[token_start:]):
+        return "opened or written for writing"
+    copy = COPY_TO.search(before)
+    if copy and re.match(r"^[\"'`]?\s*\)?\s*(?:$|[;|&#]|\s+(?:&&|\|\||;))", after):
+        return "the destination of a copy or move"
+    assigned = ASSIGN_NAME.search(before)
+    if assigned and assigned.group(1) in written:
+        return f"assigned to {assigned.group(1)}, which this file writes to"
+    return ""
+
+
+CALL_ARGS = re.compile(r"\(([^()]*)")
+IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def called_names(lines: list[str]) -> set[str]:
+    """Names that appear inside the parentheses of a network call, or after a network command, in one file. A URL bound
+    to one of them is contacted through it, whatever the name (one step of data flow: x = "https://..."; post(x))."""
+    names: set[str] = set()
+    for line in lines:
+        call = CONTACT_CALL.search(line)
+        if not call:
+            continue
+        rest = line[call.start():]
+        for group in CALL_ARGS.findall(rest) or [rest]:
+            names.update(IDENTIFIER.findall(group))
+    return names
+
+
+def contact_reason(line: str, url_start: int, path: str = "", neighbours: tuple[str, ...] | list[str] = (), previous: str = "",
+                   called: set[str] | frozenset[str] = frozenset(), package_called: frozenset[str] | None = None) -> str:
+    """Why the URL starting at url_start is contacted by the skill, or "" when it is only mentioned. Contact positions:
+    an argument of a network call or command, the value of an endpoint-named setting, a resource a page loads, an
+    API base or HTTP-method line in docs, a fetch instruction in prose, or (in scripts) an API-shaped URL bound to
+    any name. Everything else (links, data records, examples, error text) is a mention."""
+    prefix = line[:url_start]
+    url = re.match(r"\S+", line[url_start:]).group(0).strip("`'\")<>,;]")
+    statement = re.split(r"(?:;|&&|\|\||\bthen\b)\s", prefix)[-1]
+    if NOT_CONTACTED_CONTEXT.search(prefix):
+        return ""
+    call = CONTACT_CALL.search(statement)
+    if call and re.search(r"\.get(?:_\w+)?\s*\(", call.group(0)) and DICT_LOOKUP_AFTER.search(line[url_start:]):
+        return ""
+    if call:
+        return f"argument of {call.group(0).strip()}"
+    if HTML_LOAD.search(prefix):
+        return "a resource the page loads"
+    suffix = PurePosixPath(path).suffix.lower()
+    # Inside a string literal, running text before the URL ("Embedded tweet: https://...") makes it a message. In
+    # Markdown a backtick opens inline code, not a string, so only real quotes count there.
+    quotes = ('"', "'") if suffix in DOC_SUFFIXES else ('"', "'", "`")
+    quote = max(prefix.rfind(q) for q in quotes)
+    if (quote >= 0 and prefix.count(prefix[quote]) % 2 == 1 and re.search(r"[A-Za-z]{2,}[^\w$]*\s", prefix[quote + 1:])
+            and not API_DOC_CUE.search(prefix)):
+        return ""
+    assigned = ASSIGNED.search(prefix)
+    if assigned:
+        name = assigned.group(1).split(".")[-1]
+        record = DATA_RECORD.search(line) or any(DATA_RECORD.search(n) for n in neighbours)
+        words_before = prefix[max(0, assigned.start(1) - 24): assigned.start(1)]
+        if NOT_CONTACT_NAME.search(name) or NOT_CONTACT_NAME.search(words_before.split("\n")[-1].split(",")[-1]):
+            return ""
+        if name in called and suffix in SCRIPT_SUFFIXES:
+            return f"bound to {name}, which a network call in this file uses"
+        if CONTACT_NAME.search(name):
+            if record and name.lower() in {"url", "uri", "src", "source"}:
+                return ""
+            if package_called is not None and suffix in SCRIPT_SUFFIXES:
+                # In code, an endpoint-named constant is contacted only if some network call in the package uses that
+                # name (SUBSTACK_URL = "https://..." stamped into notes is a link) or its value is an API address.
+                if name in package_called:
+                    return f"value of {name}, which a network call in this package uses"
+                if API_SHAPED.search(url) and not record:
+                    return f"API address bound to {name}"
+                return ""
+            return f"value of the endpoint setting {name}"
+        if suffix in SCRIPT_SUFFIXES and API_SHAPED.search(url) and not record:
+            return f"API address bound to {name}"
+        return ""
+    if API_DOC_CUE.search(prefix) or (API_DOC_CUE.search(previous.rstrip() + " ") and len(prefix.strip(" `'\"")) <= 4):
+        return "API base or request line in the docs"
+    if REFERENCE_CUE.search(prefix):
+        return ""
+    if _prose_cue(line, url_start):
+        return "an instruction to fetch or send"
+    bare = URL_TOKEN.sub(" ", prefix).strip(" -*>`'\"→=:|")
+    if bare in {"f", "b", "r", "u", "rb", "fr"}:
+        bare = ""  # a Python string prefix: f"https://..."
+    if not bare and CONTACT_CALL.search(previous.rstrip()) and re.search(r"[(,]\s*$", previous.rstrip()):
+        return "argument of the call on the line before"
+    if not bare and API_SHAPED.search(url):
+        return "an API address listed on its own"
+    return ""
+
+
+def contact_position(line: str, url_start: int, path: str = "", neighbours: tuple[str, ...] | list[str] = (), previous: str = "") -> bool:
+    return bool(contact_reason(line, url_start, path, neighbours, previous))
+
+
+PROVENANCE = re.compile(r"\b(?:adapted from|based on|derived from|inspired by|credits?:|provenance|original source)\b", re.I)
+# A namespace or schema URI is an identifier, not an endpoint (e.g. xmlns="http://www.w3.org/2000/svg").
+NAMESPACE_CONTEXT = re.compile(r"(?:xmlns(?::[\w.-]+)?|schemaLocation|targetNamespace|namespace|\$schema|\$id|@context|\b\w*_NS|\b\w*issuer\w*|\biss\b)[\"']?\s*[=:]\s*[\"']?[^\"'\s]*$", re.I)
+# Registries of identifiers (XML namespaces, schemas), not services a skill talks to.
+IDENTIFIER_HOSTS = {"www.w3.org", "schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "ns.adobe.com", "json-schema.org", "json.schemastore.org", "xmlns.com"}
+LOCKFILES = {"uv.lock", "poetry.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "go.sum", "pipfile.lock", "composer.lock", "gemfile.lock"}
+INLINE_CODE = re.compile(r"`([^`]+)`")
+NEGATED = re.compile(r"\b(?:do not|don't|never|no need to|without|instead of|avoid)\b[^.;]*$", re.I)
+COMMENT_LINE = re.compile(r"^\s*(?:#(?!!)|//|/\*|\*|<!--|--|REM\b|;)")
+NOT_EXTERNAL = re.compile(r"^(?:[^a-z0-9]*|localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|::1|[^.]*|.*\.(?:example|test|invalid|localhost|local)|(?:.*\.)?example\.(?:com|org|net))$", re.I)
+
+NETWORK_CLIENTS = [
+    ("curl", r"\bcurl\b"), ("wget", r"\bwget\b"), ("python-requests", r"\brequests\.(?:get|post|put|patch|delete|request|Session)\b"),
+    ("httpx", r"\bhttpx\.(?:get|post|put|Client|AsyncClient)\b"), ("urllib", r"\burllib\.request\b|\burlopen\("),
+    ("fetch", r"\bfetch\(\s*['\"`]?https?:"), ("axios", r"\baxios\b"), ("http.client", r"\bhttp\.client\.HTTPS?Connection\b"),  # not "except http.client.HTTPException"
+    ("socket", r"\bsocket\.(?:socket|create_connection)\b(?![^\n]*AF_UNIX)"),  # AF_UNIX is a local socket, not network
+    ("netcat", r"(?<![-\w])(?:nc|ncat|netcat)\s+-"),  # not the "-nc" in "jq -nc"
+    ("invoke-webrequest", r"\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b"),
+]
+PROCESS_EXEC = [
+    ("subprocess", r"\bsubprocess\.(?:run|call|Popen|check_output|check_call)\b"), ("os.system", r"\bos\.(?:system|popen|exec\w*)\("),
+    ("eval", r"(?<![\w.])eval\("), ("exec", r"(?<![\w.])exec\("), ("child_process", r"\bchild_process\b|\bexecSync\(|\bspawnSync?\("),
+    ("shell -c", r"\b(?:bash|sh|zsh)\s+-c\b"), ("pipe-to-shell", r"\b(?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod|base64\s+-d|base64\s+--decode|cat|echo|printf)\b[^|\n]*(?<!\|)\|(?!\|)\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|iex|Invoke-Expression)\b"
+                      r"(?!\s+(?:-\S+\s+)*(?:[\w./-]+\.(?:py|js|mjs|cjs|ts|sh)\b|[\"']?\$\{?\w+\}?[\"']?(?:\s|$))|\s+-[ceC]\b)"),  # data piped into a local script, or into inline code given with -c/-e, is not code
+    ("powershell", r"\bpowershell(?:\.exe)?\b|\bpwsh\b"), ("cmd /c", r"\bcmd(?:\.exe)?\s+/c\b"),
+]
+AGENT_CONFIG = [
+    ("CLAUDE.md", r"CLAUDE\.md"), ("AGENTS.md", r"AGENTS\.md"), (".claude/settings", r"\.claude[/\\]settings(?:\.local)?\.json"),
+    (".claude/hooks", r"\.claude[/\\]hooks"), (".claude/commands", r"\.claude[/\\](?:commands|agents|skills)"),
+    (".mcp.json", r"(?<![\w-])\.?mcp\.json"), (".cursorrules", r"\.cursorrules|\.cursor[/\\]rules"),
+    ("copilot-instructions", r"copilot-instructions\.md"), (".codex", r"\.codex[/\\](?!sessions|skills|log|cache|history|archived)"), ("GEMINI.md", r"GEMINI\.md"),
+]
+# Held-out 3: "shell rc" matched Kotlin `user?.profile`, Python `cProfile.Profile()` and SOQL `Owner.Profile.Name`
+# (0 of 4 true), and `source ~/.bashrc` (a read). The file must be named as a path, and a write must be nearby.
+SHELL_RC = [("shell rc", r"(?<![\w?)\]])\.(?:bashrc|zshrc|bash_profile|profile|zprofile)\b(?!\s*[(.]\w)")]
+PERSISTENCE = [
+    ("cron", r"\bcrontab\b|/etc/cron"),
+    ("systemd", r"\bsystemctl\s+(?:--user\s+)?(?:enable|start)\b|/etc/systemd|\.config/systemd"), ("launchd", r"\blaunchctl\s+(?:-\w+\s+)*(?:load|bootstrap|enable|submit|kickstart|start)\b|LaunchAgents|LaunchDaemons"),
+    # A schedule handed to an API ("expression": "0 20 * * 5") runs an agent on a timer just like crontab does.
+    ("cron schedule", r"[\"']?(?:expression|cron|schedule)[\"']?\s*[:=]\s*[\"'][0-9*/,\- ]{9,}[\"']"),
+    ("windows run key", r"CurrentVersion\\+Run\b"), ("scheduled task", r"\bschtasks\b|Register-ScheduledTask"),
+    ("startup folder", r"Start Menu\\+Programs\\+Startup"),
+]
+CREDENTIALS = [
+    ("ssh keys", r"~?/\.ssh\b|\bid_(?:rsa|ed25519|ecdsa)\b"), ("aws credentials", r"\.aws[/\\]credentials|(?-i:\bAWS_SECRET_ACCESS_KEY\b)"),
+    ("netrc", r"\.netrc\b"), ("npmrc/pypirc", r"\.npmrc\b|\.pypirc\b"), ("keychain", r"\bsecurity\s+find-(?:generic|internet)-password\b|\bkeyring\.get_password\b"),
+    # Chrome's files are "Login Data" and "Local State"; `local state` in a shell function is a variable.
+    ("gh token", r"\bgh\s+auth\s+token\b"), ("browser data", r"(?-i:Login Data)|cookies\.sqlite|(?-i:Local State)"),
+    # "{path}.env" is attribute access; ".Env.X" is a Go template field, not a file.
+    (".env file", r"(?<![\w.}\])])(?-i:\.env)\b(?!\.example)"),
+]
+# The pattern given to a search or query command is what it looks FOR, never what it does: `grep -rnE
+# 'os\.environ|--dangerously-skip-permissions|wget '` runs grep, not wget (held-out 7: 8 of 27 false alarms were names
+# inside grep/yq patterns of one audit-rule library). File selectors stay: `grep ... --include='*.env'` reads .env files.
+SEARCH_CMD = re.compile(r"(?:^|[|;&({`]|\$\(|\b(?:xargs|sudo|then|do|exec|time|nice|env)\b|!)\s*"
+                        r"(?:grep|egrep|fgrep|rg|ag|git\s+grep|findstr|Select-String|yq|jq)(?![\w-])", re.I | re.M)
+SEARCH_FILE_OPTION = re.compile(r"^(?:--(?:include|exclude|exclude-dir|exclude-from|include-dir|glob|iglob|type|type-add|file|from-file|files-from)|"
+                                r"-[gtf]|-(?:Path|LiteralPath|Include|Exclude|Filter)|/F)=?$", re.I)
+SEARCH_PATTERN_OPTION = re.compile(r"^(?:-e|--regexp|-Pattern|--arg|--argjson)=?$", re.I)
+
+
+def mask_search_patterns(text: str) -> str:
+    """`text` with the pattern or query arguments of search commands blanked (same length, so offsets still match)."""
+    if not SEARCH_CMD.search(text):
+        return text
+    out = list(text)
+    n = len(text)
+    for command in SEARCH_CMD.finditer(text):
+        i, pattern_done, previous = command.end(), False, ""
+        while i < n:
+            c = text[i]
+            if c in "|;&`)":
+                break
+            if c.isspace():
+                i += 1
+                continue
+            start = i
+            token_prefix = ""
+            while i < n and not text[i].isspace() and text[i] not in "'\"|;&`":
+                i += 1
+            token_prefix = text[start:i]
+            if i < n and text[i] in "'\"":
+                quote, q = text[i], i + 1
+                while q < n and text[q] != quote:
+                    q += 2 if text[q] == "\\" and quote == '"' else 1
+                selector = SEARCH_FILE_OPTION.match(token_prefix) or (not token_prefix and SEARCH_FILE_OPTION.match(previous))
+                if not selector:
+                    for k in range(i + 1, min(q, n)):
+                        out[k] = " "
+                    pattern_done = True
+                i = min(q + 1, n)
+                previous = token_prefix + "'"
+                continue
+            token = token_prefix
+            if token.startswith("-"):
+                previous = token
+                if "=" in token and SEARCH_PATTERN_OPTION.match(token.split("=", 1)[0] + "="):
+                    for k in range(start + token.index("=") + 1, i):
+                        out[k] = " "
+                    pattern_done = True
+                continue
+            if SEARCH_FILE_OPTION.match(previous):
+                previous = token
+                continue
+            if not pattern_done or SEARCH_PATTERN_OPTION.match(previous):
+                for k in range(start, i):
+                    out[k] = " "
+                pattern_done = True
+            previous = token
+    return "".join(out)
+ENV_READ = re.compile(r"os\.environ(?:\.get)?[\[(]\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|(?:os\.)?getenv\(\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]|process\.env\.([A-Z][A-Z0-9_]{2,})|\$env:([A-Z][A-Z0-9_]{2,})", re.I)
+SECRETISH_ENV = re.compile(r"KEY|SECRET|TOKEN|PASS|AUTH|CRED|PRIVATE|COOKIE|SESSION", re.I)
+# Reading a variable is a credential access only when the variable holds a secret. Most variables a skill reads are
+# configuration (PORT, NODE_ENV, PROJECT_ENDPOINT, MODEL_DEPLOYMENT_NAME, DISPLAY), and listing them buried the
+# real secret reads (held-out test 2026-11-16: 37 of 93 false items). Whole-word parts for short words so that
+# KEY_VAULT or AUTHOR do not count; substrings for words that do not occur by accident.
+SECRET_ENV_SUBSTR = re.compile(r"SECRET|TOKEN|PASSW|CRED|PRIVATE|COOKIE|APIKEY|ACCESSKEY|CONNECTION_?STRING|CONNSTR|DATABASE_URL|WEBHOOK_URL", re.I)
+SECRET_ENV_PARTS = {"KEY", "KEYS", "PASS", "PWD", "AUTH", "SESSION", "PAT", "SAS", "DSN", "SIGNATURE"}
+# Values made for the browser are public by design (bundlers inline them into client code); site and publishable
+# keys are the public halves of key pairs.
+PUBLIC_ENV = re.compile(r"^(?:NEXT_PUBLIC_|VITE_|REACT_APP_|EXPO_PUBLIC_|GATSBY_|PUBLIC_|NUXT_PUBLIC_)|(?:SITE_KEY|SITEKEY|PUBLISHABLE_KEY|PUBLIC_KEY)$", re.I)
+
+
+# Kept narrow on purpose: SSH_KEY_PATH or AZURE_AUTH_LOCATION point at a secret file and stay credential reads.
+LOCATOR_ENV = re.compile(r"_(?:URL|URI|ENDPOINT|HOST|DOMAIN|ISSUER|REGION)$", re.I)
+
+
+def is_secret_env(name: str) -> bool:
+    name = name.upper()
+    if PUBLIC_ENV.search(name) or LOCATION_ENV.match(name):
+        return False
+    if re.search(r"_(?:DIR|ROOT|FOLDER|HOME)$", name):
+        return False  # COOKIE_COPY_SKILL_DIR names a folder, whatever word it contains
+    if re.search(r"(?:^|_)SESSION_ID$", name):
+        return False  # CLAUDE_CODE_SESSION_ID names a conversation; a SESSION_TOKEN or SESSION_KEY still counts
+    parts = name.split("_")
+    if "KEY" in parts and parts.index("KEY") + 1 < len(parts) and parts[parts.index("KEY") + 1] in {"VAULT", "VAULTS"}:
+        parts = [p for i, p in enumerate(parts) if not (p == "KEY" and i + 1 < len(parts) and parts[i + 1] in {"VAULT", "VAULTS"})]
+    if SECRET_ENV_SUBSTR.search(name):
+        return True
+    if LOCATOR_ENV.search(name):
+        return False  # NEON_AUTH_JWKS_URL, AUTH_ISSUER: where to find something, not a secret
+    if "PWD" in parts and parts and {"SHELL", "DIR", "CWD", "OLD", "WORKING", "PATH", "WORKDIR"} & set(parts):
+        parts = [part for part in parts if part != "PWD"]  # PWF_SHELL_PWD: the shell's working directory
+    return any(p in SECRET_ENV_PARTS for p in parts)
+ECHO_LINE = re.compile(r"^\s*(?:echo|printf|Write-Host|Write-Output|log_\w+)\b[^|]*$")  # a URL that is only printed
+DOC_COMMENT = re.compile(r"^\s*(?:#\s|//\s)")
+STOP_PACKAGES = {"did", "not", "the", "a", "an", "it", "this", "that", "to", "and", "or", "will", "first", "then", "with", "from", "is", "was", "cache"}
+# The whole environment handed on unchanged: to a child process (env=os.environ, env: process.env, {**os.environ, ...},
+# {...process.env}) or as a parameter default (def f(env=os.environ)). Decision 2026-11-20: inheritance is not a read.
+ENV_INHERIT = re.compile(r"\benv\s*[=:]\s*(?:\{\s*(?:\*\*|\.\.\.)\s*)?(?:os\.environ|process\.env)\b(?!\s*[\[.])|"
+                         r"(?:\*\*|\.\.\.)\s*(?:os\.environ|process\.env)\b(?!\s*[\[.])|"
+                         r"Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\b")
+ENV_OUT = re.compile(r"json\.dumps|JSON\.stringify|\bprint\(|console\.\w+\(|\.write\(|\bpost\(|\bsend\(|\bfetch\(|requests\.|"
+                     r"\bfor\s+\w+(?:\s*,\s*\w+)?\s+(?:in|of)\b|\.items\(\)|\.keys\(\)|Object\.(?:keys|entries|values)\(", re.I)
+ENV_ALL = re.compile(r"(?<!in )(?<!dict\()(?<!dict\(\")(?<!dict\(')\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
+INSTALL = re.compile(
+    r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
+    r"|\buv\s+add\s+" + r"(?:" + r"(?:--python|--index-url|--extra-index-url|--index|-r|--requirements|--no-binary-package|--no-build-package|--package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!*]+)"
+    r"|\b(npm)\s+(?:install|i|add)\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
+    r"|\b(npx|pnpm\s+dlx|bunx)\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
+    r"|\b(pnpm|yarn|bun)\s+add\s+(?:-[\w-]+\s+)*(@?[A-Za-z0-9_.\-/@^~:+]+)"
+    r"|\b(go)\s+(?:install|get)\s+([A-Za-z0-9_.\-/@]+)"
+    r"|\b(cargo)\s+install\s+(?:-[\w-]+\s+)*?--git\s+(https?://[A-Za-z0-9_.\-/@:]+)"  # the --git URL is what gets installed
+    r"|\b(cargo|gem|brew)\s+install\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-/@]+)"
+    r"|\b(apt(?:-get)?|yum|dnf|apk)\s+(?:install|add)\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-+]+)"
+    r"|\b(cargo)\s+add\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-@]+)"
+    r"|\b(dotnet)\s+add\s+(?:\S+\s+)?package\s+([A-Za-z0-9_.\-]+)"
+    r"|\b(composer)\s+(?:global\s+)?require\s+(?:-[\w-]+\s+)*([A-Za-z0-9_.\-/]+)"
+    r"|\b(Install-Module|Install-Package)\s+(?:-Name\s+)?([A-Za-z0-9_.\-]+)",
+    re.I,
+)
+# One install command often names several packages ("cargo add a b tokio"); every one is a separate install. Not for
+# runners (npx, dlx, bunx), whose later words are arguments to the tool, and not for one-package commands.
+MULTI_INSTALL_TOOLS = {"pip", "pip3", "uv pip", "python -m pip", "python3 -m pip", "uv", "npm", "pnpm", "yarn", "bun", "go", "cargo", "gem", "brew", "apt", "apt-get", "yum", "dnf", "apk", "composer"}
+VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-i", "--index-url", "--extra-index-url", "--version", "--features", "-F", "--registry", "--target", "-t", "--path", "--git", "--branch", "--tag", "--rev"}
+PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-\[\]=<>~!+:/@^*]+$")
+# "<pinned version>", "<package>", "version>" are placeholders; "torch>=2.0.0" or "pkg<3" are version ranges.
+# Placeholder packages: "npm install x", "package@fixed-version", "pip install /wheels/*" (a local path), "npx 0".
+PLACEHOLDER_TOKEN = re.compile(r"^<|<[A-Za-z]|^[A-Za-z_-]+>$|^(?:x|y|z|foo|bar|pkg|package|package-name|my-package|your-package)(?:@|$)"
+                               r"|@[\w-]*version$|^\d+$|^(?:/|\./|\.\./|~/)|^\[")
+EXTRA_STOP_WORDS = {"for", "on", "in", "if", "via", "using", "first", "before", "after", "so", "as", "into", "when", "—", "install", "add",
+                    "apt", "apt-get", "brew", "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "gem", "go", "uv", "dnf", "yum", "apk", "sudo", "retry", "run"}
+TOOL_ALIASES = {"install-module": "psgallery", "install-package": "psgallery"}
+
+
+def _more_packages(rest: str) -> list[str]:
+    """The further package names after the first one in an install command, up to the end of that command."""
+    packages, skip_next = [], False
+    for token in rest.split():
+        token = token.strip("\"'`")
+        if not token:
+            continue  # the closing quote of the first package: "openmm==8.6.1" "MDAnalysis==2.10.0"
+        if token in {"&&", "||", "|", ";", "\\"} or token.startswith(("#", ">", "2>", "&&", "||", ";", "|")):
+            break
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            skip_next = token in VALUE_FLAGS
+            continue
+        clean = token.rstrip(".,;:)")
+        if not clean or not PACKAGE_TOKEN.match(clean) or "://" in clean or not re.search(r"[A-Za-z0-9]", clean) or PLACEHOLDER_TOKEN.search(clean):
+            break  # "brew install jq / apt install jq": the slash ends the first command
+        if clean.lower() in STOP_PACKAGES or clean.lower() in EXTRA_STOP_WORDS:
+            break  # "brew install tesseract for the binary": prose after the package
+        packages.append(clean)
+    return packages
+# Starting another agent from a command: a headless agent run carries its own tool permissions, and a bypass flag
+# removes the user's approval step for everything it does. Only commands are matched; prose such as "dispatch a
+# subagent" is not (that needs the prose channel, P7).
+AGENT_SPAWNING = [
+    ("claude headless", r"\bclaude\s+(?:-{1,2}[\w-]+(?:\s+[\w.:/-]+)?\s+)*?(?:-p|--print)\b"),
+    ("codex exec", r"\bcodex\s+(?:-{1,2}[\w-]+\s+)*exec\b"), ("gemini headless", r"\bgemini\s+(?:-p|--prompt)\b"),
+    ("copilot headless", r"\bcopilot\s+(?:-p|--prompt)\b"),
+    ("agent sdk", r"\bclaude_agent_sdk\b|@anthropic-ai/claude-agent-sdk|\bclaude_code_sdk\b|(?<!install )(?<!-g )(?<!add )@anthropic-ai/claude-code\b"),
+    ("permission bypass", r"--dangerously-skip-permissions|--permission-mode[\s=]+bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--yolo\b|--full-auto\b"),
+]
+# The same launches written as an argument list in code (subprocess.run(["claude", "-p", ...])), often over several
+# lines, which a line pattern cannot see.
+_Q = r"[\"'`]"
+ARGV_AGENT = [
+    ("claude headless", re.compile(_Q + r"claude" + _Q + r"\s*,\s*(?:" + _Q + r"[^\"'`\n]*" + _Q + r"\s*,\s*){0,6}?" + _Q + r"(?:-p|--print)" + _Q)),
+    ("codex exec", re.compile(_Q + r"codex" + _Q + r"\s*,\s*" + _Q + r"exec" + _Q)),
+    ("gemini headless", re.compile(_Q + r"gemini" + _Q + r"\s*,\s*(?:" + _Q + r"[^\"'`\n]*" + _Q + r"\s*,\s*){0,6}?" + _Q + r"(?:-p|--prompt)" + _Q)),
+    ("permission bypass", re.compile(_Q + r"(?:--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox|--yolo|--full-auto)" + _Q)),
+]
+DESTRUCTIVE = [
+    ("rm -rf", r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"), ("rmtree", r"\bshutil\.rmtree\("),
+    ("find -delete", r"\bfind\b[^\n|;]*\s-delete\b"), ("Remove-Item -Recurse", r"Remove-Item\b[^\n]*-Recurse"),
+    ("format/mkfs", r"\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:"), ("git push --force", r"\bgit\s+push\b[^\n]*(?:--force|-f)\b"),
+    ("dd", r"\bdd\s+if="),
+]
+# Reach of a destructive command: what it would delete. The fact "rm -rf" is the same in a build-cleanup step and in
+# a line that deletes the home folder; the diff reports when the reach grows, even though the fact is not new.
+SCOPE_RANK = {"temp": 0, "path": 1, "some": 1, "cwd": 2, "variable": 2, "all": 3, "home": 3, "root": 4}
+DELETE_TARGETS = re.compile(r"\brm\s+((?:-{1,2}[\w-]+\s+)+)([^;&|\n)`]*)|Remove-Item\b([^;|\n]*-Recurse[^;|\n]*)", re.I)
+ROOT_TARGET = re.compile(r"^(?:/(?:usr|etc|bin|sbin|lib|boot|var|opt|System|Library|Users|home)?/?\*?|[A-Za-z]:[\\/]?\*?|[A-Za-z]:[\\/](?:Windows|Users|Program Files)[\\/]?\*?)$", re.I)
+HOME_TARGET = re.compile(r"^(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE|\$env:HOME)[\\/]?\*?$", re.I)
+TEMP_TARGET = re.compile(r"(?:^|[\\/$%{])(?:tmp|temp|TMPDIR|tmpdir|temp_?dir|tmp_?dir)\b|mktemp|tempfile|node_modules|__pycache__|\.pytest_cache|\.cache\b|\bdist\b|\bbuild\b|\btarget\b|\.next\b|coverage|\*\.pyc|\.egg-info", re.I)
+VARIABLE_TARGET = re.compile(r"^\$\{?\w+\}?(?:[\\/]\*?)?$|^\$\d$")
+CWD_TARGET = re.compile(r"^(?:\.|\./|\*|\./\*|\.\*)$")
+REDIRECTS = re.compile(r"^(?:\d?>|&>|\|\||&&)")
+
+
+def delete_scope(text: str) -> str | None:
+    """Widest target of a recursive rm or Remove-Item in a command line: temp < path < cwd/variable < home < root."""
+    best = None
+    for match in DELETE_TARGETS.finditer(text):
+        if match.group(1) is not None:
+            flags = match.group(1)
+            if not re.search(r"--recursive|(?:^|\s)-[a-zA-Z]*[rR]", flags):
+                continue  # rm -f file: not recursive
+            rest = match.group(2)
+        else:
+            rest = re.sub(r"-(?:Recurse|Force|Confirm(?::\$\w+)?|WhatIf|Path|LiteralPath)\b|-ErrorAction\s+\w+", " ", match.group(3), flags=re.I)
+        for token in rest.split():
+            target = token.strip("\"'")
+            if not target or target.startswith("-") or REDIRECTS.match(target):
+                continue
+            if ROOT_TARGET.match(target):
+                scope = "root"
+            elif HOME_TARGET.match(target):
+                scope = "home"
+            elif TEMP_TARGET.search(target):
+                scope = "temp"
+            elif VARIABLE_TARGET.match(target):
+                scope = "variable"
+            elif CWD_TARGET.match(target):
+                scope = "cwd"
+            else:
+                scope = "path"
+            if best is None or SCOPE_RANK[scope] > SCOPE_RANK[best]:
+                best = scope
+    return best
+
+
+def matcher_scope(matcher: str) -> str:
+    """A hook matcher that matches every tool or source ("*", ".*", empty) reaches more than a named one."""
+    return "all" if matcher.strip() in {"", "*", ".*", ".+", "*.*"} else "some"
+
+
+# Real local skill files showed four more harmless groups (VS Code / Copilot, Codex, Kimi and Claude skill copies):
+# placeholder links ("github.com/owner/repo"), tool names inside a match pattern ("curl|wget|nc" in a hook that
+# blocks them), location variables read as "credentials" ($env:APPDATA), and Markdown tables describing rules.
+PLACEHOLDER_PATH = re.compile(r"^/(?:owner|org|user|username|your[\w-]*|my-?org|team|company|acme|example|my-?team|<[^>]+>|\{[^}]+\}|:\w+|\$\{?\w+\}?)(?:/|$)", re.I)
+ALTERNATION = re.compile(r"(?<![\w|])[\w.-]+(?:\|[\w.-]+)+(?![\w|])")
+LOCATION_ENV = re.compile(r"^(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|TEMP|TMP|TMPDIR|PATH|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME|LANG|LC_\w+|TERM|EDITOR|VISUAL|HOSTNAME|COMPUTERNAME|OS|XDG_\w+|CODEX_HOME|CLAUDE_CONFIG_DIR|CLAUDE_PROJECT_DIR|VSCODE_\w+|CI|GITHUB_WORKSPACE|RUNNER_TEMP|\w*_BASE_URL)$", re.I)
+# Third-party code copied into the skill. Its own READMEs and changelogs are full of install lines, example hosts and
+# addresses that describe that library, not the skill (held-out test: 20 of 93 false items came from one
+# node_modules folder). The folder itself is reported once, as shipped third-party code; its contents are not listed.
+VENDORED = re.compile(r"^(.*?(?:^|/)(?:node_modules|bower_components|site-packages|vendor|third_party|\.venv|venv))/")
+# Placeholder hosts in examples: "my-vault.vault.azure.net", "your-resource.openai.azure.com", "x.example.workers.dev".
+PLACEHOLDER_HOST = re.compile(r"^(?:my|your)[-_]|(?:^|\.)example(?:\.|$)|\.(?:internal|lan|home\.arpa)$"
+                              # held-out 3: api.ourapp.com, jira.internal.company.com, target.com, provider.com,
+                              # third-party.com, sandbox-api.external-system.com in reference code
+                              r"|(?:^|\.)(?:company|yourcompany|mycompany|ourcompany|ourapp|myapp|yourapp|yourdomain|mydomain|"
+                              r"acme|acmecorp|contoso|fabrikam|third-party|external-system|external-service|other-service|provider|"
+                              r"target|victim|attacker|evil|somehost|somedomain)\.(?:com|net|org|io|dev|app)$|\.internal\."
+                              r"|^(?:ignored|placeholder|dummy|fake|unused)\.(?:host|local|com|net|org|io|dev|app)$", re.I)
+# Addresses in sample data: {"source_ip": "203.0.113.50", "destination_ip": "10.0.4.21"} describes a log record.
+IP_DATA_KEY = re.compile(r"[\"']?\w*(?:src|source|dst|dest|destination|remote|client|user|peer|origin|caller)_?(?:ip|addr|address)[\"']?\s*[:=]\s*[\"']?$", re.I)
+# A Content-Security-Policy lists hosts a browser may load from; nothing is fetched by the skill.
+CSP_LINE = re.compile(r"\b(?:default|script|style|font|img|connect|frame|media|object|worker|manifest)-src\b", re.I)
+# A link template with a [placeholder] segment anywhere: https://npmjs.com/package/[name], github.com/[org]/[repo].
+BRACKET_SEGMENT = re.compile(r"^/[^\s\"'`)>]*\[[A-Za-z_ -]+\]")
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")  # a Markdown table row starts and ends with |; a pipe continuation does not
+WRITE_CUE = re.compile(r"(?:>>?|\btee\b|\bwrite|\bappend|\bopen\([^)]*['\"][wa]|\bcp\b|\bmv\b|\bcopy|\bmodify|\bedit|\badd\b[^.\n]{0,40}\bto\b|\binsert|\bupdate|\bWriteAllText|\bSet-Content|\bAdd-Content|\bOut-File|\bwriteFile|\bappendFile|\becho\b)", re.I)
+
+CATEGORIES = (
+    "network_hosts", "network_clients", "process_execution", "agent_config_writes", "persistence",
+    "credential_access", "package_installs", "destructive_operations", "bundled_binaries", "hiding_techniques",
+    "declared_tools", "agent_spawning", "hooks",
+)
+FRONTMATTER = re.compile(r"\A﻿?---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
+TOOL_TOKEN = re.compile(r"[A-Za-z_][\w.\-]*\*?(?:\([^)]*\))?")  # mcp__zotero__* grants every tool of that server
+TOOL_KEYS = ("allowed-tools", "allowed_tools", "tools")
+
+
+def _declared_tools(text: str) -> tuple[list[str], int]:
+    """Tools a SKILL.md pre-approves in its frontmatter (`allowed-tools`), and the line the key is on.
+
+    Declaring a tool lets the agent use it without asking, so a new declaration widens what the skill may do even
+    when no other file changes. Accepts a YAML list, a space- or comma-separated string, and scoped entries such
+    as `Bash(apktool:*)` or `mcp__serena__find_symbol`. Returns ([], 0) when nothing is declared."""
+    match = FRONTMATTER.match(text)
+    if not match:
+        return [], 0
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        data = None
+    if not isinstance(data, dict):
+        return [], 0
+    for key in TOOL_KEYS:
+        value = data.get(key)
+        if value is None:
+            continue
+        items = value if isinstance(value, list) else [value]
+        tools = []
+        for item in items:
+            tools += TOOL_TOKEN.findall(str(item))
+        offset = text.find(key + ":")
+        line = text.count("\n", 0, offset) + 1 if offset >= 0 else 1
+        return sorted(set(tools)), line
+    return [], 0
+
+
+# File classification (which files are documents, which are tests)
+DOC_SUFFIXES = {".md", ".txt", ".rst"}
+TEST_NAME = re.compile(r"^(?:test_.*|.*_test\.\w+|.*\.(?:test|spec)\.\w+|conftest\.py|self_?test\.\w+)$", re.I)
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec)/", re.I)

@@ -14,6 +14,7 @@ from skillproof.capabilities import build_manifest
 from skillproof.evidence import instructions_fingerprint, measured_evidence
 from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version
 from skillproof.second_opinion import add_second_opinions
+from skillproof.services import alerts
 
 
 @dataclass
@@ -110,5 +111,25 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
 
 
 def register(governance: GovernanceAccess, principal: Principal, assessment: Assessment, *, artifact_uri: str | None = None) -> dict[str, Any]:
-    return governance.register_skill(principal, assessment.report, assessment.assurance, artifact_uri=artifact_uri,
-                                     capability_manifest=assessment.manifest)
+    version = governance.register_skill(principal, assessment.report, assessment.assurance, artifact_uri=artifact_uri,
+                                        capability_manifest=assessment.manifest)
+    alerts.version_registered(governance, principal, version)
+    return version
+
+
+def promote(governance: GovernanceAccess, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
+    version = governance.promote_version(principal, version_id, request_id, capability_ack=capability_ack)
+    alerts.version_promoted(governance, principal, version, request_id)
+    return version
+
+
+def rollback(governance: GovernanceAccess, principal: Principal, skill_name: str, reason: str) -> dict[str, Any]:
+    restored = governance.rollback_skill(principal, skill_name, reason)
+    alerts.version_rolled_back(governance, principal, skill_name, restored, reason)
+    return restored
+
+
+def request_evaluation(governance: GovernanceAccess, principal: Principal, version_id: str, skill_md: str) -> dict[str, Any]:
+    """Queue a run-evidence job for a version, bound to the exact SKILL.md text it holds."""
+    payload = {"skill_md": skill_md, "instructions_fingerprint": instructions_fingerprint(skill_md)}
+    return governance.enqueue_evaluation(principal, version_id, payload)

@@ -21,7 +21,7 @@ from skillproof.evidence import instructions_fingerprint
 from skillproof.execution import execute_experiment
 from skillproof.jobs import JobStore
 from skillproof.logs import log
-from skillproof.services import catalogue
+from skillproof.services import alerts, catalogue
 from skillproof.templates import generate_benchmark
 
 
@@ -103,11 +103,11 @@ def work_once(governance: GovernanceAccess, settings: EvaluationSettings, **kwar
         done = jobs.finish(tenant_id, job["job_id"], run_job(governance, tenant_id, job, settings, **kwargs))
         result = done["result"] or {}
         summary = {k: result.get(k) for k in ("outcome", "adherence_rate", "baseline_rate", "broken_claims", "lift_pp", "assurance")}
-        governance.emit(tenant_id, "evaluation.finished", {**base, **summary})
+        alerts.emit(governance, tenant_id, "evaluation.finished", {**base, **summary})
         log("evaluation_finished", tenant=tenant_id, **base, **summary)
         return done
     except Exception as exc:  # a failed job is recorded with its reason; the worker keeps going
-        governance.emit(tenant_id, "evaluation.failed", {**base, "error": f"{type(exc).__name__}: {exc}"[:300]})
+        alerts.emit(governance, tenant_id, "evaluation.failed", {**base, "error": f"{type(exc).__name__}: {exc}"[:300]})
         log("evaluation_failed", logging.ERROR, tenant=tenant_id, **base, error=f"{type(exc).__name__}: {exc}"[:300])
         return jobs.fail(tenant_id, job["job_id"], f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
 

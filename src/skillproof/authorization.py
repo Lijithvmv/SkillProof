@@ -65,34 +65,22 @@ class GovernanceAccess:
         self.notifications = notifications  # skillproof.notify.NotificationStore, when alerts are configured
         self.fleet = fleet  # skillproof.fleet.FleetStore, when machines report to this server
 
-    def report_fleet(self, principal: Principal, host: str, installed: list[dict[str, Any]]) -> dict[str, Any]:
-        """A machine's installed skills, compared with the approved versions; alerts on skills newly running unapproved."""
-        from skillproof.fleet import compare
+    def fleet_versions(self, principal: Principal, names: set[str]) -> dict[str, list[dict[str, Any]]]:
+        """The tenant's versions of each named skill, for a machine comparing what it runs (reporter permission)."""
+        authorize(principal, principal.tenant_id, "fleet.report")
+        return {name: self.registry.list_versions(principal.tenant_id, name) for name in names if name}
 
+    def record_fleet_report(self, principal: Principal, host: str, compared: list[dict[str, Any]]) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "fleet.report")
         if self.fleet is None:
             from skillproof.registry import RegistryError
 
             raise RegistryError("fleet reporting is not enabled on this server")
-        names = {str(item.get("skill_name", "")).strip() for item in installed}
-        versions = {name: self.registry.list_versions(principal.tenant_id, name) for name in names if name}
-        result = self.fleet.record(principal.tenant_id, host, compare(versions, installed), reported_by=principal.user_id)
-        for entry in result["newly_unapproved"]:
-            self.emit(principal.tenant_id, "fleet.running_unapproved", {"host": host, **entry})
-        return result
+        return self.fleet.record(principal.tenant_id, host, compared, reported_by=principal.user_id)
 
     def fleet_hosts(self, principal: Principal) -> list[dict[str, Any]]:
         authorize(principal, principal.tenant_id, "skill.read")
         return [] if self.fleet is None else self.fleet.hosts(principal.tenant_id)
-
-    def emit(self, tenant_id: str, event: str, payload: dict[str, Any]) -> None:
-        """Queue an alert. Never raises: an alert must not block or undo the action it reports."""
-        if self.notifications is None:
-            return
-        try:
-            self.notifications.emit(tenant_id, event, payload)
-        except Exception:  # noqa: BLE001 - alerts are best effort by design
-            pass
 
     def add_webhook(self, principal: Principal, url: str, events: list[str]) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "policy.manage")
@@ -137,17 +125,13 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "skill.register")
         return self.registry.preview_change(principal.tenant_id, skill_name, manifest)
 
-    def request_evaluation(self, principal: Principal, version_id: str, skill_md: str) -> dict[str, Any]:
-        """Queue a run-evidence job for a version, given the exact SKILL.md text the version holds."""
+    def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "evaluation.run")
         if self.jobs is None:
             from skillproof.registry import RegistryError
 
             raise RegistryError("evaluation jobs are not enabled on this server")
-        from skillproof.evidence import instructions_fingerprint
-
         version = self.registry.get_version(principal.tenant_id, version_id)
-        payload = {"skill_md": skill_md, "instructions_fingerprint": instructions_fingerprint(skill_md)}
         return self.jobs.enqueue(principal.tenant_id, version_id, version["skill_name"], payload, requested_by=principal.user_id)
 
     def version_jobs(self, principal: Principal, version_id: str) -> list[dict[str, Any]]:
@@ -163,15 +147,8 @@ class GovernanceAccess:
         artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "skill.register")
-        version = self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id,
-                                         artifact_uri=artifact_uri, capability_manifest=capability_manifest)
-        change = version.get("capability_change") or {}
-        if change.get("decision") == "block" and version.get("created_at") == version.get("updated_at"):
-            self.emit(principal.tenant_id, "version.block_level_addition", {
-                "version_id": version["version_id"], "skill_name": version["skill_name"], "counts": change.get("counts"),
-                "against": change.get("against"), "change_hash": change.get("change_hash"),
-                "block_items": [f"{i['category']}: {i['value']}" for i in change.get("items", []) if i["level"] == "block"][:10]})
-        return version
+        return self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id,
+                                      artifact_uri=artifact_uri, capability_manifest=capability_manifest)
 
     def promote_skill(
         self, principal: Principal, version_id: str, assurance_report: dict[str, Any], approval_record: dict[str, Any],
@@ -188,21 +165,15 @@ class GovernanceAccess:
     def rollback_skill(self, principal: Principal, skill_name: str, reason: str) -> dict[str, Any]:
         """Restore the last approved version. The same permission as promotion: it changes what is live."""
         authorize(principal, principal.tenant_id, "skill.promote")
-        version = self.registry.rollback(principal.tenant_id, skill_name, actor_id=principal.user_id, reason=reason)
-        self.emit(principal.tenant_id, "version.rolled_back", {"skill_name": skill_name, "restored_version_id": version["version_id"],
-                                                               "by": principal.user_id, "reason": reason[:500]})
-        return version
+        return self.registry.rollback(principal.tenant_id, skill_name, actor_id=principal.user_id, reason=reason)
 
     def promote_version(self, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
         """Promote using the assurance report stored with the version and the tenant's own approval record."""
         authorize(principal, principal.tenant_id, "skill.promote")
         assurance = self.registry.get_assurance(principal.tenant_id, version_id)
         record = self.approvals.get_request(request_id, tenant_id=principal.tenant_id)
-        version = self.registry.promote(principal.tenant_id, version_id, assurance, record,
-                                        actor_id=principal.user_id, capability_ack=capability_ack)
-        self.emit(principal.tenant_id, "version.promoted", {"version_id": version_id, "skill_name": version["skill_name"],
-                                                            "promoted_by": principal.user_id, "approval_request_id": request_id})
-        return version
+        return self.registry.promote(principal.tenant_id, version_id, assurance, record,
+                                     actor_id=principal.user_id, capability_ack=capability_ack)
 
     def get_skill(self, principal: Principal, version_id: str) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "skill.read")

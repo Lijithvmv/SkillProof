@@ -20,7 +20,7 @@ from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.governance import AssurancePolicy
 from skillproof.ingestion import PackageError
 from skillproof.installed import NAME, family_key, find_skill_dirs
-from skillproof.services import catalogue
+from skillproof.services import alerts, catalogue
 
 # Which agent a skill belongs to, from the folder it was found under. Used only to tell apart skills that share a name.
 SOURCE_LABELS = {
@@ -72,8 +72,8 @@ def check_installed(governance: GovernanceAccess, principal: Principal, roots: l
     import socket
 
     for entry in (e for e in skills if e["status"] == "running_unapproved"):
-        governance.emit(principal.tenant_id, "fleet.running_unapproved", {
-            "skill_name": entry["skill_name"], "host": socket.gethostname(), "installed_fingerprint": entry["installed_fingerprint"],
+        alerts.fleet_unapproved(governance, principal.tenant_id, socket.gethostname(), {
+            "skill_name": entry["skill_name"], "installed_fingerprint": entry["installed_fingerprint"],
             "approved_version_id": entry["approved_version_id"], "adds_over_approved": entry.get("adds_over_approved")})
     return {"method": "installed_vs_approved", "tenant_id": principal.tenant_id, "roots": [str(r) for r in roots],
             "skills_found": len(skills), **counts,

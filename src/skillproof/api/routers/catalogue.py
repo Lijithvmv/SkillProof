@@ -63,7 +63,7 @@ async def register_version(
     version = guarded(lambda: catalogue.register(governance, principal, assessment, artifact_uri=artifact_uri))
     result = {"version": version, "analysis": assessment.report}
     if evaluate:
-        result["job"] = guarded(lambda: governance.request_evaluation(principal, version["version_id"], assessment.skill_md))
+        result["job"] = guarded(lambda: catalogue.request_evaluation(governance, principal, version["version_id"], assessment.skill_md))
     return result
 
 
@@ -124,8 +124,7 @@ class PromoteRequest(BaseModel):
 def registry_promote(version_id: str, body: PromoteRequest, request: Request) -> dict[str, Any]:
     principal = current_principal(request)
     governance = current_governance(request)
-    return guarded(lambda: governance.promote_version(
-        principal, version_id, body.approval_request_id, capability_ack=body.capability_ack))
+    return guarded(lambda: catalogue.promote(governance, principal, version_id, body.approval_request_id, capability_ack=body.capability_ack))
 
 
 class RollbackRequest(BaseModel):
@@ -137,7 +136,7 @@ def registry_rollback(skill_name: str, body: RollbackRequest, request: Request) 
     """Make the last approved version of a skill active again, with the reason in the audit trail."""
     principal = current_principal(request)
     governance = current_governance(request)
-    return guarded(lambda: governance.rollback_skill(principal, skill_name, body.reason))
+    return guarded(lambda: catalogue.rollback(governance, principal, skill_name, body.reason))
 
 
 class FalseAlarmRequest(BaseModel):

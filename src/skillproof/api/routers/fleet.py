@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 
 from fastapi import APIRouter
+from skillproof.services import fleet as fleet_service
 from skillproof.api.deps import current_governance, current_principal, guarded
 
 router = APIRouter()
@@ -29,7 +30,7 @@ def fleet_report(body: FleetReport, request: Request) -> dict[str, Any]:
     """A machine reports the skills installed on it (names and fingerprints only); the server answers with each one's status."""
     principal = current_principal(request)
     governance = current_governance(request)
-    return guarded(lambda: governance.report_fleet(principal, body.host, [s.model_dump() for s in body.skills]))
+    return guarded(lambda: fleet_service.report(governance, principal, body.host, [s.model_dump() for s in body.skills]))
 
 
 @router.get("/api/v1/fleet")

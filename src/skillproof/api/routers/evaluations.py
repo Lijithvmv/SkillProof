@@ -13,6 +13,7 @@ from skillproof import package
 from skillproof.ingestion import PackageError
 
 from fastapi import APIRouter
+from skillproof.services import catalogue
 from skillproof.api.deps import current_governance, current_principal, guarded, require_roles
 
 router = APIRouter()
@@ -38,7 +39,7 @@ async def registry_evaluate(version_id: str, request: Request, file: UploadFile 
         skill_md = package.skill_md(package.as_text(raw))
     else:
         skill_md = _installed_skill_md(version)
-    return guarded(lambda: governance.request_evaluation(principal, version_id, skill_md))
+    return guarded(lambda: catalogue.request_evaluation(governance, principal, version_id, skill_md))
 
 
 def _installed_skill_md(version: dict[str, Any]) -> str:

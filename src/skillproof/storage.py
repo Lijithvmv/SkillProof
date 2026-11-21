@@ -20,18 +20,40 @@ def is_postgres_url(target: str | Path) -> bool:
     return str(target).startswith(("postgresql://", "postgres://"))
 
 
+class _Rows:
+    """Result of a statement run outside a transaction on PostgreSQL: rows are read before the connection goes back to
+    the pool, so the caller can still fetch them."""
+
+    def __init__(self, cursor: Any):
+        self.rowcount = cursor.rowcount
+        self._rows = cursor.fetchall() if cursor.description is not None else []
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[Any]:
+        return list(self._rows)
+
+
 class Database:
+    """One store's database. SQLite: one connection serialised by a lock (SQLite writes one at a time anyway).
+    PostgreSQL: a connection pool; each transaction holds its own connection for its thread, so concurrent requests
+    run in parallel and a statement can never land inside another thread's transaction."""
+
     def __init__(self, target: str | Path):
         self.target = str(target)
         self._lock = threading.RLock()
         if is_postgres_url(self.target):
-            import psycopg2
+            import os
+
             import psycopg2.extras
+            import psycopg2.pool
 
             self.dialect = "postgres"
             self._extras = psycopg2.extras
-            self._connection = psycopg2.connect(self.target)
-            self._connection.autocommit = True
+            self._local = threading.local()
+            size = max(2, int(os.environ.get("SKILLPROOF_DB_POOL_SIZE", "10")))
+            self._pool = psycopg2.pool.ThreadedConnectionPool(1, size, self.target)
         else:
             self.dialect = "sqlite"
             if self.target != ":memory:":
@@ -49,37 +71,69 @@ class Database:
         """Column that breaks ties in insertion order (SQLite's rowid; a sequence column in PostgreSQL)."""
         return "seq" if self.postgres else "rowid"
 
+    @contextmanager
+    def _borrowed(self) -> Iterator[Any]:
+        connection = self._pool.getconn()
+        connection.autocommit = True
+        try:
+            yield connection
+        finally:
+            self._pool.putconn(connection)
+
     def execute(self, sql: str, params: tuple | list = ()) -> Any:
         if self.postgres:
-            cursor = self._connection.cursor(cursor_factory=self._extras.RealDictCursor)
-            cursor.execute(sql.replace("?", "%s"), tuple(params))
-            return cursor
-        return self._connection.execute(sql, tuple(params))
+            sql = sql.replace("?", "%s")
+            current = getattr(self._local, "connection", None)
+            if current is not None:  # inside this thread's transaction
+                cursor = current.cursor(cursor_factory=self._extras.RealDictCursor)
+                cursor.execute(sql, tuple(params))
+                return cursor
+            with self._borrowed() as connection, connection.cursor(cursor_factory=self._extras.RealDictCursor) as cursor:
+                cursor.execute(sql, tuple(params))
+                return _Rows(cursor)
+        with self._lock:
+            return self._connection.execute(sql, tuple(params))
 
     def script(self, sql: str) -> None:
+        if self.postgres:
+            with self._borrowed() as connection, connection.cursor() as cursor:
+                cursor.execute(sql)
+            return
         with self._lock:
-            if self.postgres:
-                with self._connection.cursor() as cursor:
-                    cursor.execute(sql)
-            else:
-                self._connection.executescript(sql)
+            self._connection.executescript(sql)
 
     def columns(self, table: str) -> set[str]:
         if self.postgres:
             rows = self.execute("SELECT column_name FROM information_schema.columns WHERE table_name = ?", (table,)).fetchall()
             return {row["column_name"] for row in rows}
-        return {row[1] for row in self._connection.execute(f"PRAGMA table_info({table})")}
+        with self._lock:
+            return {row[1] for row in self._connection.execute(f"PRAGMA table_info({table})")}
 
     @contextmanager
     def transaction(self, tenant_id: str | None = None, *, write: bool = False) -> Iterator["Database"]:
-        """Run statements as one transaction; in PostgreSQL the tenant is set first so row-level security applies."""
+        """Run statements as one transaction; in PostgreSQL the tenant is set first so row-level security applies.
+        A transaction opened while this thread already holds one joins it."""
+        if self.postgres:
+            if getattr(self._local, "connection", None) is not None:
+                yield self
+                return
+            with self._borrowed() as connection:
+                self._local.connection = connection
+                try:
+                    self.execute("BEGIN" if write else "BEGIN READ ONLY")
+                    if tenant_id is not None:
+                        self.execute("SELECT set_config('skillproof.tenant', ?, true)", (tenant_id,))
+                    try:
+                        yield self
+                    except BaseException:
+                        self.execute("ROLLBACK")
+                        raise
+                    self.execute("COMMIT")
+                finally:
+                    self._local.connection = None
+            return
         with self._lock:
-            if self.postgres:
-                self.execute("BEGIN" if write else "BEGIN READ ONLY")
-                if tenant_id is not None:
-                    self.execute("SELECT set_config('skillproof.tenant', ?, true)", (tenant_id,))
-            else:
-                self.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            self.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 yield self
             except BaseException:
@@ -88,6 +142,9 @@ class Database:
             self.execute("COMMIT")
 
     def close(self) -> None:
+        if self.postgres:
+            self._pool.closeall()
+            return
         with self._lock:
             self._connection.close()
 

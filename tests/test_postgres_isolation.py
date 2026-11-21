@@ -39,3 +39,30 @@ def test_rows_of_another_tenant_are_invisible_and_unwritable(tmp_path):
         role = db.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
     assert role["rolsuper"] is False and role["rolbypassrls"] is False
     registry.close()
+
+
+def test_concurrent_writers_from_many_threads_all_land(tmp_path):
+    # Decision: the service can take parallel requests without one request's statements landing in another's
+    # transaction (the shared-connection design could do that on PostgreSQL).
+    import threading
+
+    from skillproof.registry import SQLiteSkillRegistry
+
+    registry = SQLiteSkillRegistry(tmp_path / "registry.db")
+    errors = []
+
+    def write(n):
+        try:
+            for i in range(5):
+                fingerprint = f"{n:02d}{i:02d}".ljust(64, "a")
+                registry.register(f"tenant-{n % 2}", {"package_fingerprint": fingerprint, "metadata": {"name": f"s{n}"}},
+                                  {"decision": "insufficient_evidence", "automatic_certification": False}, actor_id=f"u{n}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert errors == []
+    for tenant, expected in (("tenant-0", 20), ("tenant-1", 20)):
+        assert sum(len(registry.list_versions(tenant, f"s{n}")) for n in range(8)) == expected

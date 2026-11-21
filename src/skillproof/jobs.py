@@ -10,6 +10,8 @@ reading any tenant's data; it then works inside that job's tenant.
 """
 from __future__ import annotations
 
+from skillproof.errors import Conflict, NotFound
+
 import json
 import uuid
 from datetime import datetime, timezone
@@ -44,8 +46,12 @@ COMMON = """
 """
 
 
-class JobError(ValueError):
+class JobError(Conflict):
     """Invalid job operation."""
+
+
+class JobNotFound(JobError, NotFound):
+    """The job item asked for does not exist in this tenant."""
 
 
 class JobStore:
@@ -119,7 +125,7 @@ class JobStore:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM evaluation_jobs WHERE tenant_id=? AND job_id=?", (tenant_id, job_id)).fetchone()
         if row is None:
-            raise JobError("job not found in this tenant")
+            raise JobNotFound("job not found in this tenant")
         return self._decode(row)
 
     def for_version(self, tenant_id: str, version_id: str) -> list[dict[str, Any]]:

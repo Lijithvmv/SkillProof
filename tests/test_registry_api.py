@@ -296,3 +296,29 @@ def test_rollback_over_the_api_needs_the_promote_role_and_a_reason(client):
     assert done.json()["events"][-1]["action"] == "restored"
     runs = client.get("/api/v1/evaluations/experiments", params={"skill_name": "release-notes"}, headers=as_user("carol", "viewer"))
     assert runs.status_code == 200 and runs.json()["experiments"] == []
+
+
+def test_a_version_approved_by_upload_matches_its_installed_copy(client, tmp_path):
+    # Decision: is the skill on this machine the approved one? Before one package identity, an uploaded version never
+    # matched its own installed folder and was reported as running unapproved forever.
+    from skillproof.catalogue_import import check_installed
+    from skillproof.authorization import Principal
+
+    folder = tmp_path / ".claude" / "skills" / "release-notes"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(SKILL.encode())
+    version = upload(client, SKILL)
+    client.post(f"/api/v1/registry/versions/{version['version_id']}/promote", headers=as_user("bob", "approver"),
+                json={"approval_request_id": approve(client, version["version_id"])})
+    result = check_installed(app.state.governance, Principal(user_id="check", tenant_id="local", role="viewer"), [tmp_path / ".claude"])
+    assert result["approved"] == 1 and result["running_unapproved"] == 0
+
+
+def test_the_folder_name_rule_still_applies_to_a_zipped_folder(client):
+    # Decision: an author is told when the folder name differs from the SKILL.md name, also after packages are rooted.
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("notes-skill/SKILL.md", SKILL)
+    response = client.post("/api/v1/registry/versions", files={"file": ("skill.zip", out.getvalue())}, headers=as_user("alice", "evaluator"))
+    codes = [f["code"] for f in response.json()["analysis"]["findings"]]
+    assert "DIRECTORY_NAME_MISMATCH" in codes

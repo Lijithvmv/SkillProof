@@ -14,7 +14,10 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from skillproof import __version__
+from skillproof import package
+from skillproof.errors import NotFound, SkillProofError
 from skillproof.analyzer import analyze_files
+from skillproof.services import catalogue
 from skillproof.approvals import ApprovalError, SQLiteApprovalStore
 from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal
 from skillproof.capabilities import build_manifest
@@ -223,9 +226,10 @@ def _guarded(call):
         return call()
     except AuthorizationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except (RegistryError, ApprovalError, JobError, NotifyError, FleetError) as exc:
-        status = 404 if "not found" in str(exc) else 409
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SkillProofError as exc:  # every other refusal: conflict with the current state or an invalid request
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class BehaviouralEvidence(BaseModel):
@@ -253,65 +257,27 @@ async def register_version(
     if len(data) > 10_000_000:
         raise HTTPException(status_code=413, detail="ZIP upload exceeds 10 MB.")
     try:
-        raw = read_skill_zip_bytes(data)
-        behaviour = BehaviouralEvidence(**json.loads(evidence_json)) if evidence_json else BehaviouralEvidence()
+        raw = package.read_zip(data)
+        declared = BehaviouralEvidence(**json.loads(evidence_json)).model_dump() if evidence_json else None
     except PackageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"evidence_json is invalid: {exc}") from exc
-    text = {}
-    for path, content in raw.items():
-        try:
-            text[path] = content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text[path] = ""
-    report = analyze_files(text)
-    if report.get("package_fingerprint") is None or not (report.get("metadata") or {}).get("name"):
-        raise HTTPException(status_code=422, detail="The package needs a SKILL.md with a name to be registered.")
-    try:
-        manifest = build_manifest(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    add_second_opinions(manifest, raw)
-    security = report.get("security") or {}
     cited = [e.strip() for e in (experiment_ids or "").split(",") if e.strip()]
     if cited and evidence_json:
         raise HTTPException(status_code=422, detail="Cite experiments or declare evidence, not both.")
-    behaviour_fields = behaviour.model_dump()
-    provenance: dict[str, Any] = {"source": "declared_by_uploader"} if evidence_json else {"source": "none"}
-    if cited:
-        records = _guarded(lambda: governance.list_evaluations(principal, skill_key=report["metadata"]["name"], limit=500))
-        try:
-            skill_md = min((p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"), key=len, default=None)
-            measured = measured_evidence(records, cited, text.get(skill_md, "") if skill_md else "")
-        except EvidenceError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        provenance = measured.pop("provenance")
-        behaviour_fields = measured
-    evidence = AssuranceInput(
-        structural_score=report.get("structural_score"),
-        instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
-        security_score=security.get("security_score"),
-        security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
-        **behaviour_fields,
-        **_capability_inputs(_guarded(lambda: governance.preview_change(principal, report["metadata"]["name"], manifest))),
-    )
-    assurance_report = assess_version(evidence, _guarded(lambda: governance.tenant_policy(principal)))
-    assurance_report["evidence"] = provenance
-    # Bind the report to this exact package so an approval of one version can never promote another.
-    assurance_report["subject"] = {"tenant_id": principal.tenant_id, "skill_name": report["metadata"]["name"],
-                                   "package_fingerprint": report["package_fingerprint"]}
-    version = _guarded(lambda: governance.register_skill(
-        principal, report, assurance_report, artifact_uri=artifact_uri, capability_manifest=manifest))
-    result = {"version": version, "analysis": report}
+    try:
+        assessment = _guarded(lambda: catalogue.assess_package(governance, principal, raw, declared=declared, cite=cited,
+                                                               folder=package.zip_folder(data)))
+    except EvidenceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:  # no SKILL.md name, or a package the engine cannot read
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    version = _guarded(lambda: catalogue.register(governance, principal, assessment, artifact_uri=artifact_uri))
+    result = {"version": version, "analysis": assessment.report}
     if evaluate:
-        skill_md = min((p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"), key=len)
-        result["job"] = _guarded(lambda: governance.request_evaluation(principal, version["version_id"], text[skill_md]))
+        result["job"] = _guarded(lambda: governance.request_evaluation(principal, version["version_id"], assessment.skill_md))
     return result
-
-
-def _capability_inputs(change: dict[str, Any]) -> dict[str, Any]:
-    return {"capability_decision": change["decision"], "capability_counts": change["counts"]}
 
 
 @app.get("/api/v1/policy")
@@ -407,13 +373,12 @@ async def registry_evaluate(version_id: str, request: Request, file: UploadFile 
         if len(data) > 10_000_000:
             raise HTTPException(status_code=413, detail="ZIP upload exceeds 10 MB.")
         try:
-            text = read_skill_zip(data)
+            raw = package.read_zip(data)
         except PackageError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if analyze_files(text).get("package_fingerprint") != version["package_fingerprint"]:
+        if package.fingerprint(raw) != version["package_fingerprint"]:
             raise HTTPException(status_code=409, detail="The uploaded package is not this version.")
-        paths = [p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"]
-        skill_md = text[min(paths, key=len)] if paths else ""
+        skill_md = package.skill_md(package.as_text(raw))
     else:
         skill_md = _installed_skill_md(version)
     return _guarded(lambda: governance.request_evaluation(principal, version_id, skill_md))
@@ -423,20 +388,18 @@ def _installed_skill_md(version: dict[str, Any]) -> str:
     """SKILL.md of an imported version, read from its folder after checking the folder is still that version."""
     from urllib.parse import unquote, urlparse
 
-    from skillproof.catalogue_import import _package
-
     uri = version.get("artifact_uri") or ""
     if not uri.startswith("file:"):
         raise HTTPException(status_code=422, detail="Upload this version's ZIP to evaluate it (no local folder is known).")
     path = unquote(urlparse(uri).path)
     folder = Path(path[1:] if re.match(r"^/[A-Za-z]:", path) else path)
     try:
-        files, _, fingerprint = _package(folder)
-    except OSError as exc:
+        files, oversize = package.read_folder(folder)
+    except (OSError, PackageError) as exc:
         raise HTTPException(status_code=422, detail=f"The installed folder cannot be read: {exc}") from exc
-    if fingerprint != version["package_fingerprint"]:
+    if package.fingerprint(files, oversize) != version["package_fingerprint"]:
         raise HTTPException(status_code=409, detail="The installed folder has changed since this version was registered.")
-    return files.get("SKILL.md", b"").decode("utf-8-sig")
+    return package.skill_md(package.as_text(files))
 
 
 @app.get("/api/v1/registry/versions/{version_id}/jobs")

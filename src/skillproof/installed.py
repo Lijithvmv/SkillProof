@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from skillproof import package
 from skillproof.capabilities import build_manifest, diff_manifests
 from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, PackageError
 from skillproof.triage import triage
@@ -52,32 +53,13 @@ def find_skill_dirs(roots: list[Path]) -> list[Path]:
 
 
 def _read_installed(skill_dir: Path) -> tuple[dict[str, bytes], dict[str, str]]:
-    """Like read_package_bytes, but an oversized file does not hide the rest of the skill: it is fingerprinted and
-    listed as not scanned. On one machine 9 of 195 installed skills held a file over the limit (Office templates,
-    and a 2 MB+ JavaScript file), and the strict reader dropped those skills entirely."""
-    files: dict[str, bytes] = {}
-    oversize: dict[str, str] = {}
-    for item in sorted(skill_dir.rglob("*")):
-        relative = item.relative_to(skill_dir)
-        if SKIP_PARTS.intersection(relative.parts) or item.is_symlink() or not item.is_file():
-            continue
-        name = relative.as_posix()
-        if item.stat().st_size > MAX_FILE_SIZE:
-            oversize[name] = hashlib.sha256(item.read_bytes()).hexdigest()
-            continue
-        files[name] = item.read_bytes()
-        if len(files) > MAX_FILES:
-            raise PackageError(f"more than {MAX_FILES} files; not a single skill folder")
-    return files, oversize
+    """Files of an installed skill and those too large to read (see package.read_folder). An oversized file does not
+    hide the rest of the skill: on one machine 9 of 195 installed skills held a file over the limit."""
+    return package.read_folder(skill_dir)
 
 
 def _snapshot(skill_dir: Path) -> dict[str, Any]:
     files, oversize = _read_installed(skill_dir)
-    digest = hashlib.sha256()
-    for name in sorted(files):
-        digest.update(name.encode() + b"\0" + files[name])
-    for name in sorted(oversize):  # a change inside an unscanned file still changes the fingerprint
-        digest.update(name.encode() + b"\0" + oversize[name].encode())
     manifest = build_manifest(files)
     manifest["not_scanned"] = sorted(oversize)
     text = files.get("SKILL.md", b"").decode("utf-8", "replace")
@@ -85,7 +67,7 @@ def _snapshot(skill_dir: Path) -> dict[str, Any]:
     return {
         "path": str(skill_dir),
         "name": match.group(1).strip() if match else skill_dir.name,
-        "fingerprint": digest.hexdigest(),
+        "fingerprint": package.fingerprint(files, oversize),
         "mtime": (skill_dir / "SKILL.md").stat().st_mtime,
         "manifest": manifest,
     }

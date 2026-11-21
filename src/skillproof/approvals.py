@@ -5,6 +5,8 @@ must pass the authenticated principal identifier as submitter_id/actor_id.
 """
 from __future__ import annotations
 
+from skillproof.errors import Conflict, NotFound
+
 import hashlib
 import json
 import uuid
@@ -69,8 +71,12 @@ POSTGRES_SCHEMA = """
 ) + append_only("approval_events", "approval events are append-only")
 
 
-class ApprovalError(ValueError):
+class ApprovalError(Conflict):
     """Invalid approval workflow operation."""
+
+
+class ApprovalNotFound(ApprovalError, NotFound):
+    """The approval item asked for does not exist in this tenant."""
 
 
 class ApprovalStore:
@@ -130,7 +136,7 @@ class ApprovalStore:
         with self.db.transaction(tenant_id, write=True) as db:
             row = db.execute("SELECT * FROM approval_requests WHERE request_id = ? AND tenant_id = ?", (request_id, tenant_id)).fetchone()
             if row is None:
-                raise ApprovalError("approval request not found")
+                raise ApprovalNotFound("approval request not found")
             if row["state"] != "pending_review":
                 raise ApprovalError("approval request is already in a terminal state")
             if row["submitter_id"] == actor_id:
@@ -149,7 +155,7 @@ class ApprovalStore:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM approval_requests WHERE request_id = ? AND tenant_id = ?", (request_id, tenant_id)).fetchone()
             if row is None:
-                raise ApprovalError("approval request not found")
+                raise ApprovalNotFound("approval request not found")
             events = db.execute(
                 "SELECT actor_id, action, comment, occurred_at FROM approval_events WHERE request_id = ? ORDER BY event_id",
                 (request_id,),

@@ -14,7 +14,6 @@ skills-manager project and has not been validated here, so treat overlaps as can
 """
 from __future__ import annotations
 
-import hashlib
 import itertools
 import math
 import re
@@ -23,6 +22,7 @@ from typing import Any
 
 import yaml
 
+from skillproof import package
 from skillproof.capabilities import read_package_bytes
 from skillproof.ingestion import PackageError
 
@@ -56,10 +56,7 @@ def _metadata(skill_md: Path) -> dict[str, str]:
 
 
 def _fingerprint(directory: Path) -> str:
-    digest = hashlib.sha256()
-    for name, content in sorted(read_package_bytes(directory).items()):
-        digest.update(name.encode("utf-8") + b"\0" + content + b"\0")
-    return digest.hexdigest()
+    return package.fingerprint(read_package_bytes(directory))  # the catalogue's package identity
 
 
 def _terms(text: str) -> set[str]:

@@ -16,10 +16,10 @@ from typing import Any, Callable
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.checks import CheckedEvaluator
 from skillproof.conformance import adherence, extract_claims
-from skillproof.evidence import instructions_fingerprint, measured_evidence
+from skillproof.evidence import instructions_fingerprint
 from skillproof.execution import execute_experiment
-from skillproof.governance import reassess_with_runs
 from skillproof.jobs import JobStore
+from skillproof.services import catalogue
 from skillproof.templates import generate_benchmark
 
 
@@ -76,20 +76,15 @@ def run_job(governance: GovernanceAccess, tenant_id: str, job: dict[str, Any], s
               "broken_claims": [c["claim"] for c in comparison["adherence"]["broken_with_skill"]],
               "failures": experiment["failure_counts"]}
     version = governance.get_skill(worker, job["version_id"])
-    if version["state"] not in {"pending_review", "not_eligible"}:
-        result["assurance"] = f"not reassessed: the version is {version['state']} and keeps the report it was approved on"
-        return result
-    records = governance.list_evaluations(worker, skill_key=job["skill_name"], limit=500)
-    cited = [r["experiment_id"] for r in records if r["instructions_fingerprint"] == instructions_fingerprint(skill_md)]
-    measured = measured_evidence(records, cited, skill_md)
-    provenance = measured.pop("provenance")
     try:
-        report = reassess_with_runs(version["assurance"], measured, provenance, governance.tenant_policy(worker))
+        updated = catalogue.reassess_on_runs(governance, worker, version, skill_md)
     except ValueError as exc:
         result["assurance"] = f"not reassessed: {exc}"
         return result
-    updated = governance.reassess_skill(worker, job["version_id"], report)
-    result["assurance"] = report["decision"]
+    if updated is None:
+        result["assurance"] = f"not reassessed: the version is {version['state']} and keeps the report it was approved on"
+        return result
+    result["assurance"] = updated["assurance"]["decision"]
     result["state"] = updated["state"]
     return result
 

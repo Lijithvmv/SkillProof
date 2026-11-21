@@ -14,6 +14,8 @@ deliverer finds due work without reading tenant content.
 """
 from __future__ import annotations
 
+from skillproof.errors import Conflict, NotFound
+
 import hashlib
 import hmac
 import ipaddress
@@ -66,8 +68,12 @@ SCHEMA = """
 """
 
 
-class NotifyError(ValueError):
+class NotifyError(Conflict):
     """Invalid webhook or notification operation."""
+
+
+class NotifyNotFound(NotifyError, NotFound):
+    """The notify item asked for does not exist in this tenant."""
 
 
 def _now() -> datetime:
@@ -139,7 +145,7 @@ class NotificationStore:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM webhooks WHERE tenant_id=? AND webhook_id=?", (tenant_id, webhook_id)).fetchone()
         if row is None:
-            raise NotifyError("webhook not found in this tenant")
+            raise NotifyNotFound("webhook not found in this tenant")
         return {"webhook_id": row["webhook_id"], "url": row["url"], "events": json.loads(row["events_json"]),
                 "created_by": row["created_by"], "created_at": row["created_at"]}
 
@@ -151,7 +157,7 @@ class NotificationStore:
     def remove_webhook(self, tenant_id: str, webhook_id: str) -> None:
         with self.db.transaction(tenant_id, write=True) as db:
             if db.execute("DELETE FROM webhooks WHERE tenant_id=? AND webhook_id=?", (tenant_id, webhook_id)).rowcount == 0:
-                raise NotifyError("webhook not found in this tenant")
+                raise NotifyNotFound("webhook not found in this tenant")
 
     # ---------------------------------------------------------------------------------------------- events
     def emit(self, tenant_id: str, event: str, payload: dict[str, Any]) -> int:

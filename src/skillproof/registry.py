@@ -10,6 +10,8 @@ artifact_uri through its own object store. Package bytes are not stored here.
 """
 from __future__ import annotations
 
+from skillproof.errors import Conflict, NotFound
+
 import hashlib
 import json
 import re
@@ -23,8 +25,12 @@ from skillproof.storage import Database, append_only, tenant_policy
 from skillproof.triage import LEVELS, triage
 
 
-class RegistryError(ValueError):
+class RegistryError(Conflict):
     """Invalid registry operation."""
+
+
+class RegistryNotFound(RegistryError, NotFound):
+    """The registry item asked for does not exist in this tenant."""
 
 
 EMPTY_MANIFEST: dict[str, Any] = {"capabilities": {}, "scopes": {}}
@@ -244,7 +250,7 @@ class SkillRegistry:
         with self.db.transaction(tenant_id, write=True) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
-                raise RegistryError("skill version not found in this tenant")
+                raise RegistryNotFound("skill version not found in this tenant")
             if row["state"] not in {"pending_review", "not_eligible"}:
                 raise RegistryError(f"a {row['state']} version keeps the assurance report it was approved on")
             subject = assurance_report.get("subject") or {}
@@ -338,7 +344,7 @@ class SkillRegistry:
         with self.db.transaction(tenant_id, write=True) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
-                raise RegistryError("skill version not found in this tenant")
+                raise RegistryNotFound("skill version not found in this tenant")
             if row["state"] != "pending_review":
                 raise RegistryError(f"version cannot be promoted from state '{row['state']}'")
             if row["assurance_hash"] != _canonical_hash(assurance_report):
@@ -474,7 +480,7 @@ class SkillRegistry:
         with self.db.transaction(tenant_id, write=True) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
-                raise RegistryError("skill version not found in this tenant")
+                raise RegistryNotFound("skill version not found in this tenant")
             if row["registered_by"] == actor_id:
                 raise RegistryError("the person who registered a version cannot mark its alarms as false")
             change = json.loads(row["change_json"]) if row["change_json"] else None
@@ -538,7 +544,7 @@ class SkillRegistry:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT assurance_json FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
         if row is None:
-            raise RegistryError("skill version not found in this tenant")
+            raise RegistryNotFound("skill version not found in this tenant")
         if not row["assurance_json"]:
             raise RegistryError("this version was registered before assurance reports were stored")
         return json.loads(row["assurance_json"])
@@ -564,7 +570,7 @@ class SkillRegistry:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
-                raise RegistryError("skill version not found in this tenant")
+                raise RegistryNotFound("skill version not found in this tenant")
             return self._decode(row)
 
     def list_versions(self, tenant_id: str, skill_name: str) -> list[dict[str, Any]]:

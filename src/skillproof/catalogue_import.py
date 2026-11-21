@@ -15,13 +15,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from skillproof.analyzer import analyze_files
+from skillproof import package
 from skillproof.authorization import GovernanceAccess, Principal
-from skillproof.capabilities import PackageError, build_manifest
-from skillproof.evidence import instructions_fingerprint, measured_evidence
-from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version
-from skillproof.second_opinion import add_second_opinions
-from skillproof.installed import NAME, _read_installed, family_key, find_skill_dirs
+from skillproof.governance import AssurancePolicy
+from skillproof.ingestion import PackageError
+from skillproof.installed import NAME, family_key, find_skill_dirs
+from skillproof.services import catalogue
 
 # Which agent a skill belongs to, from the folder it was found under. Used only to tell apart skills that share a name.
 SOURCE_LABELS = {
@@ -35,13 +34,9 @@ def source_label(root: Path) -> str:
 
 
 def _package(skill_dir: Path) -> tuple[dict[str, bytes], dict[str, str], str]:
-    files, oversize = _read_installed(skill_dir)
-    digest = hashlib.sha256()
-    for name in sorted(files):
-        digest.update(name.encode() + b"\0" + files[name])
-    for name in sorted(oversize):  # a change inside an unscanned file still changes the fingerprint
-        digest.update(name.encode() + b"\0" + oversize[name].encode())
-    return files, oversize, digest.hexdigest()
+    """Files, files too large to read, and the canonical package fingerprint of an installed skill folder."""
+    files, oversize = package.read_folder(skill_dir)
+    return files, oversize, package.fingerprint(files, oversize)
 
 
 def _skill_name(files: dict[str, bytes], skill_dir: Path) -> str:
@@ -133,49 +128,34 @@ def import_installed(
     for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
         root, skill_dir = families[key]
         files, oversize, fingerprint = packages[key]
-        text = {}
-        for path, raw in files.items():
-            try:
-                text[path] = raw.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                text[path] = ""
-        # Run evidence recorded for this exact SKILL.md (skillproof evaluate-skill) is cited automatically.
-        skill_md = text.get("SKILL.md", "")
-        records = governance.list_evaluations(principal, skill_key=name, limit=500)
-        cited = [r["experiment_id"] for r in records if r["instructions_fingerprint"] == instructions_fingerprint(skill_md)]
         existing = next((v for v in known.setdefault(name, governance.list_skill_versions(principal, name))
                          if v["package_fingerprint"] == fingerprint), None)
         if existing is not None:
-            unchanged += 1  # checked before any analysis, so a re-run only reads and hashes the folders
+            unchanged += 1  # recognised by its fingerprint before any analysis
+            skill_md = package.skill_md(package.as_text(files))
+            _, matching = catalogue.runs_for(governance, principal, name, skill_md)
             had = set(((existing.get("assurance") or {}).get("evidence") or {}).get("experiment_ids") or [])
-            if not set(cited) - had:
+            if not set(matching) - had:
                 continue
-            if existing["state"] in {"pending_review", "not_eligible"}:
-                # Runs recorded after registration: the version waiting for a decision is assessed again on them.
-                report = _report(text, fingerprint, name)
-                change = existing.get("capability_change") or {}
-                assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy, change)
-                version = governance.reassess_skill(principal, existing["version_id"], assurance)
+            # Runs recorded after registration: a version waiting for a decision is assessed again on them; an approved
+            # version keeps the report it was approved on and the new runs are listed for the reviewer.
+            version = catalogue.reassess_on_runs(governance, principal, existing, skill_md, policy)
+            if version is not None:
                 reassessed.append({"skill_name": name, "version_id": version["version_id"], "state": version["state"],
-                                   "assurance_decision": assurance["decision"], "experiments": sorted(cited)})
+                                   "assurance_decision": version["assurance"]["decision"], "experiments": sorted(matching)})
             else:
-                # An approved version keeps the report it was approved on; new evidence is listed for the reviewer.
                 evidence_not_attached.append({"skill_name": name, "version_id": existing["version_id"],
-                                              "state": existing["state"], "experiments": sorted(set(cited) - had)})
+                                              "state": existing["state"], "experiments": sorted(set(matching) - had)})
             continue
-        report = _report(text, fingerprint, name)
-        manifest = build_manifest(files)
-        add_second_opinions(manifest, files)
-        manifest["not_scanned"] = sorted(oversize)
-        change = governance.preview_change(principal, name, manifest)
-        assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy, change)
-        provenance = assurance["evidence"]
-        version = governance.register_skill(principal, report, assurance, artifact_uri=skill_dir.as_uri(), capability_manifest=manifest)
+        assessment = catalogue.assess_package(governance, principal, files, oversize=oversize, name=name,
+                                              folder=skill_dir.name, cite_all_runs=True, policy=policy)
+        version = catalogue.register(governance, principal, assessment, artifact_uri=skill_dir.as_uri())
         change = version["capability_change"] or {}
         registered.append({
             "skill_name": name, "version_id": version["version_id"], "path": str(skill_dir),
             "against": change.get("against"), "decision": change.get("decision"), "counts": change.get("counts"),
-            "state": version["state"], "assurance_decision": assurance["decision"], "evidence": provenance.get("source"),
+            "state": version["state"], "assurance_decision": assessment.assurance["decision"],
+            "evidence": assessment.assurance["evidence"].get("source"),
         })
     updates = [r for r in registered if r["against"] != "nothing_active"]
     return {
@@ -199,32 +179,3 @@ def import_installed(
                        "import has no earlier version to compare with, so every capability a skill has counts as added.",
     }
 
-
-def _report(text: dict[str, str], fingerprint: str, name: str) -> dict[str, Any]:
-    report = analyze_files(text)
-    report["package_fingerprint"] = fingerprint
-    report["metadata"] = dict(report.get("metadata") or {}, name=name)
-    return report
-
-
-def _assurance(report: dict[str, Any], records: list[dict[str, Any]], cited: list[str], skill_md: str,
-               principal: Principal, name: str, fingerprint: str, policy: AssurancePolicy,
-               change: dict[str, Any] | None = None) -> dict[str, Any]:
-    behaviour: dict[str, Any] = {}
-    provenance: dict[str, Any] = {"source": "none"}
-    if cited:
-        measured = measured_evidence(records, cited, skill_md)
-        provenance = measured.pop("provenance")
-        behaviour = measured
-    security = report.get("security") or {}
-    assurance = assess_version(AssuranceInput(
-        structural_score=report.get("structural_score"),
-        instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
-        security_score=security.get("security_score"),
-        security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
-        capability_decision=(change or {}).get("decision"), capability_counts=(change or {}).get("counts"),
-        **behaviour,
-    ), policy)
-    assurance["evidence"] = provenance
-    assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": name, "package_fingerprint": fingerprint}
-    return assurance

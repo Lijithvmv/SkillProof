@@ -8,6 +8,8 @@ the `fleet.running_unapproved` alert. Tables have tenant row-level security.
 """
 from __future__ import annotations
 
+from skillproof.errors import Conflict, NotFound
+
 import json
 import re
 from datetime import datetime, timezone
@@ -32,8 +34,12 @@ FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 MAX_SKILLS = 2000
 
 
-class FleetError(ValueError):
+class FleetError(Conflict):
     """Invalid fleet report."""
+
+
+class FleetNotFound(FleetError, NotFound):
+    """The fleet item asked for does not exist in this tenant."""
 
 
 class FleetStore:

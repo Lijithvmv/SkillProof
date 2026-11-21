@@ -24,3 +24,16 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Test
         run: python -m pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service image
+        run: docker build -t skillproof:ci .
+      - name: Image starts and answers its health check
+        run: |
+          mkdir -p ci-config && printf '[server]\nhost = "0.0.0.0"\nport = 8045\n[storage]\ndata_dir = "/data"\n' > ci-config/skillproof.toml
+          docker run -d --name sp -p 8045:8045 -v "$PWD/ci-config:/config:ro" skillproof:ci
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8045/health/ready && exit 0; sleep 2; done
+          docker logs sp; exit 1

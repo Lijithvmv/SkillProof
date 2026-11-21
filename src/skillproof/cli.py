@@ -165,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
 
     serve_cmd = commands.add_parser("serve", help="Run the API from a configuration file (storage, sign-in, scheduled backups).")
     serve_cmd.add_argument("--config", required=True)
+    migrate_cmd = commands.add_parser("migrate", help="Apply pending schema steps to every store, then exit. Run it with a schema-owning role before starting a service that runs with SKILLPROOF_SCHEMA=verify.")
+    migrate_cmd.add_argument("--config", required=True)
+    migrate_cmd.add_argument("--output", default="-")
     backup_cmd = commands.add_parser("backup", help="Back up the catalogue, approvals and history now (consistent copy, hashed manifest, retention).")
     backup_cmd.add_argument("--config", required=True)
     backup_cmd.add_argument("--output", default="-")
@@ -332,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
         except ServiceError as exc:
             print(json.dumps({"error": str(exc)}), file=sys.stderr)
             return 4
+    elif args.command == "migrate":
+        from skillproof.service import ServiceError, load_config, migrate_all
+        try:
+            result, exit_code = migrate_all(load_config(args.config)), 0
+        except (OSError, ValueError, ServiceError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
     elif args.command in {"backup", "restore"}:
         from skillproof.service import ServiceError, backup, load_config, restore
         try:

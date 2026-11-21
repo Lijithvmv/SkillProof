@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skillproof.storage import Database, tenant_policy
+from skillproof.storage import Database, migrate, tenant_policy
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS fleet_hosts (
@@ -45,7 +45,7 @@ class FleetNotFound(FleetError, NotFound):
 class FleetStore:
     def __init__(self, database: str | Path):
         self.db = Database(database)
-        self.db.script(SCHEMA + (tenant_policy("fleet_hosts") if self.db.postgres else ""))
+        migrate(self.db, "fleet", [(1, "latest report per machine", SCHEMA, SCHEMA + tenant_policy("fleet_hosts"))])
 
     def record(self, tenant_id: str, host: str, skills: list[dict[str, Any]], *, reported_by: str) -> dict[str, Any]:
         if not HOST.match(host or ""):

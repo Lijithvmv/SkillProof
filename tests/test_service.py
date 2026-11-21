@@ -118,3 +118,20 @@ def test_postgres_backup_uses_pg_dump(tmp_path):
     path.write_text(f'[storage]\ndatabase_url = "{PG_URL}"\n[backup]\ndir = "b"\npg_dump = "{pg_dump.as_posix()}"\n', encoding="utf-8")
     result = backup(load_config(path))
     assert result["kind"] == "postgres" and result["files"]["skillproof.dump"]["bytes"] > 0
+
+
+def test_schema_steps_are_recorded_once_and_verify_mode_refuses_a_stale_schema(tmp_path, monkeypatch):
+    # Decision: whether a service may start on a database whose schema is behind the code.
+    import pytest
+
+    from skillproof.storage import Database, SchemaError, migrate
+
+    db = Database(tmp_path / "x.db")
+    steps = [(1, "table a", "CREATE TABLE IF NOT EXISTS a (id TEXT)", "CREATE TABLE IF NOT EXISTS a (id TEXT)")]
+    assert migrate(db, "x", steps) == [1] and migrate(db, "x", steps) == []
+    steps.append((2, "table b", "CREATE TABLE IF NOT EXISTS b (id TEXT)", "CREATE TABLE IF NOT EXISTS b (id TEXT)"))
+    monkeypatch.setenv("SKILLPROOF_SCHEMA", "verify")
+    with pytest.raises(SchemaError, match=r"\[2\]"):
+        migrate(db, "x", steps)
+    monkeypatch.setenv("SKILLPROOF_SCHEMA", "apply")
+    assert migrate(db, "x", steps) == [2]

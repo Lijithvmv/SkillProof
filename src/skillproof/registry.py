@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from skillproof.capabilities import diff_manifests
-from skillproof.storage import Database, append_only, tenant_policy
+from skillproof.storage import Database, add_columns, append_only, migrate, tenant_policy
 from skillproof.triage import LEVELS, triage
 
 
@@ -160,6 +160,13 @@ POSTGRES_SCHEMA = """
     "registry_events", "registry events are append-only")
 
 
+MIGRATIONS = [
+    (1, "versions, events, false alarms, tenant policies", SQLITE_SCHEMA, POSTGRES_SCHEMA),
+    (2, "assurance report, capability manifest and change per version",
+     add_columns("skill_versions", {"assurance_json": "TEXT", "capabilities_json": "TEXT", "change_json": "TEXT"}), "SELECT 1"),
+]
+
+
 def _canonical_hash(value: dict[str, Any]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -169,14 +176,7 @@ class SkillRegistry:
     def __init__(self, database: str | Path):
         self.database = str(database)
         self.db = Database(database)
-        if self.db.postgres:
-            self.db.script(POSTGRES_SCHEMA)
-        else:
-            self.db.script(SQLITE_SCHEMA)
-            columns = self.db.columns("skill_versions")
-            for column in ("assurance_json", "capabilities_json", "change_json"):
-                if column not in columns:
-                    self.db.execute(f"ALTER TABLE skill_versions ADD COLUMN {column} TEXT")
+        migrate(self.db, "registry", MIGRATIONS)
 
     @staticmethod
     def _now() -> str:

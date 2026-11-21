@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skillproof.storage import Database, tenant_policy
+from skillproof.storage import Database, migrate, tenant_policy
 
 STATES = ("queued", "running", "done", "failed")
 COMMON = """
@@ -57,7 +57,7 @@ class JobNotFound(JobError, NotFound):
 class JobStore:
     def __init__(self, database: str | Path):
         self.db = Database(database)
-        self.db.script(COMMON + (tenant_policy("evaluation_jobs") if self.db.postgres else ""))
+        migrate(self.db, "jobs", [(1, "evaluation jobs and id-only queue", COMMON, COMMON + tenant_policy("evaluation_jobs"))])
 
     @staticmethod
     def _now() -> str:

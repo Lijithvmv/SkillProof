@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from skillproof.storage import Database, append_only, tenant_policy
+from skillproof.storage import Database, add_columns, append_only, migrate, tenant_policy
 
 ApprovalAction = Literal["approve", "reject", "request_changes"]
 TARGET_STATE = {"approve": "approved", "reject": "rejected", "request_changes": "changes_requested"}
@@ -71,6 +71,17 @@ POSTGRES_SCHEMA = """
 ) + append_only("approval_events", "approval events are append-only")
 
 
+def _tenant_column(db: Database) -> None:
+    add_columns("approval_requests", {"tenant_id": "TEXT NOT NULL DEFAULT 'default'"})(db)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant ON approval_requests(tenant_id, request_id)")
+
+
+MIGRATIONS = [
+    (1, "approval requests and append-only events", SQLITE_SCHEMA, POSTGRES_SCHEMA),
+    (2, "tenant per approval request", _tenant_column, "SELECT 1"),
+]
+
+
 class ApprovalError(Conflict):
     """Invalid approval workflow operation."""
 
@@ -85,13 +96,7 @@ class ApprovalStore:
     def __init__(self, database: str | Path):
         self.database = str(database)
         self.db = Database(database)
-        if self.db.postgres:
-            self.db.script(POSTGRES_SCHEMA)
-        else:
-            self.db.script(SQLITE_SCHEMA)
-            if "tenant_id" not in self.db.columns("approval_requests"):
-                self.db.execute("ALTER TABLE approval_requests ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
-            self.db.execute("CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant ON approval_requests(tenant_id, request_id)")
+        migrate(self.db, "approvals", MIGRATIONS)
 
     @staticmethod
     def _now() -> str:

@@ -181,6 +181,25 @@ def _backup_loop(config: dict[str, Any], hours: float, stop: threading.Event) ->
             print(json.dumps({"event": "backup_failed", "error": str(exc)}), file=sys.stderr, flush=True)
 
 
+def migrate_all(config: dict[str, Any]) -> dict[str, Any]:
+    """Open every store with migrations allowed (applying pending steps), then report each store's applied versions."""
+    apply_config(config)
+    os.environ["SKILLPROOF_SCHEMA"] = "apply"
+    from skillproof.api.main import governance_from_environment
+
+    governance = governance_from_environment()
+    if governance is None:
+        raise ServiceError("no storage configured")
+    stores = {"registry": governance.registry.db, "approvals": governance.approvals.db, "history": governance.history.db,
+              "jobs": governance.jobs.db, "notify": governance.notifications.db, "fleet": governance.fleet.db}
+    report = {}
+    for name, db in stores.items():
+        rows = db.execute("SELECT version FROM schema_migrations WHERE store = ? ORDER BY version", (name,)).fetchall()
+        report[name] = [row["version"] for row in rows]
+        db.close()
+    return {"schema": report}
+
+
 def serve(config: dict[str, Any]) -> None:
     apply_config(config)
     import uvicorn

@@ -149,6 +149,48 @@ class Database:
             self._connection.close()
 
 
+Step = tuple  # (version: int, description: str, sqlite: str | callable(db), postgres: str | callable(db))
+
+
+class SchemaError(RuntimeError):
+    """The database schema is behind the code and this process is not allowed to migrate it."""
+
+
+def migrate(db: Database, store: str, steps: list[Step]) -> list[int]:
+    """Bring one store's schema up to date, recording every applied step in `schema_migrations`.
+
+    SKILLPROOF_SCHEMA=apply (default) applies pending steps at start; =verify refuses to start while any step is
+    pending, for deployments where `skillproof migrate` runs separately with a schema-owning role and the service role
+    has no CREATE privilege. Steps are applied in version order; a step is never applied twice."""
+    import os
+    from datetime import datetime, timezone
+
+    db.script("CREATE TABLE IF NOT EXISTS schema_migrations (store TEXT NOT NULL, version INTEGER NOT NULL, "
+              "description TEXT NOT NULL, applied_at TEXT NOT NULL, PRIMARY KEY (store, version))")
+    applied = {row["version"] for row in db.execute("SELECT version FROM schema_migrations WHERE store = ?", (store,)).fetchall()}
+    pending = [s for s in sorted(steps, key=lambda s: s[0]) if s[0] not in applied]
+    if pending and os.environ.get("SKILLPROOF_SCHEMA", "apply").lower() == "verify":
+        raise SchemaError(f"{store}: schema steps {[s[0] for s in pending]} are not applied; run `skillproof migrate`")
+    done = []
+    for version, description, sqlite_step, postgres_step in pending:
+        step = postgres_step if db.postgres else sqlite_step
+        step(db) if callable(step) else db.script(step)
+        db.execute("INSERT INTO schema_migrations (store, version, description, applied_at) VALUES (?, ?, ?, ?)",
+                   (store, version, description, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+        done.append(version)
+    return done
+
+
+def add_columns(table: str, columns: dict[str, str]) -> Any:
+    """A migration step adding columns that may already exist (databases created before migrations were recorded)."""
+    def step(db: Database) -> None:
+        present = db.columns(table)
+        for name, definition in columns.items():
+            if name not in present:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    return step
+
+
 def tenant_policy(table: str, condition: str = "tenant_id = current_setting('skillproof.tenant', true)") -> str:
     """PostgreSQL DDL: row-level security on a table, enforced for every role including the owner."""
     return (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; ALTER TABLE {table} FORCE ROW LEVEL SECURITY; "

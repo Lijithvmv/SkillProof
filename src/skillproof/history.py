@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skillproof.storage import Database, append_only, tenant_policy
+from skillproof.storage import Database, append_only, migrate, tenant_policy
 
 SQLITE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS evaluation_history (
@@ -57,7 +57,7 @@ class EvaluationHistoryStore:
     def __init__(self, database: str | Path):
         self.database = str(database)
         self.db = Database(database)
-        self.db.script(POSTGRES_SCHEMA if self.db.postgres else SQLITE_SCHEMA)
+        migrate(self.db, "history", [(1, "append-only evaluation history", SQLITE_SCHEMA, POSTGRES_SCHEMA)])
 
     @staticmethod
     def _valid_fingerprint(value: Any) -> bool:

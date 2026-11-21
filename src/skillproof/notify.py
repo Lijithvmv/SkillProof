@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from skillproof.storage import Database, tenant_policy
+from skillproof.storage import Database, migrate, tenant_policy
 
 EVENTS = ("version.block_level_addition", "version.promoted", "version.rolled_back", "evaluation.finished",
           "evaluation.failed", "fleet.running_unapproved")
@@ -125,8 +125,8 @@ def post(url: str, body: bytes, headers: dict[str, str], timeout: float = 10) ->
 class NotificationStore:
     def __init__(self, database: str | Path):
         self.db = Database(database)
-        extra = (tenant_policy("webhooks") + tenant_policy("notifications")) if self.db.postgres else ""
-        self.db.script(SCHEMA + extra)
+        migrate(self.db, "notify", [(1, "webhooks, notifications and id-only delivery queue", SCHEMA,
+                                     SCHEMA + tenant_policy("webhooks") + tenant_policy("notifications"))])
 
     # ---------------------------------------------------------------------------------------------- webhooks
     def add_webhook(self, tenant_id: str, url: str, events: list[str], *, actor_id: str) -> dict[str, Any]:

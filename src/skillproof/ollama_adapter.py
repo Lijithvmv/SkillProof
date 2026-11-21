@@ -185,6 +185,20 @@ class OllamaEvaluator:
         )
 
 
+def ollama_json_asker(model: str, base_url: str = DEFAULT_OLLAMA_URL, *, temperature: float = 0.2, seed: int | None = 0,
+                      max_output_tokens: int = 6000, timeout: float = 1200, allow_remote: bool = False, client: Any | None = None):
+    """A callable (prompt, json_schema) -> JSON text from a local model, used to draft benchmarks."""
+    if not model.strip():
+        raise ValueError("model must be explicitly configured")
+    chat = client or _OllamaClient(base_url=base_url, timeout=timeout, allow_remote=allow_remote)
+
+    def ask(prompt: str, schema: dict[str, Any]) -> str:
+        body = chat.chat({"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
+                          "format": schema, "options": _options(temperature, seed, max_output_tokens)})
+        return _content(body)
+    return ask
+
+
 class OllamaActivationProbe:
     """Asks a local model which listed skill (if any) it would load for a request.
 

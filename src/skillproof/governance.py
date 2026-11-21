@@ -20,6 +20,7 @@ class AssurancePolicy(BaseModel):
     minimum_paired_runs: int = Field(default=3, ge=1, le=10000)
     minimum_models: int = Field(default=1, ge=1, le=100)
     maximum_cost_overhead_percent: float = Field(default=100, ge=0, le=10000)
+    minimum_adherence_rate: float = Field(default=0.7, ge=0, le=1)
 
 
 class AssuranceInput(BaseModel):
@@ -31,6 +32,7 @@ class AssuranceInput(BaseModel):
     paired_runs: int | None = Field(default=None, ge=0)
     measured_models: int | None = Field(default=None, ge=0)
     cost_overhead_percent: float | None = Field(default=None, ge=-100, le=100000)
+    adherence_rate: float | None = Field(default=None, ge=0, le=1, description="Share of the skill's own claims the agent followed with the skill loaded (conformance checks).")
 
 
 def evaluate_assurance(evidence: AssuranceInput, policy: AssurancePolicy | None = None) -> dict[str, Any]:
@@ -82,6 +84,13 @@ def evaluate_assurance(evidence: AssuranceInput, policy: AssurancePolicy | None 
         gates.append({"code": "COST_OVERHEAD", "status": "pass", "message": f"Cost overhead {evidence.cost_overhead_percent:.2f}% is within maximum {policy.maximum_cost_overhead_percent:.2f}%."})
     else:
         gates.append({"code": "COST_OVERHEAD", "status": "fail", "message": f"Cost overhead {evidence.cost_overhead_percent:.2f}% exceeds maximum {policy.maximum_cost_overhead_percent:.2f}%."})
+
+    if evidence.adherence_rate is not None:
+        # Only when measured: a skill without a conformance benchmark is judged on the gates above, as before.
+        if evidence.adherence_rate >= policy.minimum_adherence_rate:
+            gates.append({"code": "CLAIM_ADHERENCE", "status": "pass", "message": f"The agent followed {evidence.adherence_rate:.0%} of the skill's tested claims (minimum {policy.minimum_adherence_rate:.0%})."})
+        else:
+            gates.append({"code": "CLAIM_ADHERENCE", "status": "fail", "message": f"The agent followed only {evidence.adherence_rate:.0%} of the skill's tested claims (minimum {policy.minimum_adherence_rate:.0%}): the skill does not do what it says."})
 
     statuses = {gate["status"] for gate in gates}
     if "blocked" in statuses:

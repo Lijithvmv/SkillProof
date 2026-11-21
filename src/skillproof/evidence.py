@@ -31,8 +31,8 @@ def measured_evidence(records: list[dict[str, Any]], experiment_ids: list[str], 
     wrong = [e for e in experiment_ids if by_id[e]["instructions_fingerprint"] != expected]
     if wrong:
         raise EvidenceError(f"experiments ran a different SKILL.md than this version: {', '.join(wrong)}")
-    pairs = lift_weight = cost_weight = 0
-    lift_sum = cost_sum = 0.0
+    pairs = lift_weight = cost_weight = adherence_weight = 0
+    lift_sum = cost_sum = adherence_sum = 0.0
     models: set[str] = set()
     withheld: list[str] = []
     for experiment_id in experiment_ids:
@@ -56,7 +56,12 @@ def measured_evidence(records: list[dict[str, Any]], experiment_ids: list[str], 
         if cost is not None and complete:
             cost_sum += cost * complete
             cost_weight += complete
+        followed = (comparison.get("adherence") or {}).get("adherence_rate")
+        if followed is not None and complete:
+            adherence_sum += followed * complete
+            adherence_weight += complete
     return {
+        "adherence_rate": round(adherence_sum / adherence_weight, 4) if adherence_weight else None,
         "behavioral_lift_pp": round(lift_sum / lift_weight, 2) if lift_weight else None,
         "paired_runs": pairs,
         "measured_models": len(models),

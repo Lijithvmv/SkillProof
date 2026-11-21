@@ -121,6 +121,31 @@ def main(argv: list[str] | None = None) -> int:
     feed.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common Claude, Codex, Cursor and VS Code locations that exist.")
     feed.add_argument("--output", default="-")
 
+    feed.add_argument("--policy", help="Assurance policy JSON (thresholds) for the imported versions; default policy otherwise.")
+
+    draft = commands.add_parser("benchmark-draft", help="Read what a skill says about itself (claims) and draft a conformance benchmark that tests them, with a local model. The draft must be reviewed before its results count.")
+    draft.add_argument("skill", help="Skill folder (holding SKILL.md).")
+    draft.add_argument("--model", required=True, help="Local Ollama model that drafts the tasks.")
+    draft.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
+    draft.add_argument("--tasks", type=int, default=3)
+    draft.add_argument("--seed", type=int, default=0)
+    draft.add_argument("--output-dir", required=True, help="Writes claims.json, benchmark.jsonl, manifest.json and draft-review.json here.")
+    draft.add_argument("--output", default="-", help="Summary destination; use - for stdout.")
+
+    evaluate = commands.add_parser("evaluate-skill", help="Run a skill's benchmark with and without the skill on a local model, measure lift and claim adherence, and record it in the catalogue's history so the catalogue cites it.")
+    evaluate.add_argument("skill", help="Skill folder (holding SKILL.md).")
+    evaluate.add_argument("--benchmark", required=True, help="benchmark.jsonl (claims.json beside it is used for adherence).")
+    evaluate.add_argument("--model", required=True, help="Agent model (local Ollama).")
+    evaluate.add_argument("--grader-model", help="Judge for free-text criteria; not needed for a checks-only benchmark.")
+    evaluate.add_argument("--ollama-url", default=os.getenv("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434"))
+    evaluate.add_argument("--repeats", type=int, default=2)
+    evaluate.add_argument("--seed", type=int, default=0)
+    evaluate.add_argument("--max-output-tokens", type=int, default=3000)
+    evaluate.add_argument("--name", help="Catalogue skill name to record under (default: the SKILL.md name).")
+    evaluate.add_argument("--data-dir", help="Catalogue storage to record into (as catalogue-import). Omit to only report.")
+    evaluate.add_argument("--tenant", default="local")
+    evaluate.add_argument("--output", default="-")
+
     check = commands.add_parser("catalogue-check", help="Compare the skills installed on this machine with the versions the catalogue approved. Registers nothing. Exit 1 when an installed skill differs from its approved version (running unapproved); with --strict also when a skill was never approved.")
     check.add_argument("--data-dir", default=os.environ.get("SKILLPROOF_DATA_DIR") or str(Path.home() / ".skillproof" / "catalogue"), help="Catalogue storage (the same folder the API uses as SKILLPROOF_DATA_DIR).")
     check.add_argument("--tenant", default="local")
@@ -252,12 +277,25 @@ def main(argv: list[str] | None = None) -> int:
             governance = _catalogue_governance(data)
             principal = _import_principal(args.tenant)
             try:
-                result = _import_installed(governance, principal, roots)
+                policy = AssurancePolicy.model_validate(json.loads(Path(args.policy).read_text(encoding="utf-8"))) if args.policy else None
+                result = _import_installed(governance, principal, roots, policy)
             finally:
                 governance.registry.close()
                 governance.approvals.close()
             exit_code = 1 if result["updates_with_block"] else 0
         except (OSError, ValueError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "benchmark-draft":
+        try:
+            result, exit_code = _benchmark_draft(args), 0
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            result, exit_code = {"error": str(exc)}, 4
+    elif args.command == "evaluate-skill":
+        try:
+            result = _evaluate_skill(args)
+            followed = (result["comparison"].get("adherence") or {}).get("adherence_rate")
+            exit_code = 1 if sum(result["failure_counts"].values()) or (followed is not None and followed < 0.7) else 0
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             result, exit_code = {"error": str(exc)}, 4
     elif args.command == "serve":
         from skillproof.service import ServiceError, load_config, serve
@@ -462,10 +500,66 @@ def _check_installed(governance, principal, roots):
     return check_installed(governance, principal, roots)
 
 
-def _import_installed(governance, principal, roots):
+def _import_installed(governance, principal, roots, policy=None):
     from skillproof.catalogue_import import import_installed
 
-    return import_installed(governance, principal, roots)
+    return import_installed(governance, principal, roots, policy)
+
+
+def _skill_text(folder: str) -> str:
+    path = Path(folder)
+    path = path if path.name == "SKILL.md" else path / "SKILL.md"
+    return path.read_bytes().decode("utf-8-sig")  # the same decoding the catalogue fingerprints
+
+
+def _benchmark_draft(args) -> dict[str, Any]:
+    from skillproof.conformance import draft_benchmark, extract_claims, write_benchmark
+    from skillproof.ollama_adapter import ollama_json_asker
+
+    text = _skill_text(args.skill)
+    claims = extract_claims(text)
+    if not claims["claims"]:
+        raise ValueError("no claims found in SKILL.md (no rules, steps or 'Use when' requests)")
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "claims.json").write_text(json.dumps(claims, indent=2, ensure_ascii=False), encoding="utf-8")
+    drafted = draft_benchmark(text, claims, ollama_json_asker(args.model, args.ollama_url, seed=args.seed), tasks=args.tasks)
+    write_benchmark(out / "benchmark.jsonl", drafted["tasks"], skill=claims["skill"], claims_file="claims.json", generator=args.model)
+    review = {"dropped": drafted["dropped"], "task_reviews": drafted["reviews"]}
+    (out / "draft-review.json").write_text(json.dumps(review, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"skill": claims["skill"], "claims": len(claims["claims"]), "tasks": len(drafted["tasks"]),
+            "checks": sum(len(t.checks) for t in drafted["tasks"]), "dropped": len(drafted["dropped"]),
+            "status": "draft_needs_review", "output_dir": str(out)}
+
+
+def _evaluate_skill(args) -> dict[str, Any]:
+    from skillproof.checks import CheckedEvaluator
+    from skillproof.conformance import adherence, extract_claims
+
+    text = _skill_text(args.skill)
+    tasks = load_benchmark(args.benchmark)
+    manifest = read_manifest(args.benchmark)
+    claims_path = Path(args.benchmark).with_name("claims.json")
+    claims = json.loads(claims_path.read_text(encoding="utf-8")) if claims_path.exists() else extract_claims(text)
+    judge = OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed) if args.grader_model else None
+    runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, max_output_tokens=args.max_output_tokens)
+    experiment = execute_experiment(tasks=tasks, skill_instructions=text, runner=runner, evaluator=CheckedEvaluator(judge),
+                                    repeats=args.repeats, seed=args.seed)
+    experiment["comparison"]["adherence"] = adherence(experiment, claims)
+    experiment["benchmark"] = {"benchmark_id": manifest.get("benchmark_id"), "version": manifest.get("version"),
+                               "validation_status": manifest.get("status")}
+    name = args.name or claims.get("skill") or Path(args.skill).name
+    if args.data_dir:
+        governance = _catalogue_governance(Path(args.data_dir))
+        try:
+            from skillproof.authorization import Principal
+            stored = governance.record_evaluation(Principal(user_id="skill-evaluation", tenant_id=args.tenant, role="evaluator"),
+                                                  experiment, skill_key=name)
+        finally:
+            governance.registry.close()
+            governance.approvals.close()
+        experiment["recorded"] = {"skill_name": name, "tenant": args.tenant, "experiment_id": stored["experiment_id"]}
+    return experiment
 
 
 if __name__ == "__main__":

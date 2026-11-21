@@ -18,6 +18,7 @@ from typing import Any
 from skillproof.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.capabilities import PackageError, build_manifest
+from skillproof.evidence import instructions_fingerprint, measured_evidence
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.second_opinion import add_second_opinions
 from skillproof.installed import NAME, _read_installed, family_key, find_skill_dirs
@@ -119,20 +120,37 @@ def import_installed(
     families, names_by_family, packages, errors = _installed_families(roots)
 
     registered: list[dict[str, Any]] = []
+    evidence_not_attached: list[dict[str, Any]] = []
     known: dict[str, list[dict[str, Any]]] = {}
     unchanged = 0
     for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
         root, skill_dir = families[key]
         files, oversize, fingerprint = packages[key]
-        if any(v["package_fingerprint"] == fingerprint for v in known.setdefault(name, governance.list_skill_versions(principal, name))):
-            unchanged += 1  # checked before any analysis, so a re-run only reads and hashes the folders
-            continue
         text = {}
         for path, raw in files.items():
             try:
                 text[path] = raw.decode("utf-8-sig")
             except UnicodeDecodeError:
                 text[path] = ""
+        # Run evidence recorded for this exact SKILL.md (skillproof evaluate-skill) is cited automatically.
+        skill_md = text.get("SKILL.md", "")
+        records = governance.list_evaluations(principal, skill_key=name, limit=500)
+        cited = [r["experiment_id"] for r in records if r["instructions_fingerprint"] == instructions_fingerprint(skill_md)]
+        existing = next((v for v in known.setdefault(name, governance.list_skill_versions(principal, name))
+                         if v["package_fingerprint"] == fingerprint), None)
+        if existing is not None:
+            unchanged += 1  # checked before any analysis, so a re-run only reads and hashes the folders
+            had = set(((existing.get("assurance") or {}).get("evidence") or {}).get("experiment_ids") or [])
+            if set(cited) - had:
+                evidence_not_attached.append({"skill_name": name, "version_id": existing["version_id"],
+                                              "experiments": sorted(set(cited) - had)})
+            continue
+        behaviour: dict[str, Any] = {}
+        provenance: dict[str, Any] = {"source": "none"}
+        if cited:
+            measured = measured_evidence(records, cited, skill_md)
+            provenance = measured.pop("provenance")
+            behaviour = measured
         report = analyze_files(text)
         report["package_fingerprint"] = fingerprint
         report["metadata"] = dict(report.get("metadata") or {}, name=name)
@@ -145,14 +163,16 @@ def import_installed(
             instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
             security_score=security.get("security_score"),
             security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
+            **behaviour,
         ), policy)
+        assurance["evidence"] = provenance
         assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": name, "package_fingerprint": fingerprint}
         version = governance.register_skill(principal, report, assurance, artifact_uri=skill_dir.as_uri(), capability_manifest=manifest)
         change = version["capability_change"] or {}
         registered.append({
             "skill_name": name, "version_id": version["version_id"], "path": str(skill_dir),
             "against": change.get("against"), "decision": change.get("decision"), "counts": change.get("counts"),
-            "state": version["state"],
+            "state": version["state"], "assurance_decision": assurance["decision"], "evidence": provenance.get("source"),
         })
     updates = [r for r in registered if r["against"] != "nothing_active"]
     return {
@@ -166,8 +186,10 @@ def import_installed(
         "updates_with_block": sum(r["decision"] == "block" for r in updates),
         "updates_with_ask": sum(r["decision"] == "ask" for r in updates),
         "registered": registered,
+        "evidence_not_attached": evidence_not_attached,
         "errors": errors,
-        "limitations": "Installed skills carry static evidence only, so their assurance decision stays "
-                       "insufficient_evidence until run evidence is added. A first import has no earlier version to "
-                       "compare with, so every capability a skill has counts as added.",
+        "limitations": "A skill's assurance cites the experiments recorded for its exact SKILL.md (evaluate-skill); "
+                       "without them it stays insufficient_evidence. A version registered before its experiments were "
+                       "recorded keeps its original report (listed under evidence_not_attached). A first import has no "
+                       "earlier version to compare with, so every capability a skill has counts as added.",
     }

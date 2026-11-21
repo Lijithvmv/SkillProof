@@ -47,15 +47,43 @@ def test_draft_keeps_only_valid_checks_tied_to_a_known_claim():
     known = claims["claims"][0]["id"]
     reply = {"tasks": [{"prompt": "Our API was down for 40 minutes, write it up", "context": "Outage 09:10-09:50 UTC, 1,200 failed calls.",
                         "claims": [known], "checks": [
-                            {"kind": "contains", "claim": known, "description": "says the cause is unknown", "value": "root cause not yet known"},
+                            {"kind": "contains", "claim": known, "description": "quotes the failed calls", "value": "1,200 failed calls"},
                             {"kind": "regex", "claim": known, "description": "broken pattern", "value": "(unclosed"},
                             {"kind": "contains", "claim": "C99", "description": "made-up claim", "value": "x"}]}]}
-    drafted = draft_benchmark(SKILL, claims, lambda prompt, schema: json.dumps(reply), tasks=1)
+    drafted = draft_benchmark(SKILL, claims, lambda prompt, schema: json.dumps(reply), tasks=1, self_test=False)
     [task] = drafted["tasks"]
-    assert [c.description for c in task.checks] == [f"[{known}] says the cause is unknown"]
+    assert [c.description for c in task.checks] == [f"[{known}] quotes the failed calls"]
     reasons = [d["reason"] for d in drafted["dropped"]]
     assert len(reasons) == 2 and sum(r.startswith("unknown claim id") for r in reasons) == 1
     assert drafted["reviews"][0]["task_id"] == "t1"
+
+
+def test_drafted_phrase_must_be_short_and_come_from_the_scenario_or_the_claim():
+    # Decision: which drafted checks count. The first real drafts demanded whole sentences no answer contains.
+    from skillproof.conformance import ungrounded
+    context = "Bore measured 0.512 in on part 4410-B."
+    claim = "If the requirement cannot be located, flag the NCR as blocking and say what was searched."
+    assert ungrounded("contains", "0.512", context, claim) is None  # a fact from the scenario
+    assert ungrounded("contains", "blocking", context, claim) is None  # the claim's own term
+    assert "words" in ungrounded("contains", "Part A found in 10 units at location X today now", context, claim)
+    assert "neither" in ungrounded("contains", "location X: not checked", context, claim)
+    assert ungrounded("regex", r"\b\d+\b", context, claim) is None  # patterns are judged by the self-test
+
+
+def test_self_test_drops_checks_an_answer_following_the_claim_fails():
+    # Decision: a check that even a skill-following answer cannot pass is measuring the drafter, not the skill.
+    claims = extract_claims(SKILL)
+    known = claims["claims"][0]["id"]
+    scenario = {"tasks": [{"prompt": "Write up the outage", "context": "1,200 failed calls between 09:10 and 09:50 UTC.",
+                           "claims": [known], "checks": [
+                               {"kind": "contains", "claim": known, "description": "quotes the failed calls", "value": "1,200 failed calls"},
+                               {"kind": "regex", "claim": known, "description": "names a cause", "value": "(?i)caused by"}]}]}
+    ideal = {"answer": "Impact: 1,200 failed calls from 09:10 to 09:50 UTC. Root cause not yet known."}
+    ask = lambda prompt, schema: json.dumps(ideal if "answer" in schema["properties"] else scenario)  # noqa: E731
+    drafted = draft_benchmark(SKILL, claims, ask, tasks=1)
+    [task] = drafted["tasks"]
+    assert [c.value for c in task.checks] == ["1,200 failed calls"]
+    assert any("fails it" in d["reason"] for d in drafted["dropped"])
 
 
 class Runner:

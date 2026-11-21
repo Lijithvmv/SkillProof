@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 import yaml
 
-from skillproof.checks import Check
+from skillproof.checks import Check, run_check
 from skillproof.evaluation import BenchmarkTask, validate_benchmark_task
 
 FRONTMATTER = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
@@ -166,14 +166,17 @@ Claims the skill makes (id: text):
 Write {n} scenarios. For each one:
 - prompt: a request a real person would send, in their own words (do not copy the skill's sentences).
 - context: the source material the request needs (an inspection note, measurements, records). Realistic, specific,
-  with concrete numbers and names. Leave out on purpose anything a claim says must be flagged when missing.
-- claims: the ids of the claims this scenario tests (2 to 5).
-- checks: 2 to 6 exact checks on the agent's answer, each for one claim id. Use only:
+  with concrete numbers and names. Build it so the claim below MUST apply: if the claim is about something missing,
+  leave that thing out; if it is about an order or a count, give the items to order or count.
+- claims: the ids of the claims this scenario tests.
+- checks: 1 to 3 exact checks on the agent's answer, each for one claim id, that pass only if the claim was followed. Use only:
   contains / not_contains (value = a short literal phrase), regex / not_regex (value = a Python regex),
   heading (value = heading text), min_words / max_words (limit = a number).
   A check must be decidable from the answer text alone and must follow from the claim, not from taste.
   EVERY check has a value: the exact short phrase the answer must (or must not) contain, or a Python regex.
-  A check like "the report should be clear" has no value and is useless. Good examples:
+  A phrase is at most 6 words and is either COPIED from your context (a fact the answer must carry: a number, an ID,
+  a name) or made of the claim's OWN words (a term the claim says to use). Never a sentence you expect the answer to
+  repeat. A check like "the report should be clear" has no value and is useless. Good examples:
   {{"kind": "contains", "claim": "C11", "description": "flags the record as blocking when no requirement is given", "value": "blocking"}}
   {{"kind": "regex", "claim": "C4", "description": "states the suspect quantity as a number", "value": "\\\\b\\\\d+\\\\s*(?:parts|units|pcs)\\\\b"}}
   {{"kind": "not_contains", "claim": "C16", "description": "never writes 0 parts for an unchecked location", "value": "0 parts"}}
@@ -196,24 +199,87 @@ def literal_checks(claim: dict[str, Any]) -> list[Check]:
     return checks
 
 
+MAX_PHRASE_WORDS = 6
+WORD = re.compile(r"[a-z0-9]+")
+IDEAL_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+IDEAL_PROMPT = """An AI agent has loaded a skill with these rules:
+{rules}
+
+A person sends this request:
+{prompt}
+
+Source material they gave:
+{context}
+
+Write the agent's full answer, following every rule above exactly. Return only the JSON."""
+
+
+def ungrounded(kind: str, value: str | None, context: str, claim_text: str) -> str | None:
+    """Why a drafted check cannot be trusted, or None. A phrase check is kept only when its value is short and either
+    copied from the scenario's own source material (the answer must carry that fact) or made of words the claim itself
+    uses (the answer must use the claim's term). A whole sentence the answer is expected to reproduce is the failure
+    seen on the first drafts: no real answer contains it."""
+    if kind not in {"contains", "not_contains"}:
+        return None
+    phrase = (value or "").strip()
+    words = WORD.findall(phrase.lower())
+    if not words:
+        return "empty phrase"
+    if len(words) > MAX_PHRASE_WORDS:
+        return f"phrase of {len(words)} words; an answer will not reproduce a sentence word for word"
+    if phrase.lower() in context.lower():
+        return None
+    claim_words = set(WORD.findall(claim_text.lower()))
+    if all(word in claim_words for word in words):
+        return None
+    return "phrase is neither in the scenario's source material nor in the claim's own words"
+
+
+VISIBLE = re.compile(r"\b(?:says?|writes?|written|reports?|states?|flags?|marks?|lists?|cites?|quotes?|reads?|asserts?|"
+                     r"names?|records?|counts?|drafts?|notif\w*|table|row|order|scope|number|missing|unknown|blocking|"
+                     r"closed?|invents?|guess\w*|prints?|zero|treat|first|always)\b", re.I)
+INTERNAL = re.compile(r"\.py\b|\bpython3?\b|\bcd\b|\bArtifact\b|\bconnector\b|\bfolder\b|\bdirectory\b|"
+                      r"^(?:run|find|read|open|load|save|publish)\b", re.I)
+
+
+def testable(claim: dict[str, Any]) -> bool:
+    """A claim an answer can show: a rule about what the agent says, writes, flags or refuses. Claims about files,
+    scripts, tools or internal record fields cannot be seen in the answer text and are not drafted."""
+    return claim["kind"] == "rule" and bool(VISIBLE.search(claim["text"])) and not INTERNAL.search(claim["text"])
+
+
+def claim_groups(claims: dict[str, Any], tasks: int, size: int = 1) -> list[list[dict[str, Any]]]:
+    """One scenario per testable claim (in the skill's order), so each scenario is built to trigger that claim."""
+    ordered = [c for c in claims["claims"] if testable(c)]
+    return [group for group in (ordered[i * size:(i + 1) * size] for i in range(tasks)) if group]
+
+
 def draft_benchmark(skill_text: str, claims: dict[str, Any], ask: Callable[[str, dict], str], *, tasks: int = 3,
-                    skill_name: str | None = None) -> dict[str, Any]:
-    """Ask a local model for draft scenarios, then keep only what validates: tasks that BenchmarkTask accepts and
-    checks that compile. Returns the tasks, what was dropped and why, and the lexical review of each task."""
+                    skill_name: str | None = None, self_test: bool = True) -> dict[str, Any]:
+    """Draft one scenario per group of claims with a local model, then keep only checks that survive three filters:
+    they compile, they are grounded (ungrounded()), and an answer the model writes while following the claims passes
+    them (self_test). Returns the tasks, every dropped check with its reason, and the lexical review of each task."""
     claim_ids = {c["id"] for c in claims["claims"]}
-    prompt = DRAFT_PROMPT.format(
-        name=skill_name or claims.get("skill") or "", description=claims.get("description", "")[:1500],
-        triggers="; ".join(claims.get("triggers", [])[:12]) or "(none stated)",
-        claims="\n".join(f"{c['id']}: {c['text']}" for c in claims["claims"]), n=tasks)
-    raw = ask(prompt, DRAFT_SCHEMA)
-    proposed = json.loads(raw).get("tasks", [])
+    by_id = {c["id"]: c for c in claims["claims"]}
+    proposed = []
+    for group in claim_groups(claims, tasks):
+        prompt = DRAFT_PROMPT.format(
+            name=skill_name or claims.get("skill") or "", description=claims.get("description", "")[:1500],
+            triggers="; ".join(claims.get("triggers", [])[:12]) or "(none stated)",
+            claims="\n".join(f"{c['id']}: {c['text']}" for c in group), n=1)
+        proposed += json.loads(ask(prompt, DRAFT_SCHEMA)).get("tasks", [])[:1]
     kept, dropped, reviews = [], [], []
     for index, item in enumerate(proposed, 1):
         checks = []
+        context = str(item.get("context") or "")
         for check in item.get("checks", []):
             claim = str(check.get("claim", "")).strip()
             if claim not in claim_ids:
                 dropped.append({"task": index, "check": check, "reason": f"unknown claim id {claim!r}"})
+                continue
+            reason = ungrounded(check.get("kind", ""), check.get("value"), context, by_id[claim]["text"])
+            if reason:
+                dropped.append({"task": index, "check": check, "reason": reason})
                 continue
             fields = {"kind": check["kind"], "description": f"[{claim}] {str(check.get('description', '')).strip()}"[:300]}
             if check["kind"] in {"min_words", "max_words"}:
@@ -231,6 +297,24 @@ def draft_benchmark(skill_text: str, claims: dict[str, Any], ask: Callable[[str,
                 if (check.kind, check.value.lower()) not in have:
                     checks.append(check)
                     have.add((check.kind, check.value.lower()))
+        if checks and self_test:
+            rules = "\n".join(f"- {by_id[c]['text']}" for c in sorted({CLAIM_TAG.match(k.description).group(1) for k in checks}, key=lambda x: int(x[1:])))
+            try:
+                ideal = json.loads(ask(IDEAL_PROMPT.format(rules=rules, prompt=item.get("prompt", ""), context=context or "(none)"),
+                                       IDEAL_SCHEMA)).get("answer", "")
+            except (ValueError, RuntimeError) as exc:
+                ideal = None
+                dropped.append({"task": index, "reason": f"self-test answer failed ({str(exc)[:120]}); checks kept untested"})
+            if ideal:
+                passing = []
+                for check in checks:
+                    ok, evidence = run_check(check, ideal)
+                    if ok:
+                        passing.append(check)
+                    else:
+                        dropped.append({"task": index, "check": check.model_dump(exclude_none=True),
+                                        "reason": f"an answer written to follow the claim fails it ({evidence[:120]})"})
+                checks = passing
         if not checks:
             dropped.append({"task": index, "reason": "no valid check"})
             continue

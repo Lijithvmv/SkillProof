@@ -3,20 +3,14 @@ place typed errors become HTTP status (NotFound 404, other refusals 409, authori
 from __future__ import annotations
 
 from skillproof.config import settings
+from skillproof.wiring import open_governance
 
 
-from pathlib import Path
 
 from fastapi import HTTPException, Request
 
 from skillproof.errors import NotFound, SkillProofError
-from skillproof.approvals import SQLiteApprovalStore
 from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal
-from skillproof.history import EvaluationHistoryStore
-from skillproof.registry import SQLiteSkillRegistry
-from skillproof.jobs import JobStore
-from skillproof.notify import NotificationStore
-from skillproof.fleet import FleetStore
 
 
 def require_roles(*roles: str):
@@ -42,22 +36,7 @@ def governance_from_environment() -> GovernanceAccess | None:
     """PostgreSQL when SKILLPROOF_DATABASE_URL is set (one database, tenant row-level security), else SQLite files in
     SKILLPROOF_DATA_DIR. None when neither is set."""
     current = settings()
-    url = current.database_url
-    if url:
-        return GovernanceAccess(registry=SQLiteSkillRegistry(url), approvals=SQLiteApprovalStore(url),
-                                history=EvaluationHistoryStore(url), jobs=JobStore(url), notifications=NotificationStore(url), fleet=FleetStore(url))
-    data_dir = current.data_dir
-    if not data_dir:
-        return None
-    root = Path(data_dir)
-    return GovernanceAccess(
-        registry=SQLiteSkillRegistry(root / "registry.db"),
-        approvals=SQLiteApprovalStore(root / "approvals.db"),
-        history=EvaluationHistoryStore(root / "history.db"),
-        jobs=JobStore(root / "jobs.db"),
-        notifications=NotificationStore(root / "notify.db"),
-        fleet=FleetStore(root / "fleet.db"),
-    )
+    return open_governance(database_url=current.database_url, data_dir=current.data_dir)
 
 
 def current_principal(request: Request) -> Principal:

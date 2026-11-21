@@ -50,7 +50,7 @@ def check_installed(governance: GovernanceAccess, principal: Principal, roots: l
     For every installed skill: `approved` when its folder fingerprint is the tenant's active version, `running_unapproved`
     when an approved version exists but the installed folder differs from it (the alert: something changed the skill
     after approval, or an unapproved update was installed), `never_approved` when nothing is approved for that name."""
-    families, names_by_family, packages, errors = _installed_families(roots)
+    families, names_by_family, packages, errors = installed_families(roots)
     skills: list[dict[str, Any]] = []
     for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
         _, skill_dir = families[key]
@@ -80,7 +80,7 @@ def check_installed(governance: GovernanceAccess, principal: Principal, roots: l
             "alerts": [e for e in skills if e["status"] == "running_unapproved"], "skills": skills, "errors": errors}
 
 
-def _installed_families(roots: list[Path]):
+def installed_families(roots: list[Path]):
     found: list[tuple[Path, Path]] = []
     for root in roots:
         for skill_dir in find_skill_dirs([root]):
@@ -116,9 +116,9 @@ def import_installed(
     governance: GovernanceAccess, principal: Principal, roots: list[Path], policy: AssurancePolicy | None = None,
 ) -> dict[str, Any]:
     policy = policy or governance.tenant_policy(principal)  # the tenant's stored policy unless one is passed
-    # One catalogue name per install family (see _installed_families): a name shared by different families gets the
+    # One catalogue name per install family (see installed_families): a name shared by different families gets the
     # agent label, then a short path hash if still ambiguous.
-    families, names_by_family, packages, errors = _installed_families(roots)
+    families, names_by_family, packages, errors = installed_families(roots)
 
     registered: list[dict[str, Any]] = []
     evidence_not_attached: list[dict[str, Any]] = []

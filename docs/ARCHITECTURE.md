@@ -56,6 +56,25 @@ skillproof/
    (routers, CLI, capabilities split, packages) → quality gates (lint, types). Each stage lands with the full suite
    green on SQLite and PostgreSQL.
 
+## Progress
+
+| Item | Status | Commit |
+|---|---|---|
+| D1 one package identity (and zipped folders rooted at the skill folder) | done, regression test | 1575411 |
+| D2 one catalogue service for assessment and re-assessment | done | 1575411 |
+| D3 typed errors mapped by type | done | 1575411 |
+| PostgreSQL connection pool, one connection per transaction per thread (also fixed: a statement could land in another thread's transaction) | done, concurrency test | 2b5a7c7 |
+| Versioned migrations, `skillproof migrate`, verify mode | done, checked on a real pre-migration catalogue | 0ecf3a9 |
+| Structured JSON logs with request ids | done | 217181f |
+| Lint gate in CI (found: an undefined name in dead code, 16 unused imports) | done | 183544a |
+| API split into routers + shared dependencies (same 39 routes) | done | b540226 |
+| One settings module | open | |
+| CLI split by command group | open | |
+| `capabilities.py` split into a package | open | |
+| Alerts and fleet orchestration out of the access layer into services | open | |
+| Typed models at service boundaries; type check in CI | open | |
+| Package layout (engines/, storage/) with compatibility imports | open | |
+
 ## Feature inventory (nothing may be lost)
 
 Every feature below keeps its tests; the suite must stay green through every stage.

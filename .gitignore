@@ -7,3 +7,6 @@ dist/
 build/
 .env
 .uv-cache/
+
+# Local planning notes kept out of the public repository
+CHARTER.md

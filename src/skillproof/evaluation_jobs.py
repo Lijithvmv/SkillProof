@@ -8,6 +8,7 @@ again on every run recorded for its exact SKILL.md. Settings come from the envir
 from __future__ import annotations
 
 import os
+import logging
 import threading
 import traceback
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from skillproof.conformance import adherence, extract_claims
 from skillproof.evidence import instructions_fingerprint
 from skillproof.execution import execute_experiment
 from skillproof.jobs import JobStore
+from skillproof.logs import log
 from skillproof.services import catalogue
 from skillproof.templates import generate_benchmark
 
@@ -97,14 +99,17 @@ def work_once(governance: GovernanceAccess, settings: EvaluationSettings, **kwar
         return None
     tenant_id, job = claimed
     base = {"job_id": job["job_id"], "version_id": job["version_id"], "skill_name": job["skill_name"]}
+    log("evaluation_started", tenant=tenant_id, **base)
     try:
         done = jobs.finish(tenant_id, job["job_id"], run_job(governance, tenant_id, job, settings, **kwargs))
         result = done["result"] or {}
-        governance.emit(tenant_id, "evaluation.finished", {**base, **{k: result.get(k) for k in (
-            "outcome", "adherence_rate", "baseline_rate", "broken_claims", "lift_pp", "assurance")}})
+        summary = {k: result.get(k) for k in ("outcome", "adherence_rate", "baseline_rate", "broken_claims", "lift_pp", "assurance")}
+        governance.emit(tenant_id, "evaluation.finished", {**base, **summary})
+        log("evaluation_finished", tenant=tenant_id, **base, **summary)
         return done
     except Exception as exc:  # a failed job is recorded with its reason; the worker keeps going
         governance.emit(tenant_id, "evaluation.failed", {**base, "error": f"{type(exc).__name__}: {exc}"[:300]})
+        log("evaluation_failed", logging.ERROR, tenant=tenant_id, **base, error=f"{type(exc).__name__}: {exc}"[:300])
         return jobs.fail(tenant_id, job["job_id"], f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
 
 

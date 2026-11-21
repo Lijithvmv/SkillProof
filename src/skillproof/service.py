@@ -25,6 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import logging
+
+from skillproof.logs import configure as configure_logging, log
+
 STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db", "notify.db", "fleet.db")
 ENV_KEYS = {
     ("storage", "database_url"): "SKILLPROOF_DATABASE_URL",
@@ -176,9 +180,9 @@ def _backup_loop(config: dict[str, Any], hours: float, stop: threading.Event) ->
     while not stop.wait(hours * 3600):
         try:
             result = backup(config)
-            print(json.dumps({"event": "backup", "path": result["backup"]}), flush=True)
+            log("backup", path=result["backup"], files=len(result.get("files", {})))
         except Exception as exc:  # a failed backup is reported, never stops the server
-            print(json.dumps({"event": "backup_failed", "error": str(exc)}), file=sys.stderr, flush=True)
+            log("backup_failed", logging.ERROR, error=str(exc))
 
 
 def migrate_all(config: dict[str, Any]) -> dict[str, Any]:
@@ -202,6 +206,7 @@ def migrate_all(config: dict[str, Any]) -> dict[str, Any]:
 
 def serve(config: dict[str, Any]) -> None:
     apply_config(config)
+    configure_logging((config.get("server") or {}).get("log_level"))
     import uvicorn
 
     from skillproof.api.main import app

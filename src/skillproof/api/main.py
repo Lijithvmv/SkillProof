@@ -4,6 +4,8 @@ import json
 import os
 import re
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +18,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from skillproof import __version__
 from skillproof import package
 from skillproof.errors import NotFound, SkillProofError
+from skillproof.logs import log
 from skillproof.analyzer import analyze_files
 from skillproof.services import catalogue
 from skillproof.approvals import ApprovalError, SQLiteApprovalStore
@@ -71,6 +74,28 @@ async def authenticate_api_requests(request: Request, call_next):
             except AuthenticationError:
                 return JSONResponse({"detail": "Invalid access token."}, status_code=401, headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Outermost: a request id for every call (kept from X-Request-ID when it is a sane value), and one log line with
+    method, path, status, duration, tenant and actor. Bodies, tokens and skill contents are never logged."""
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if re.fullmatch(r"[A-Za-z0-9._\-]{8,64}", incoming) else uuid.uuid4().hex
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        principal = getattr(request.state, "principal", None)
+        log("request", request_id=request_id, method=request.method, path=request.url.path, status=status,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            tenant=principal.tenant_id if principal else None,
+            actor=principal.user_id if principal else request.headers.get("x-skillproof-dev-user"))
 
 
 class AnalyzeRequest(BaseModel):

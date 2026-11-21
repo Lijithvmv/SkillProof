@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import secrets
 import socket
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from skillproof.logs import log
 from skillproof.storage import Database, migrate, tenant_policy
 
 EVENTS = ("version.block_level_addition", "version.promoted", "version.rolled_back", "evaluation.finished",
@@ -244,8 +246,13 @@ def start_deliverer(store_factory: Callable[[], NotificationStore | None], stop:
         if store is None:
             return
         while not stop.is_set():
-            if store.deliver_once() is None:
+            outcome = store.deliver_once()
+            if outcome is None:
                 stop.wait(idle_seconds)
+            else:
+                log("alert_delivery", logging.INFO if outcome["state"] != "failed" else logging.WARNING,
+                    notification_id=outcome["notification_id"], state=outcome["state"], attempts=outcome.get("attempts"),
+                    error=outcome.get("error") or outcome.get("reason"))
     thread = threading.Thread(target=loop, name="skillproof-webhooks", daemon=True)
     thread.start()
     return thread

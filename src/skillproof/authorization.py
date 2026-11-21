@@ -61,6 +61,26 @@ class GovernanceAccess:
         self.history = history
         self.jobs = jobs  # skillproof.jobs.JobStore, when the service runs evaluations
 
+    def tenant_policy(self, principal: Principal) -> Any:
+        """The tenant's assurance policy (stored by a tenant admin), or the default policy."""
+        from skillproof.governance import AssurancePolicy
+
+        authorize(principal, principal.tenant_id, "skill.read")
+        stored = self.registry.get_policy(principal.tenant_id)
+        return AssurancePolicy(**stored["policy"]) if stored else AssurancePolicy()
+
+    def stored_policy(self, principal: Principal) -> dict[str, Any] | None:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return self.registry.get_policy(principal.tenant_id)
+
+    def set_tenant_policy(self, principal: Principal, policy: Any) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "policy.manage")
+        return self.registry.set_policy(principal.tenant_id, policy.model_dump(), actor_id=principal.user_id)
+
+    def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "skill.register")
+        return self.registry.preview_change(principal.tenant_id, skill_name, manifest)
+
     def request_evaluation(self, principal: Principal, version_id: str, skill_md: str) -> dict[str, Any]:
         """Queue a run-evidence job for a version, given the exact SKILL.md text the version holds."""
         authorize(principal, principal.tenant_id, "evaluation.run")

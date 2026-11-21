@@ -114,7 +114,7 @@ def _installed_families(roots: list[Path]):
 def import_installed(
     governance: GovernanceAccess, principal: Principal, roots: list[Path], policy: AssurancePolicy | None = None,
 ) -> dict[str, Any]:
-    policy = policy or AssurancePolicy()
+    policy = policy or governance.tenant_policy(principal)  # the tenant's stored policy unless one is passed
     # One catalogue name per install family (see _installed_families): a name shared by different families gets the
     # agent label, then a short path hash if still ambiguous.
     families, names_by_family, packages, errors = _installed_families(roots)
@@ -147,7 +147,8 @@ def import_installed(
             if existing["state"] in {"pending_review", "not_eligible"}:
                 # Runs recorded after registration: the version waiting for a decision is assessed again on them.
                 report = _report(text, fingerprint, name)
-                assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy)
+                change = existing.get("capability_change") or {}
+                assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy, change)
                 version = governance.reassess_skill(principal, existing["version_id"], assurance)
                 reassessed.append({"skill_name": name, "version_id": version["version_id"], "state": version["state"],
                                    "assurance_decision": assurance["decision"], "experiments": sorted(cited)})
@@ -160,7 +161,8 @@ def import_installed(
         manifest = build_manifest(files)
         add_second_opinions(manifest, files)
         manifest["not_scanned"] = sorted(oversize)
-        assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy)
+        change = governance.preview_change(principal, name, manifest)
+        assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy, change)
         provenance = assurance["evidence"]
         version = governance.register_skill(principal, report, assurance, artifact_uri=skill_dir.as_uri(), capability_manifest=manifest)
         change = version["capability_change"] or {}
@@ -200,7 +202,8 @@ def _report(text: dict[str, str], fingerprint: str, name: str) -> dict[str, Any]
 
 
 def _assurance(report: dict[str, Any], records: list[dict[str, Any]], cited: list[str], skill_md: str,
-               principal: Principal, name: str, fingerprint: str, policy: AssurancePolicy) -> dict[str, Any]:
+               principal: Principal, name: str, fingerprint: str, policy: AssurancePolicy,
+               change: dict[str, Any] | None = None) -> dict[str, Any]:
     behaviour: dict[str, Any] = {}
     provenance: dict[str, Any] = {"source": "none"}
     if cited:
@@ -213,6 +216,7 @@ def _assurance(report: dict[str, Any], records: list[dict[str, Any]], cited: lis
         instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
         security_score=security.get("security_score"),
         security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
+        capability_decision=(change or {}).get("decision"), capability_counts=(change or {}).get("counts"),
         **behaviour,
     ), policy)
     assurance["evidence"] = provenance

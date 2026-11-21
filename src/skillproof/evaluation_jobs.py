@@ -84,7 +84,7 @@ def run_job(governance: GovernanceAccess, tenant_id: str, job: dict[str, Any], s
     measured = measured_evidence(records, cited, skill_md)
     provenance = measured.pop("provenance")
     try:
-        report = reassess_with_runs(version["assurance"], measured, provenance)
+        report = reassess_with_runs(version["assurance"], measured, provenance, governance.tenant_policy(worker))
     except ValueError as exc:
         result["assurance"] = f"not reassessed: {exc}"
         return result

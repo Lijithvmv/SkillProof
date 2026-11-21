@@ -278,8 +278,9 @@ async def register_version(
         security_score=security.get("security_score"),
         security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
         **behaviour_fields,
+        **_capability_inputs(_guarded(lambda: governance.preview_change(principal, report["metadata"]["name"], manifest))),
     )
-    assurance_report = assess_version(evidence, AssurancePolicy())
+    assurance_report = assess_version(evidence, _guarded(lambda: governance.tenant_policy(principal)))
     assurance_report["evidence"] = provenance
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance_report["subject"] = {"tenant_id": principal.tenant_id, "skill_name": report["metadata"]["name"],
@@ -291,6 +292,29 @@ async def register_version(
         skill_md = min((p for p in text if p.rsplit("/", 1)[-1] == "SKILL.md"), key=len)
         result["job"] = _guarded(lambda: governance.request_evaluation(principal, version["version_id"], text[skill_md]))
     return result
+
+
+def _capability_inputs(change: dict[str, Any]) -> dict[str, Any]:
+    return {"capability_decision": change["decision"], "capability_counts": change["counts"]}
+
+
+@app.get("/api/v1/policy")
+def get_policy(request: Request) -> dict[str, Any]:
+    """The tenant's assurance policy in force, and who last changed it."""
+    principal = _principal(request)
+    governance = _governance(request)
+    stored = _guarded(lambda: governance.stored_policy(principal))
+    return {"tenant_id": principal.tenant_id, "policy": _guarded(lambda: governance.tenant_policy(principal)).model_dump(),
+            "source": "tenant" if stored else "default", "updated_by": (stored or {}).get("updated_by"),
+            "updated_at": (stored or {}).get("updated_at")}
+
+
+@app.put("/api/v1/policy")
+def put_policy(policy: AssurancePolicy, request: Request) -> dict[str, Any]:
+    """Set the tenant's assurance policy (tenant admins). New versions and re-assessments use it; every change is kept."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return {"tenant_id": principal.tenant_id, **_guarded(lambda: governance.set_tenant_policy(principal, policy))}
 
 
 @app.post("/api/v1/registry/versions/{version_id}/evaluate")

@@ -80,7 +80,7 @@ class JobStore:
         now = self._now()
         with self.db.transaction(None, write=True) as db:
             row = db.execute("SELECT job_id, tenant_id FROM job_queue WHERE claimed_at IS NULL "
-                             f"ORDER BY created_at, {db.insertion_order} LIMIT 1").fetchone()
+                             "ORDER BY created_at, job_id LIMIT 1").fetchone()
             if row is None:
                 return None
             db.execute("UPDATE job_queue SET claimed_at=? WHERE job_id=?", (now, row["job_id"]))

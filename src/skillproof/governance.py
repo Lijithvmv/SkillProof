@@ -21,6 +21,10 @@ class AssurancePolicy(BaseModel):
     minimum_models: int = Field(default=1, ge=1, le=100)
     maximum_cost_overhead_percent: float = Field(default=100, ge=0, le=10000)
     minimum_adherence_rate: float = Field(default=0.7, ge=0, le=1)
+    block_level_capabilities: Literal["acknowledge_at_promotion", "require_review"] = Field(
+        default="acknowledge_at_promotion",
+        description="What a block-level capability addition means for approval: the approver acknowledges the exact "
+                    "change at promotion (default), or the version needs a security review before it can be approved.")
 
 
 class AssuranceInput(BaseModel):
@@ -33,9 +37,13 @@ class AssuranceInput(BaseModel):
     measured_models: int | None = Field(default=None, ge=0)
     cost_overhead_percent: float | None = Field(default=None, ge=-100, le=100000)
     adherence_rate: float | None = Field(default=None, ge=0, le=1, description="Share of the skill's own claims the agent followed with the skill loaded (conformance checks).")
+    capability_decision: Literal["none", "note", "ask", "block"] | None = Field(
+        default=None, description="Highest triage level of what this version adds over the approved one (capability engine).")
+    capability_counts: dict[str, int] | None = None
 
 
-STATIC_FIELDS = ("structural_score", "instruction_quality_score", "security_score", "security_findings")
+STATIC_FIELDS = ("structural_score", "instruction_quality_score", "security_score", "security_findings",
+                 "capability_decision", "capability_counts")
 
 
 def assess_version(evidence: AssuranceInput, policy: AssurancePolicy | None = None) -> dict[str, Any]:
@@ -48,11 +56,13 @@ def assess_version(evidence: AssuranceInput, policy: AssurancePolicy | None = No
     return report
 
 
-def reassess_with_runs(previous: dict[str, Any], measured: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
-    """The same static inputs and policy as `previous`, with measured run evidence added."""
+def reassess_with_runs(previous: dict[str, Any], measured: dict[str, Any], provenance: dict[str, Any],
+                       policy: AssurancePolicy | None = None) -> dict[str, Any]:
+    """The same static inputs as `previous`, with measured run evidence added, judged on `policy` (the tenant's policy
+    now) or, without one, on the policy `previous` was judged on."""
     if "inputs" not in previous:
         raise ValueError("this version's report predates stored inputs; register it again to assess it on runs")
-    report = assess_version(AssuranceInput(**previous["inputs"], **measured), AssurancePolicy(**previous.get("policy", {})))
+    report = assess_version(AssuranceInput(**previous["inputs"], **measured), policy or AssurancePolicy(**previous.get("policy", {})))
     report["evidence"] = provenance
     if "subject" in previous:
         report["subject"] = previous["subject"]
@@ -108,6 +118,18 @@ def evaluate_assurance(evidence: AssuranceInput, policy: AssurancePolicy | None 
         gates.append({"code": "COST_OVERHEAD", "status": "pass", "message": f"Cost overhead {evidence.cost_overhead_percent:.2f}% is within maximum {policy.maximum_cost_overhead_percent:.2f}%."})
     else:
         gates.append({"code": "COST_OVERHEAD", "status": "fail", "message": f"Cost overhead {evidence.cost_overhead_percent:.2f}% exceeds maximum {policy.maximum_cost_overhead_percent:.2f}%."})
+
+    if evidence.capability_decision is not None:
+        # What the capability engine found this version adds over the approved one.
+        counts = evidence.capability_counts or {}
+        if evidence.capability_decision == "block" and policy.block_level_capabilities == "require_review":
+            gates.append({"code": "CAPABILITY_CHANGE", "status": "review_required", "message": f"Adds {counts.get('block', 0)} block-level capability(ies); this tenant's policy requires a security review before approval."})
+        elif evidence.capability_decision == "block":
+            gates.append({"code": "CAPABILITY_CHANGE", "status": "pass", "message": f"Adds {counts.get('block', 0)} block-level capability(ies): the approver must acknowledge the exact change at promotion."})
+        elif evidence.capability_decision == "ask":
+            gates.append({"code": "CAPABILITY_CHANGE", "status": "pass", "message": f"Adds {counts.get('ask', 0)} capability(ies) to confirm as expected; nothing block-level."})
+        else:
+            gates.append({"code": "CAPABILITY_CHANGE", "status": "pass", "message": "Adds no capability that needs confirming."})
 
     if evidence.adherence_rate is not None:
         # Only when measured: a skill without a conformance benchmark is judged on the gates above, as before.

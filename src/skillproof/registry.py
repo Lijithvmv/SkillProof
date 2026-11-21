@@ -76,6 +76,23 @@ SQLITE_SCHEMA = """
         marked_at TEXT NOT NULL,
         PRIMARY KEY (tenant_id, skill_name, category, value, files)
     );
+    CREATE TABLE IF NOT EXISTS tenant_policies (
+        tenant_id TEXT PRIMARY KEY,
+        policy_json TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS policy_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS policy_events_no_update
+    BEFORE UPDATE ON policy_events BEGIN SELECT RAISE(ABORT, 'policy events are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS policy_events_no_delete
+    BEFORE DELETE ON policy_events BEGIN SELECT RAISE(ABORT, 'policy events are append-only'); END;
 """
 
 POSTGRES_SCHEMA = """
@@ -120,7 +137,20 @@ POSTGRES_SCHEMA = """
         marked_at TEXT NOT NULL,
         PRIMARY KEY (tenant_id, skill_name, category, value, files)
     );
-""" + tenant_policy("skill_versions") + tenant_policy("registry_events") + tenant_policy("false_alarms") + append_only(
+    CREATE TABLE IF NOT EXISTS tenant_policies (
+        tenant_id TEXT PRIMARY KEY,
+        policy_json TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS policy_events (
+        event_id BIGSERIAL PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        policy_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL
+    );
+""" + tenant_policy("tenant_policies") + tenant_policy("policy_events") + append_only("policy_events", "policy events are append-only") + tenant_policy("skill_versions") + tenant_policy("registry_events") + tenant_policy("false_alarms") + append_only(
     "registry_events", "registry events are append-only")
 
 
@@ -258,6 +288,33 @@ class SkillRegistry:
             db.execute("UPDATE skill_versions SET state='active', updated_at=? WHERE version_id=?", (now, previous["version_id"]))
             self._event(previous["version_id"], tenant_id, actor_id, "restored", f"from {active['version_id']}: {reason}", now)
         return self.get_version(tenant_id, previous["version_id"])
+
+    def get_policy(self, tenant_id: str) -> dict[str, Any] | None:
+        """The tenant's stored assurance policy, or None when it uses the default."""
+        with self.db.transaction(tenant_id) as db:
+            row = db.execute("SELECT policy_json, updated_by, updated_at FROM tenant_policies WHERE tenant_id=?", (tenant_id,)).fetchone()
+        return None if row is None else {"policy": json.loads(row["policy_json"]), "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    def set_policy(self, tenant_id: str, policy: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        """Store the tenant's policy; every change is kept in an append-only history. Versions already registered keep
+        the report they were judged on until they are assessed again."""
+        tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
+        if not tenant_id or not actor_id:
+            raise RegistryError("tenant_id and actor_id are required")
+        now, body = self._now(), json.dumps(policy, sort_keys=True)
+        with self.db.transaction(tenant_id, write=True) as db:
+            db.execute("INSERT INTO tenant_policies (tenant_id, policy_json, updated_by, updated_at) VALUES (?, ?, ?, ?) "
+                       "ON CONFLICT (tenant_id) DO UPDATE SET policy_json=excluded.policy_json, updated_by=excluded.updated_by, "
+                       "updated_at=excluded.updated_at", (tenant_id, body, actor_id, now))
+            db.execute("INSERT INTO policy_events (tenant_id, actor_id, policy_json, occurred_at) VALUES (?, ?, ?, ?)",
+                       (tenant_id, actor_id, body, now))
+        return self.get_policy(tenant_id)
+
+    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        """What a manifest would add over the tenant's active version (or the latest one while nothing is approved),
+        ranked, without registering anything. Used to put the capability change into the assurance gate."""
+        with self.db.transaction(tenant_id):
+            return self._change(tenant_id, skill_name, manifest, fallback_previous=True)
 
     def promote(
         self, tenant_id: str, version_id: str, assurance_report: dict[str, Any],

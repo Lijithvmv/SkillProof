@@ -278,3 +278,21 @@ def test_version_cites_recorded_experiments_bound_to_its_skill_text(client):
     assert assurance["evidence"]["models"] == ["local/llama3"]
     gates = {g["code"]: g["status"] for g in assurance["gates"]}
     assert gates["BEHAVIORAL_LIFT"] == "pass" and version["state"] == "pending_review"
+
+
+def test_rollback_over_the_api_needs_the_promote_role_and_a_reason(client):
+    # Decision: who can change what is live after a bad update, and that it is audited with a reason.
+    first = upload(client, SKILL)
+    client.post(f"/api/v1/registry/versions/{first['version_id']}/promote", headers=as_user("bob", "approver"),
+                json={"approval_request_id": approve(client, first["version_id"])})
+    second = upload(client, SKILL + "\nAlso list the authors of each change.\n")
+    client.post(f"/api/v1/registry/versions/{second['version_id']}/promote", headers=as_user("bob", "approver"),
+                json={"approval_request_id": approve(client, second["version_id"])})
+    denied = client.post("/api/v1/registry/skills/release-notes/rollback", json={"reason": "bad"}, headers=as_user("alice", "evaluator"))
+    assert denied.status_code == 403
+    done = client.post("/api/v1/registry/skills/release-notes/rollback", json={"reason": "authors list leaked emails"},
+                       headers=as_user("bob", "approver"))
+    assert done.status_code == 200 and done.json()["version_id"] == first["version_id"] and done.json()["state"] == "active"
+    assert done.json()["events"][-1]["action"] == "restored"
+    runs = client.get("/api/v1/evaluations/experiments", params={"skill_name": "release-notes"}, headers=as_user("carol", "viewer"))
+    assert runs.status_code == 200 and runs.json()["experiments"] == []

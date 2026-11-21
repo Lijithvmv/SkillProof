@@ -119,8 +119,8 @@ def test_catalogue_import_cites_runs_recorded_for_the_exact_skill_md(tmp_path):
     assert gates["BEHAVIORAL_LIFT"] == "pass" and gates["CLAIM_ADHERENCE"] == "pass" and gates["PAIRED_RUN_COUNT"] == "pass"
 
 
-def test_unchanged_version_lists_runs_recorded_after_it_was_registered(tmp_path):
-    # Decision: a reviewer sees that new evidence exists for a version whose report predates it, instead of nothing.
+def test_runs_recorded_after_registration_reassess_the_waiting_version(tmp_path):
+    # Decision: a version registered before its runs is no longer stuck at insufficient_evidence.
     root = tmp_path / ".claude"
     write_skill(root / "skills" / "incident-summary", SKILL)
     governance = governance_for(tmp_path)
@@ -130,4 +130,8 @@ def test_unchanged_version_lists_runs_recorded_after_it_was_registered(tmp_path)
     stored = governance.record_evaluation(Principal(user_id="e", tenant_id="local", role="evaluator"),
                                           experiment_for(installed_text(root)), skill_key="incident-summary")
     again = import_installed(governance, importer, [root])
-    assert again["evidence_not_attached"][0]["experiments"] == [stored["experiment_id"]]
+    assert again["evidence_not_attached"] == []
+    [row] = again["reassessed"]  # still waiting for a decision, so assessed again on the new run
+    assert row["experiments"] == [stored["experiment_id"]] and row["assurance_decision"] != "insufficient_evidence"
+    version = governance.get_skill(importer, row["version_id"])
+    assert version["assurance"]["evidence"]["source"] == "measured" and version["events"][-1]["action"] == "reassessed"

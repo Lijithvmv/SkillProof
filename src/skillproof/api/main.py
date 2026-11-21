@@ -343,6 +343,18 @@ def registry_promote(version_id: str, body: PromoteRequest, request: Request) ->
         principal, version_id, body.approval_request_id, capability_ack=body.capability_ack))
 
 
+class RollbackRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/v1/registry/skills/{skill_name}/rollback")
+def registry_rollback(skill_name: str, body: RollbackRequest, request: Request) -> dict[str, Any]:
+    """Make the last approved version of a skill active again, with the reason in the audit trail."""
+    principal = _principal(request)
+    governance = _governance(request)
+    return _guarded(lambda: governance.rollback_skill(principal, skill_name, body.reason))
+
+
 class FalseAlarmRequest(BaseModel):
     category: str = Field(min_length=1, max_length=64)
     value: str = Field(min_length=1, max_length=512)
@@ -376,6 +388,21 @@ def auth_config(request: Request) -> dict[str, Any]:
 class ExperimentRecord(BaseModel):
     skill_name: str = Field(min_length=1, max_length=200)
     report: dict[str, Any] = Field(description="An execute_experiment() result; only its summary metrics are stored.")
+
+
+@app.get("/api/v1/evaluations/experiments")
+def list_experiments(skill_name: str, request: Request) -> dict[str, Any]:
+    """Recorded runs of a skill in this tenant: lift, adherence per claim, models and cost, newest first."""
+    principal = _principal(request)
+    governance = _governance(request)
+    rows = _guarded(lambda: governance.list_evaluations(principal, skill_key=skill_name, limit=100))
+    return {"skill_name": skill_name, "experiments": [
+        {"experiment_id": r["experiment_id"], "instructions_fingerprint": r["instructions_fingerprint"], "created_at": r["created_at"],
+         "lift_pp": (r["summary"].get("comparison") or {}).get("skill_lift_percentage_points"),
+         "interpretation": (r["summary"].get("comparison") or {}).get("interpretation"),
+         "paired_by_task": (r["summary"].get("comparison") or {}).get("paired_by_task"),
+         "adherence": (r["summary"].get("comparison") or {}).get("adherence"),
+         "models": [m.get("model") for m in (r["summary"].get("model_compatibility") or {}).get("models", [])]} for r in rows]}
 
 
 @app.post("/api/v1/evaluations/experiments", dependencies=[Depends(require_roles("tenant_admin", "evaluator"))])

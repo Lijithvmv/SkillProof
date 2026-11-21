@@ -79,6 +79,15 @@ class GovernanceAccess:
         return self.registry.promote(principal.tenant_id, version_id, assurance_report, approval_record,
                                      actor_id=principal.user_id, capability_ack=capability_ack)
 
+    def reassess_skill(self, principal: Principal, version_id: str, assurance_report: dict[str, Any]) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "skill.register")
+        return self.registry.reassess(principal.tenant_id, version_id, assurance_report, actor_id=principal.user_id)
+
+    def rollback_skill(self, principal: Principal, skill_name: str, reason: str) -> dict[str, Any]:
+        """Restore the last approved version. The same permission as promotion: it changes what is live."""
+        authorize(principal, principal.tenant_id, "skill.promote")
+        return self.registry.rollback(principal.tenant_id, skill_name, actor_id=principal.user_id, reason=reason)
+
     def promote_version(self, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
         """Promote using the assurance report stored with the version and the tenant's own approval record."""
         authorize(principal, principal.tenant_id, "skill.promote")

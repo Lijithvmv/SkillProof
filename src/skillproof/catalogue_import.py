@@ -121,6 +121,7 @@ def import_installed(
 
     registered: list[dict[str, Any]] = []
     evidence_not_attached: list[dict[str, Any]] = []
+    reassessed: list[dict[str, Any]] = []
     known: dict[str, list[dict[str, Any]]] = {}
     unchanged = 0
     for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
@@ -141,32 +142,26 @@ def import_installed(
         if existing is not None:
             unchanged += 1  # checked before any analysis, so a re-run only reads and hashes the folders
             had = set(((existing.get("assurance") or {}).get("evidence") or {}).get("experiment_ids") or [])
-            if set(cited) - had:
+            if not set(cited) - had:
+                continue
+            if existing["state"] in {"pending_review", "not_eligible"}:
+                # Runs recorded after registration: the version waiting for a decision is assessed again on them.
+                report = _report(text, fingerprint, name)
+                assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy)
+                version = governance.reassess_skill(principal, existing["version_id"], assurance)
+                reassessed.append({"skill_name": name, "version_id": version["version_id"], "state": version["state"],
+                                   "assurance_decision": assurance["decision"], "experiments": sorted(cited)})
+            else:
+                # An approved version keeps the report it was approved on; new evidence is listed for the reviewer.
                 evidence_not_attached.append({"skill_name": name, "version_id": existing["version_id"],
-                                              "experiments": sorted(set(cited) - had)})
+                                              "state": existing["state"], "experiments": sorted(set(cited) - had)})
             continue
-        behaviour: dict[str, Any] = {}
-        provenance: dict[str, Any] = {"source": "none"}
-        if cited:
-            measured = measured_evidence(records, cited, skill_md)
-            provenance = measured.pop("provenance")
-            behaviour = measured
-        report = analyze_files(text)
-        report["package_fingerprint"] = fingerprint
-        report["metadata"] = dict(report.get("metadata") or {}, name=name)
+        report = _report(text, fingerprint, name)
         manifest = build_manifest(files)
         add_second_opinions(manifest, files)
         manifest["not_scanned"] = sorted(oversize)
-        security = report.get("security") or {}
-        assurance = evaluate_assurance(AssuranceInput(
-            structural_score=report.get("structural_score"),
-            instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
-            security_score=security.get("security_score"),
-            security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
-            **behaviour,
-        ), policy)
-        assurance["evidence"] = provenance
-        assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": name, "package_fingerprint": fingerprint}
+        assurance = _assurance(report, records, cited, skill_md, principal, name, fingerprint, policy)
+        provenance = assurance["evidence"]
         version = governance.register_skill(principal, report, assurance, artifact_uri=skill_dir.as_uri(), capability_manifest=manifest)
         change = version["capability_change"] or {}
         registered.append({
@@ -186,10 +181,40 @@ def import_installed(
         "updates_with_block": sum(r["decision"] == "block" for r in updates),
         "updates_with_ask": sum(r["decision"] == "ask" for r in updates),
         "registered": registered,
+        "reassessed": reassessed,
         "evidence_not_attached": evidence_not_attached,
         "errors": errors,
         "limitations": "A skill's assurance cites the experiments recorded for its exact SKILL.md (evaluate-skill); "
-                       "without them it stays insufficient_evidence. A version registered before its experiments were "
-                       "recorded keeps its original report (listed under evidence_not_attached). A first import has no "
-                       "earlier version to compare with, so every capability a skill has counts as added.",
+                       "without them it stays insufficient_evidence. A version still waiting for a decision is assessed "
+                       "again when new runs exist (an approval request made on the old report no longer matches); an "
+                       "approved version keeps its report and new runs are listed under evidence_not_attached. A first "
+                       "import has no earlier version to compare with, so every capability a skill has counts as added.",
     }
+
+
+def _report(text: dict[str, str], fingerprint: str, name: str) -> dict[str, Any]:
+    report = analyze_files(text)
+    report["package_fingerprint"] = fingerprint
+    report["metadata"] = dict(report.get("metadata") or {}, name=name)
+    return report
+
+
+def _assurance(report: dict[str, Any], records: list[dict[str, Any]], cited: list[str], skill_md: str,
+               principal: Principal, name: str, fingerprint: str, policy: AssurancePolicy) -> dict[str, Any]:
+    behaviour: dict[str, Any] = {}
+    provenance: dict[str, Any] = {"source": "none"}
+    if cited:
+        measured = measured_evidence(records, cited, skill_md)
+        provenance = measured.pop("provenance")
+        behaviour = measured
+    security = report.get("security") or {}
+    assurance = evaluate_assurance(AssuranceInput(
+        structural_score=report.get("structural_score"),
+        instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
+        security_score=security.get("security_score"),
+        security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
+        **behaviour,
+    ), policy)
+    assurance["evidence"] = provenance
+    assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": name, "package_fingerprint": fingerprint}
+    return assurance

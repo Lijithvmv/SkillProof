@@ -202,6 +202,63 @@ class SkillRegistry:
                             f"{change['decision']} against {change['against']} {change['change_hash'][:12]}", now)
         return self.get_version(tenant_id, version_id)
 
+    def reassess(self, tenant_id: str, version_id: str, assurance_report: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        """Replace the assurance report of a version still waiting for a decision, when new evidence exists for its
+        exact package. An approval request made on the old report no longer matches (promotion checks the hash), so it
+        must be submitted again. Active and superseded versions keep the report they were approved on."""
+        tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
+        if not tenant_id or not actor_id:
+            raise RegistryError("tenant_id and actor_id are required")
+        new_hash = _canonical_hash(assurance_report)
+        now = self._now()
+        with self.db.transaction(tenant_id, write=True) as db:
+            row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
+            if row is None:
+                raise RegistryError("skill version not found in this tenant")
+            if row["state"] not in {"pending_review", "not_eligible"}:
+                raise RegistryError(f"a {row['state']} version keeps the assurance report it was approved on")
+            subject = assurance_report.get("subject") or {}
+            if subject and (subject.get("package_fingerprint") != row["package_fingerprint"]
+                            or subject.get("skill_name") != row["skill_name"] or subject.get("tenant_id") != tenant_id):
+                raise RegistryError("the assurance report is about a different package")
+            if new_hash != row["assurance_hash"]:
+                summary = json.loads(row["summary_json"])
+                old_decision = summary.get("assurance_decision")
+                summary["assurance_decision"], summary["policy_id"] = assurance_report.get("decision"), assurance_report.get("policy_id")
+                state = "pending_review" if assurance_report.get("decision") == "eligible_for_human_approval" else "not_eligible"
+                db.execute("UPDATE skill_versions SET assurance_hash=?, assurance_json=?, summary_json=?, state=?, updated_at=? "
+                           "WHERE version_id=?", (new_hash, _dump(assurance_report),
+                                                  json.dumps(summary, sort_keys=True, separators=(",", ":")), state, now, version_id))
+                self._event(version_id, tenant_id, actor_id, "reassessed",
+                            f"{old_decision} -> {assurance_report.get('decision')}; replaces report {row['assurance_hash'][:12]}", now)
+        return self.get_version(tenant_id, version_id)
+
+    def rollback(self, tenant_id: str, skill_name: str, *, actor_id: str, reason: str) -> dict[str, Any]:
+        """Make the last superseded version active again and retire the active one, in one audited step. Only a version
+        that was approved and promoted before can come back; nothing new is approved by a rollback."""
+        tenant_id, actor_id, reason = tenant_id.strip(), actor_id.strip(), (reason or "").strip()
+        if not tenant_id or not actor_id:
+            raise RegistryError("tenant_id and actor_id are required")
+        if not reason or len(reason) > 500:
+            raise RegistryError("a reason of 1 to 500 characters is required")
+        now = self._now()
+        with self.db.transaction(tenant_id, write=True) as db:
+            active = db.execute("SELECT version_id FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'",
+                                (tenant_id, skill_name)).fetchone()
+            if active is None:
+                raise RegistryError("no active version to roll back from")
+            previous = db.execute(
+                "SELECT version_id FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='superseded' "
+                "AND version_id NOT IN (SELECT version_id FROM registry_events WHERE tenant_id=? AND action='rolled_back') "
+                f"ORDER BY updated_at DESC, {db.insertion_order} DESC LIMIT 1", (tenant_id, skill_name, tenant_id)).fetchone()
+            if previous is None:
+                raise RegistryError("no earlier approved version to roll back to")
+            db.execute("UPDATE skill_versions SET state='superseded', updated_at=? WHERE version_id=?", (now, active["version_id"]))
+            self._event(active["version_id"], tenant_id, actor_id, "rolled_back", f"to {previous['version_id']}: {reason}", now)
+            db.execute("UPDATE skill_versions SET state='active', updated_at=? WHERE version_id=?", (now, previous["version_id"]))
+            self._event(previous["version_id"], tenant_id, actor_id, "restored", f"from {active['version_id']}: {reason}", now)
+        return self.get_version(tenant_id, previous["version_id"])
+
     def promote(
         self, tenant_id: str, version_id: str, assurance_report: dict[str, Any],
         approval_record: dict[str, Any], *, actor_id: str, capability_ack: str | None = None,

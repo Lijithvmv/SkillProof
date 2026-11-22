@@ -100,10 +100,12 @@ def evaluate_skill(args) -> dict[str, Any]:
     return experiment
 
 
-def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> dict[str, Any]:
+def measure_load_rate(args, relevant: list[str] | None, forced_lift: float | None) -> dict[str, Any]:
     """How often a model picks the skill from its description among the skills it competes with: the installed
     skills whose descriptions are closest to it (the ones most likely to be picked instead), plus any listed in
-    --distractor-skills. Relevant requests are the benchmark's prompts; unrelated ones come from --unrelated-tasks."""
+    --distractor-skills. Relevant requests are given (benchmark prompts, --requests) or, when None, written from the
+    skill's description by a local model (engines/requests.py). Unrelated ones come from --unrelated-tasks, plus
+    near misses written for the closest rivals when --near-misses is above 0."""
     from skillproof.engines.activation import SkillCard
     from skillproof.engines.installed import default_roots
     from skillproof.engines.inventory import installed_cards, rank_similar
@@ -112,6 +114,23 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
     target = read_skill_card(folder if folder.name == "SKILL.md" else folder / "SKILL.md")
     roots = [Path(r) for r in args.competitors_root] or default_roots()
     pool = [(name, description) for name, description in installed_cards(roots) if name != target.name]
+    generated: dict[str, Any] | None = None
+    ask = None
+    near = getattr(args, "near_misses", 0) or 0
+    if relevant is None or near:
+        from skillproof.adapters.ollama import ollama_json_asker
+
+        generator = getattr(args, "generator_model", None) or args.model
+        ask = ollama_json_asker(generator, args.ollama_url, temperature=0.7, seed=args.seed, max_output_tokens=2000)
+    if relevant is None:
+        from skillproof.engines.requests import write_requests
+
+        assert ask is not None
+        relevant, dropped = write_requests(target.name, target.description, ask, getattr(args, "generate", 6))
+        if not relevant:
+            raise ValueError(f"no usable request could be written from the description ({len(dropped)} dropped)")
+        generated = {"source": "generated_from_descriptions", "model": getattr(args, "generator_model", None) or args.model,
+                     "relevant": relevant, "near_misses": [], "dropped": dropped}
     ranked = rank_similar(target.description, pool, args.competitors)
     semantic: dict[str, Any] = {"status": "off"}
     matched: list[dict[str, Any]] = []
@@ -134,9 +153,23 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
             cards.append(card)
     if not cards:
         raise ValueError("no competing skills found for the load-rate test: pass --competitors-root or --distractor-skills")
+    unrelated = read_requests(args.unrelated_tasks) if args.unrelated_tasks else []
+    if near:
+        # Near misses: requests for the closest rivals (by request match when available), which this skill must not take.
+        from skillproof.engines.requests import write_requests
+
+        assert ask is not None
+        generated = generated or {"source": "generated_from_descriptions", "model": getattr(args, "generator_model", None) or args.model,
+                                  "relevant": [], "near_misses": [], "dropped": []}
+        rivals = [(r["name"], r["description"]) for r in (matched or ranked)[:getattr(args, "rivals", 3)]]
+        for rival_name, rival_description in rivals:
+            kept, lost = write_requests(rival_name, rival_description, ask, near)
+            generated["near_misses"].extend({"rival": rival_name, "request": text} for text in kept)
+            generated["dropped"].extend(lost)
+        unrelated = unrelated + [item["request"] for item in generated["near_misses"]]
     probe = OllamaActivationProbe(model=args.model, base_url=args.ollama_url, seed=args.seed)
     result = measure_activation(target=target, distractors=cards, relevant_requests=relevant,
-                                unrelated_requests=read_requests(args.unrelated_tasks) if args.unrelated_tasks else [],
+                                unrelated_requests=unrelated,
                                 probe=probe, repeats=args.load_repeats, seed=args.seed, forced_lift_percentage_points=forced_lift)
     records = result.pop("records", None) or []  # by_request keeps the per-request picture; single choices are not needed later
     result["failure_reasons"] = sorted({r["error"] for r in records if r.get("error")})[:10]  # why a choice could not be made
@@ -154,6 +187,11 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
         "used": list(by_name.values()) + [{"name": c.name, "listed": True} for c in listed],
     }
     result["model"] = args.model
+    if generated is not None:
+        generated["limitations"] = ("Written by a local model from the descriptions alone and checked only for naming the "
+                                    "skill, copying its description and duplicates. A near miss written for a rival can still "
+                                    "be a fair request for this skill when the two overlap; read them before trusting the rate.")
+        result["requests"] = generated
     return result
 
 
@@ -165,8 +203,10 @@ def load_rate_failed(load: dict[str, Any]) -> bool:
 
 
 def run_load_rate(args) -> Result:
+    if getattr(args, "near_misses", None) is None:
+        args.near_misses = 0 if args.requests else 2
     try:
-        result = measure_load_rate(args, read_requests(args.requests), None)
+        result = measure_load_rate(args, read_requests(args.requests) if args.requests else None, None)
         return result, 1 if load_rate_failed(result) or result["failures"] else 0
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         return {"error": str(exc)}, 4
@@ -308,6 +348,9 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--competitors-root", action="append", default=[], help="Folder of installed skills to draw competitors from; repeat. Default: common agent locations.")
     evaluate.add_argument("--distractor-skills", help="JSONL of extra competing skills (name, description).")
     evaluate.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for (false load rate).")
+    evaluate.add_argument("--near-misses", type=int, default=0, help="With --load-rate: requests to write for each of the closest rivals, which the skill must not take.")
+    evaluate.add_argument("--rivals", type=int, default=3)
+    evaluate.add_argument("--generator-model", help="Local model that writes near misses (default: --model).")
     evaluate.add_argument("--load-repeats", type=int, default=3, help="Choices per request (the skill list is shuffled each time).")
     evaluate.add_argument("--name", help="Catalogue skill name to record under (default: the SKILL.md name).")
     evaluate.add_argument("--data-dir", help="Catalogue storage to record into (as catalogue-import). Omit to only report.")
@@ -317,7 +360,11 @@ def add(commands, conf) -> None:
 
     load = commands.add_parser("load-rate", help="How often a local model picks this skill from its description, among the installed skills whose descriptions are closest to it, for requests it is for (--requests) and for unrelated ones. A quick check of a description; to put it in the catalogue's decision use evaluate-skill --load-rate. Exit 1 below SKILLPROOF_MIN_LOAD_RATE or above SKILLPROOF_MAX_FALSE_LOAD_RATE.")
     load.add_argument("skill", help="Skill folder (holding SKILL.md).")
-    load.add_argument("--requests", required=True, help="JSONL of prompts the skill is for ({\"prompt\": ...}).")
+    load.add_argument("--requests", help="JSONL of prompts the skill is for ({\"prompt\": ...}). Omit to have the local model write them from the description (checked: no skill name, no copied phrase), with near misses for the closest rivals.")
+    load.add_argument("--generate", type=int, default=6, help="Requests to write from the description when --requests is omitted.")
+    load.add_argument("--near-misses", type=int, default=None, help="Requests to write for each of the closest rivals, which the skill must not take (default 2 when generating, else 0).")
+    load.add_argument("--rivals", type=int, default=3, help="How many of the closest rivals get near misses.")
+    load.add_argument("--generator-model", help="Local model that writes requests (default: --model).")
     load.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for.")
     load.add_argument("--model", required=True, help="Local Ollama model that chooses.")
     load.add_argument("--ollama-url", default=conf.ollama_url)

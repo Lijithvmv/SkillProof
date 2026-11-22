@@ -123,7 +123,7 @@ Every feature below keeps its tests; the suite must stay green through every sta
 | Package store and sync (enforcement) | storage/artifacts, services/distribution, cli sync | test_sync |
 | Provenance: agent-written updates reviewed as new skills, no author approves | provenance, registry, authorization, oidc | test_provenance |
 | Sandboxed tool runs: trajectories judged against protected paths and the static manifest | engines/sandbox, engines/trajectory, adapters/ollama OllamaToolRunner | test_sandbox |
-| Load rate against the closest installed skills, LOAD_RATE gate | engines/activation, engines/inventory rank_similar, services/catalogue apply_load_rate | test_load_rate |
+| Load rate against the closest installed skills (word overlap and request matching), generated requests, LOAD_RATE gate | engines/activation, engines/inventory, engines/requests, services/catalogue apply_load_rate | test_load_rate, test_requests |
 | Installed-skill import, installed-vs-approved check | catalogue_import | test_catalogue_import, test_conformance |
 | Watch installed skills and plugins | installed | test_installed |
 | APM lockfile check | apm_lock | test_apm_lock |

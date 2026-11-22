@@ -79,9 +79,21 @@ matching ranked it 1st, and its word overlap with review-security is 0.06. With 
 review-security 8 of 8 (a false pass, the real rival absent); with rivals by meaning it measured 4 of 8 (50%, exactly the
 default floor, so that run passed; at 15 competitors it measured 3 of 8 and failed). Request matching chooses competitors;
 it does not predict the pick (create-pr was outranked on 2 of its 4 requests by it and was still picked 8 of 8).
+Requests can now be generated: a local model (qwen2.5-coder, a different model from the gemma4 router) writes the skill's
+own requests from its description, and near misses for its three closest rivals. A request that names the skill, copies
+four content words in a row, or takes most of its content words from the description is dropped and fed back for up to
+three rounds. Generated against hand-written on this machine:
+- create-pr: 12 of 12 own, 0 of 12 near misses, against 8 of 8 and 0 of 20. They agree. One round alone dropped all six
+  requests, because the description uses the plain task words; feedback rounds fixed that.
+- create-draft-pr: 8 of 8, 0 of 10, against 8 of 8, 0 of 20. They agree.
+- review-security: 7 of 12 (58%, pass), against 3 of 8 (38%, fail). They disagree on the gate. Both show the loss to
+  claude-security, but one generated own request had lost the security angle and went to a general review skill.
+  Generated requests can drift from what makes a skill distinct, so they are saved for review and labelled; hand-written
+  ones remain the reference.
+(The create-draft-pr and review-security generated runs used the first, stricter filter.)
 Weakest part: the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
 All four gaps have a first build. Open: sync against a deployed server with OIDC tokens; agents acting under a
-person's token; commands that need their output in the sandbox; requests for load rate are still written by hand; tenant-level
+person's token; commands that need their output in the sandbox; generated load-rate requests can drift from a skill's distinct purpose (review them); tenant-level
 thresholds.

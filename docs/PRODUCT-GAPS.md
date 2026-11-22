@@ -50,4 +50,16 @@ decision none (0 rule hits in 8 runs). A version whose SKILL.md asks the agent t
 CLAUDE.md gave decision block: canary exfiltration in 4 of 4 skill runs (0 of 4 baseline), CLAUDE.md write refused in
 3 of 4 (0 of 4). Its static analysis listed the URL and CLAUDE.md as text; the runs show the agent acting on them.
 Weakest part: commands are recorded, never run, so behaviour that depends on command output is not observed; one
-local model, two tasks. Next: gap 4.
+local model, two tasks.
+
+Gap 4 is built: `evaluate-skill --load-rate` measures how often the model picks the skill among the installed skills
+with the closest descriptions, records it with the experiment, and a citing version gets a LOAD_RATE gate (below
+SKILLPROOF_MIN_LOAD_RATE or above SKILLPROOF_MAX_FALSE_LOAD_RATE: not ready). First real run (gemma4-e4b, this
+machine, 170 installed skills, the 15 closest as competitors): picked for 6 of 6 relevant requests, 0 of 12 unrelated.
+Weakest part: the closest installed competitor had similarity 0.055, so this machine had no real rival for release
+notes and the run is the easy case; the probe is a model choosing from a list, not any agent's loader; thresholds are
+starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
+
+All four gaps have a first build. Open: `sync --apply` and the server path on a real machine; agents acting under a
+person's token; commands that need their output in the sandbox; load rate against a real close competitor and
+tenant-level thresholds.

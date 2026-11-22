@@ -123,3 +123,33 @@ def inventory(roots: list[str | Path], *, overlap_threshold: float = 0.3) -> dic
             "Overlap is lexical: two descriptions can compete without sharing words, and the threshold is unvalidated."
         ),
     }
+
+
+def rank_similar(target: str, pool: list[tuple[str, str]], limit: int) -> list[dict[str, Any]]:
+    """The `limit` skills in `pool` (name, description) whose descriptions are closest to `target`, by the same
+    IDF-weighted Jaccard similarity as the overlap check, most similar first. These are the skills an agent is most
+    likely to pick instead, so a load rate measured against them is the hard case, not the average one."""
+    documents = [_terms(target)] + [_terms(description) for _, description in pool]
+    frequency: dict[str, int] = {}
+    for terms in documents:
+        for term in terms:
+            frequency[term] = frequency.get(term, 0) + 1
+    idf = {term: math.log((len(documents) + 1) / (n + 0.5)) for term, n in frequency.items()}
+    ranked = []
+    for (name, description), terms in zip(pool, documents[1:], strict=True):
+        union = documents[0] | terms
+        score = sum(idf[t] for t in documents[0] & terms) / sum(idf[t] for t in union) if union else 0.0
+        ranked.append({"name": name, "description": description, "similarity": round(score, 3)})
+    ranked.sort(key=lambda item: (-item["similarity"], item["name"]))
+    return ranked[:limit]
+
+
+def installed_cards(roots: list[str | Path]) -> list[tuple[str, str]]:
+    """(name, description) of every installed skill under the roots, one per name, for load-rate competitors."""
+    seen: dict[str, str] = {}
+    for directory in _skill_dirs(roots):
+        meta = _metadata(directory / "SKILL.md")
+        name, description = (meta.get("name") or directory.name).strip(), (meta.get("description") or "").strip()
+        if name and description and name not in seen:
+            seen[name] = description
+    return sorted(seen.items())

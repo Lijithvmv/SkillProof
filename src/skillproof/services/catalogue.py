@@ -68,6 +68,51 @@ def observed_behaviour(records: list[dict[str, Any]], cited: list[str]) -> dict[
             "runs": {e: b.get("runs") for e, b in found}}
 
 
+def load_rate_evidence(records: list[dict[str, Any]], cited: list[str]) -> dict[str, Any] | None:
+    """The most recent cited experiment that measured load rate (records come newest first), or None."""
+    wanted = set(cited)
+    for r in records:
+        load = ((r.get("summary") or {}).get("comparison") or {}).get("load_rate")
+        if r["experiment_id"] in wanted and isinstance(load, dict):
+            relevant, unrelated = load.get("relevant") or {}, load.get("unrelated") or {}
+            return {"experiment_id": r["experiment_id"], "activation_rate": relevant.get("activation_rate"),
+                    "relevant_trials": relevant.get("trials"), "false_activation_rate": unrelated.get("false_activation_rate"),
+                    "unrelated_trials": unrelated.get("trials"), "candidate_skills": load.get("candidate_skills"),
+                    "expected_lift_percentage_points": load.get("expected_lift_percentage_points"), "model": load.get("model"),
+                    "competitors": (load.get("competitors") or {}).get("selection")}
+    return None
+
+
+def apply_load_rate(assurance: dict[str, Any], evidence: dict[str, Any] | None) -> None:
+    """The LOAD_RATE gate. A skill agents rarely pick for the requests it is for does little, and one they pick for
+    unrelated requests gets in the way: either makes the version not ready. Without a load-rate run the gate says so
+    and does not change the decision."""
+    from skillproof.config import settings
+
+    floor, ceiling = settings().min_load_rate, settings().max_false_load_rate
+    gates = assurance.setdefault("gates", [])
+    if evidence is None or evidence.get("activation_rate") is None:
+        gates.append({"code": "LOAD_RATE", "status": "not_measured",
+                      "message": "How often agents pick this skill from its description was not measured (evaluate-skill --load-rate)."})
+        return
+    assurance["load_rate"] = evidence
+    rate, false_rate = evidence["activation_rate"], evidence.get("false_activation_rate")
+    among = f"among {evidence.get('candidate_skills')} competing skills"
+    problems = []
+    if rate < floor:
+        problems.append(f"picked for {rate:.0%} of the requests it is for {among} (minimum {floor:.0%})")
+    if false_rate is not None and false_rate > ceiling:
+        problems.append(f"picked for {false_rate:.0%} of unrelated requests (maximum {ceiling:.0%})")
+    if problems:
+        gates.append({"code": "LOAD_RATE", "status": "fail", "message": "Agents " + " and ".join(problems) + "."})
+        if assurance.get("decision") != "blocked":
+            assurance["decision"] = "not_ready"
+    else:
+        unrelated = "not measured" if false_rate is None else f"{false_rate:.0%}"
+        gates.append({"code": "LOAD_RATE", "status": "pass",
+                      "message": f"Agents picked it for {rate:.0%} of the requests it is for {among}; unrelated requests: {unrelated}."})
+
+
 def assess_package(governance: GovernanceAccess, principal: Principal, files: dict[str, bytes], *,
                    oversize: dict[str, str] | None = None, name: str | None = None, folder: str | None = None,
                    declared: dict[str, Any] | None = None, cite: list[str] | None = None, cite_all_runs: bool = False,
@@ -131,6 +176,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     assurance["evidence"] = provenance
     if observed:
         assurance["observed_behaviour"] = observed
+    apply_load_rate(assurance, load_rate_evidence(records, cited) if cite or cite_all_runs else None)
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": catalogue_name, "package_fingerprint": report["package_fingerprint"]}
     assurance["authorship"] = {"author_kind": authorship["author_kind"], "review_bar": authorship["review_bar"]}
@@ -158,6 +204,10 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
     report = reassess_with_runs(dict(previous), measured, provenance, policy or governance.tenant_policy(principal))
     if "authorship" in previous:  # who wrote it does not change with new runs
         report["authorship"] = previous["authorship"]
+    observed = observed_behaviour(records, matching) or previous.get("observed_behaviour")
+    if observed:
+        report["observed_behaviour"] = observed
+    apply_load_rate(report, load_rate_evidence(records, matching))
     return governance.reassess_skill(principal, version["version_id"], report)
 
 

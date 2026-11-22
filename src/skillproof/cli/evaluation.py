@@ -83,6 +83,9 @@ def evaluate_skill(args) -> dict[str, Any]:
     experiment = execute_experiment(tasks=tasks, skill_instructions=text, runner=runner, evaluator=CheckedEvaluator(judge),
                                     repeats=args.repeats, seed=args.seed, skill_manifest=skill_manifest)
     experiment["comparison"]["adherence"] = adherence(experiment, claims)
+    if args.load_rate:
+        experiment["comparison"]["load_rate"] = measure_load_rate(args, [task.prompt for task in tasks],
+                                                                  experiment["comparison"].get("skill_lift_percentage_points"))
     experiment["benchmark"] = {"benchmark_id": manifest.get("benchmark_id"), "version": manifest.get("version"),
                                "validation_status": manifest.get("status")}
     name = args.name or claims.get("skill") or Path(args.skill).name
@@ -97,6 +100,41 @@ def evaluate_skill(args) -> dict[str, Any]:
     return experiment
 
 
+def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> dict[str, Any]:
+    """How often a model picks the skill from its description among the skills it competes with: the installed
+    skills whose descriptions are closest to it (the ones most likely to be picked instead), plus any listed in
+    --distractor-skills. Relevant requests are the benchmark's prompts; unrelated ones come from --unrelated-tasks."""
+    from skillproof.engines.activation import SkillCard
+    from skillproof.engines.installed import default_roots
+    from skillproof.engines.inventory import installed_cards, rank_similar
+
+    folder = Path(args.skill)
+    target = read_skill_card(folder if folder.name == "SKILL.md" else folder / "SKILL.md")
+    roots = [Path(r) for r in args.competitors_root] or default_roots()
+    pool = [(name, description) for name, description in installed_cards(roots) if name != target.name]
+    ranked = rank_similar(target.description, pool, args.competitors)
+    listed = read_distractors(args.distractor_skills) if args.distractor_skills else []
+    cards, names = [], {target.name}
+    for card in [SkillCard(name=r["name"], description=r["description"]) for r in ranked] + listed:
+        if card.name not in names and card.name != "none":
+            names.add(card.name)
+            cards.append(card)
+    if not cards:
+        raise ValueError("no competing skills found for the load-rate test: pass --competitors-root or --distractor-skills")
+    probe = OllamaActivationProbe(model=args.model, base_url=args.ollama_url, seed=args.seed)
+    result = measure_activation(target=target, distractors=cards, relevant_requests=relevant,
+                                unrelated_requests=read_requests(args.unrelated_tasks) if args.unrelated_tasks else [],
+                                probe=probe, repeats=args.load_repeats, seed=args.seed, forced_lift_percentage_points=forced_lift)
+    result.pop("records", None)  # by_request keeps the per-request picture; single choices are not needed later
+    result["competitors"] = {
+        "source": "installed skills" + (" and --distractor-skills" if listed else ""),
+        "installed_available": len(pool), "selection": f"the {len(ranked)} installed skills with the most similar descriptions",
+        "used": [{"name": r["name"], "similarity": r["similarity"]} for r in ranked] + [{"name": c.name, "listed": True} for c in listed],
+    }
+    result["model"] = args.model
+    return result
+
+
 def run_benchmark_draft(args) -> Result:
     try:
         return benchmark_draft(args), 0
@@ -109,8 +147,15 @@ def run_evaluate_skill(args) -> Result:
         result = evaluate_skill(args)
         followed = (result["comparison"].get("adherence") or {}).get("adherence_rate")
         behaviour = (result["comparison"].get("behaviour") or {}).get("decision")
+        from skillproof.config import settings
+
+        load = result["comparison"].get("load_rate") or {}
+        rate, false_rate = (load.get("relevant") or {}).get("activation_rate"), (load.get("unrelated") or {}).get("false_activation_rate")
+        if load and ((rate is not None and rate < settings().min_load_rate)
+                     or (false_rate is not None and false_rate > settings().max_false_load_rate)):
+            behaviour = behaviour or "load_rate"
         return result, 1 if (sum(result["failure_counts"].values()) or (followed is not None and followed < 0.7)
-                             or behaviour in {"block", "ask"}) else 0
+                             or behaviour in {"block", "ask", "load_rate"}) else 0
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         return {"error": str(exc)}, 4
 
@@ -224,6 +269,12 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--sandbox", action="store_true", help="Let the agent act through tools (files, commands, URLs) in a sandbox and record what it does: protected writes, the canary credential, and behaviour the skill's files do not show. Commands are recorded, never run. Exit 1 when the skill causes block- or ask-level behaviour.")
     evaluate.add_argument("--max-steps", type=int, default=12, help="Tool calls per sandboxed run.")
     evaluate.add_argument("--sandbox-dir", help="Folder for the temporary workspaces (default: the system temp folder).")
+    evaluate.add_argument("--load-rate", action="store_true", help="Also measure how often the model picks this skill from its description among the installed skills it competes with (the most similar descriptions). Exit 1 when it is picked for fewer relevant requests than SKILLPROOF_MIN_LOAD_RATE or for more unrelated ones than SKILLPROOF_MAX_FALSE_LOAD_RATE.")
+    evaluate.add_argument("--competitors", type=int, default=15, help="How many of the most similar installed skills compete with it.")
+    evaluate.add_argument("--competitors-root", action="append", default=[], help="Folder of installed skills to draw competitors from; repeat. Default: common agent locations.")
+    evaluate.add_argument("--distractor-skills", help="JSONL of extra competing skills (name, description).")
+    evaluate.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for (false load rate).")
+    evaluate.add_argument("--load-repeats", type=int, default=3, help="Choices per request (the skill list is shuffled each time).")
     evaluate.add_argument("--name", help="Catalogue skill name to record under (default: the SKILL.md name).")
     evaluate.add_argument("--data-dir", help="Catalogue storage to record into (as catalogue-import). Omit to only report.")
     evaluate.add_argument("--tenant", default="local")

@@ -16,6 +16,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_AUTH_MODE | auth_mode | `local` (development identity headers) or `oidc` |
 | SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated) |
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
+| SKILLPROOF_MIN_LOAD_RATE / SKILLPROOF_MAX_FALSE_LOAD_RATE | min_load_rate, max_false_load_rate | load-rate gate: least share of relevant requests that pick the skill (0.5), most share of unrelated ones (0.2) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
 | SKILLPROOF_SECOND_OPINION_MODEL / _URL | second_opinion | local-model second opinion on risk items; off when no model is set |
 | SKILLPROOF_PROVIDER, SKILLPROOF_MODEL, SKILLPROOF_GRADER_MODEL | pilot | defaults for the `pilot` and `grader-check` commands |
@@ -99,6 +100,10 @@ class Settings:
     pilot_provider: str = "openai"
     pilot_model: str = ""
     pilot_grader_model: str = ""
+    # Load-rate gate (a version citing a load-rate run): the least share of relevant requests that must pick the skill,
+    # and the most share of unrelated requests that may. Defaults are starting points, not validated thresholds.
+    min_load_rate: float = 0.5
+    max_false_load_rate: float = 0.2
 
     @property
     def production(self) -> bool:
@@ -136,6 +141,8 @@ def settings() -> Settings:
         pilot_provider=_get("SKILLPROOF_PROVIDER", "openai") or "openai",
         pilot_model=_get("SKILLPROOF_MODEL") or _get("SKILLPROOF_OPENAI_MODEL"),
         pilot_grader_model=_get("SKILLPROOF_GRADER_MODEL") or _get("SKILLPROOF_OPENAI_GRADER_MODEL"),
+        min_load_rate=_float("SKILLPROOF_MIN_LOAD_RATE", 0.5),
+        max_false_load_rate=_float("SKILLPROOF_MAX_FALSE_LOAD_RATE", 0.2),
     )
 
 
@@ -145,6 +152,8 @@ def problems(config: Settings | None = None) -> list[str]:
     found = []
     if s.environment not in {"development", "production"}:
         found.append(f"SKILLPROOF_ENV must be development or production, not {s.environment!r}")
+    if not (0 <= s.min_load_rate <= 1 and 0 <= s.max_false_load_rate <= 1):
+        found.append("SKILLPROOF_MIN_LOAD_RATE and SKILLPROOF_MAX_FALSE_LOAD_RATE must be between 0 and 1")
     if s.auth_mode not in {"local", "oidc"}:
         found.append(f"SKILLPROOF_AUTH_MODE must be local or oidc, not {s.auth_mode!r}")
     if s.production and s.auth_mode != "oidc":

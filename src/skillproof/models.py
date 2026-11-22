@@ -64,6 +64,7 @@ class AssuranceReport(TypedDict, total=False):
     evidence: dict[str, Any]
     subject: dict[str, str]
     observed_behaviour: dict[str, Any]  # what cited sandboxed runs showed the skill makes agents do
+    load_rate: dict[str, Any]  # how often agents pick the skill among its competitors (cited load-rate run)
     authorship: dict[str, str]  # author kind and review bar (skillproof.provenance), bound into the approval hash
 
 

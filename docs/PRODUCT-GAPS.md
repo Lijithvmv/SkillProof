@@ -72,9 +72,16 @@ written by hand):
   in other words; drawing 15 competitors, not one, is what caught it.
 One choice failed because the model answered outside the schema (a fenced `[{"tool": "create-pr"}]`). Such
 answers are now read when exactly one listed name appears, and the reasons for any failed choice are kept.
+Rivals by meaning are now added: the installed skills that best match the skill's own requests by local embeddings
+(nomic-embed-text, request against name and description, as a loader matches), next to the closest descriptions by word overlap.
+Comparing description with description did not find claude-security (embeddings ranked it 5th, word overlap 7th); request
+matching ranked it 1st, and its word overlap with review-security is 0.06. With 3 competitors, word overlap alone gave
+review-security 8 of 8 (a false pass, the real rival absent); with rivals by meaning it measured 4 of 8 (50%, exactly the
+default floor, so that run passed; at 15 competitors it measured 3 of 8 and failed). Request matching chooses competitors;
+it does not predict the pick (create-pr was outranked on 2 of its 4 requests by it and was still picked 8 of 8).
 Weakest part: the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
 All four gaps have a first build. Open: sync against a deployed server with OIDC tokens; agents acting under a
-person's token; commands that need their output in the sandbox; load rate on semantic (not only lexical) competitors and
-tenant-level thresholds.
+person's token; commands that need their output in the sandbox; requests for load rate are still written by hand; tenant-level
+thresholds.

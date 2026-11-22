@@ -153,3 +153,25 @@ def installed_cards(roots: list[str | Path]) -> list[tuple[str, str]]:
         if name and description and name not in seen:
             seen[name] = description
     return sorted(seen.items())
+
+
+def rank_by_requests(requests: list[str], pool: list[tuple[str, str]], embed: Any, limit: int) -> list[dict[str, Any]]:
+    """The `limit` skills in `pool` that best match the requests the skill is for: for each skill, the highest cosine
+    similarity between a request and its name and description (local embeddings). An agent's loader matches a request
+    against descriptions, so this finds rivals that say the same thing in other words, which word overlap between
+    descriptions misses. `embed(texts, prefix)` returns one vector per text. The ranking chooses competitors; it does
+    not predict which skill a model picks (that is what the load-rate run measures)."""
+    if not requests or not pool:
+        return []
+    documents = embed([f"{name}: {description}" for name, description in pool], "search_document: ")
+    queries = embed(list(requests), "search_query: ")
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+        return sum(x * y for x, y in zip(a, b, strict=True)) / norm if norm else 0.0
+
+    ranked = [{"name": name, "description": description,
+               "request_match": round(max(cosine(q, d) for q in queries), 3)}
+              for (name, description), d in zip(pool, documents, strict=True)]
+    ranked.sort(key=lambda item: (-item["request_match"], item["name"]))
+    return ranked[:limit]

@@ -184,3 +184,51 @@ def test_probe_reads_an_off_schema_choice_only_when_unambiguous():
     for content in ('[{"tool": "create-pr"}, {"tool": "create-draft-pr"}]', '{"tool": "something-else"}', "no idea"):
         with pytest.raises(RuntimeError):
             OllamaActivationProbe(model="m", client=Client(content)).choose(request="r", cards=cards)
+
+
+# Decision: a rival that matches the skill's own requests becomes a competitor even when its description shares no
+# words with the skill's (word overlap alone misses it); when the embedding model cannot be used, the result says so.
+def test_rivals_by_meaning_join_the_competitors(tmp_path, monkeypatch):
+    import skillproof.adapters.ollama as ollama
+
+    root = tmp_path / "skills"
+    card(root / "auditor", "code-auditor", "Scan a repository and patch findings.")      # no word shared with the skill
+    card(root / "pptx", "pptx", "Make slide decks.")
+    skill = tmp_path / "review-security"
+    card(skill, "review-security", "Review changes with the security subagent.")
+    seen = {}
+
+    class Probe:
+        def __init__(self, **kwargs):
+            pass
+
+        def choose(self, *, request, cards):
+            seen["names"] = sorted(c.name for c in cards)
+            return "code-auditor"
+
+    class Embedder:
+        def __init__(self, **kwargs):
+            pass
+
+        def embed(self, texts, prefix=""):
+            # "security" requests and the auditor point the same way; everything else is orthogonal.
+            return [[1.0, 0.0] if ("auditor" in t or "vulnerab" in t) else [0.0, 1.0] for t in texts]
+
+    monkeypatch.setattr(cli_evaluation, "OllamaActivationProbe", Probe)
+    monkeypatch.setattr(ollama, "OllamaEmbedder", Embedder)
+    args = SimpleNamespace(skill=str(skill), competitors_root=[str(root)], competitors=1, distractor_skills=None, unrelated_tasks=None,
+                           model="m", ollama_url="http://127.0.0.1:11434", seed=0, load_repeats=1, embed_model="e")
+    lexical_only = rank_similar("Review changes with the security subagent.", installed_cards([root]), 1)
+    assert lexical_only[0]["similarity"] == 0  # word overlap sees nothing
+    result = cli_evaluation.measure_load_rate(args, ["Check this diff for vulnerabilities."], None)
+    assert "code-auditor" in seen["names"] and result["competitors"]["semantic"]["status"] == "used"
+    assert any(c["name"] == "code-auditor" and c.get("request_match") == 1.0 for c in result["competitors"]["used"])
+    assert result["relevant"]["activation_rate"] == 0.0 and result["relevant"]["picked_other_skill"] == 1
+
+    class Broken(Embedder):
+        def embed(self, texts, prefix=""):
+            raise RuntimeError("Could not reach Ollama")
+
+    monkeypatch.setattr(ollama, "OllamaEmbedder", Broken)
+    result = cli_evaluation.measure_load_rate(args, ["Check this diff for vulnerabilities."], None)
+    assert result["competitors"]["semantic"] == {"status": "unavailable", "reason": "Could not reach Ollama"}

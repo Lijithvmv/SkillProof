@@ -42,8 +42,11 @@ class _OllamaClient:
         self.timeout = timeout
 
     def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/api/chat", payload)
+
+    def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
-            self.base_url + "/api/chat",
+            self.base_url + path,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -383,3 +386,27 @@ class OllamaToolRunner:
             duration_ms=round((time.perf_counter() - started) * 1000), input_tokens=prompt_tokens, output_tokens=output_tokens,
             cost_usd=0.0, trajectory=trajectory,
         )
+
+
+class OllamaEmbedder:
+    """Local text embeddings (Ollama /api/embed), loopback only by default. `prefix` lets a model that expects task
+    prefixes (nomic-embed-text: 'search_query: ' / 'search_document: ') get them."""
+
+    def __init__(self, *, model: str, base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 300, batch: int = 64,
+                 allow_remote: bool = False, client: Any | None = None):
+        if not model.strip():
+            raise ValueError("model must be explicitly configured")
+        self.model, self.batch = model, batch
+        self.base_url = base_url.rstrip("/")
+        self.client = client or _OllamaClient(base_url=base_url, timeout=timeout, allow_remote=allow_remote)
+
+    def embed(self, texts: list[str], prefix: str = "") -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch):
+            chunk = [prefix + text for text in texts[start:start + self.batch]]
+            body = self.client.post("/api/embed", {"model": self.model, "input": chunk})
+            got = body.get("embeddings")
+            if not isinstance(got, list) or len(got) != len(chunk):
+                raise RuntimeError("Ollama returned no embeddings for the batch")
+            vectors.extend(got)
+        return vectors

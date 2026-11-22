@@ -113,9 +113,22 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
     roots = [Path(r) for r in args.competitors_root] or default_roots()
     pool = [(name, description) for name, description in installed_cards(roots) if name != target.name]
     ranked = rank_similar(target.description, pool, args.competitors)
+    semantic: dict[str, Any] = {"status": "off"}
+    matched: list[dict[str, Any]] = []
+    if getattr(args, "embed_model", None):
+        # Rivals by meaning: the installed skills that best match the requests this skill is for, as a loader matches.
+        from skillproof.adapters.ollama import OllamaEmbedder
+        from skillproof.engines.inventory import rank_by_requests
+
+        try:
+            matched = rank_by_requests(relevant, pool, OllamaEmbedder(model=args.embed_model, base_url=args.ollama_url).embed,
+                                       args.competitors)
+            semantic = {"status": "used", "model": args.embed_model}
+        except (RuntimeError, ValueError, OSError) as exc:
+            semantic = {"status": "unavailable", "reason": str(exc)[:300]}  # reported, never silent
     listed = read_distractors(args.distractor_skills) if args.distractor_skills else []
     cards, names = [], {target.name}
-    for card in [SkillCard(name=r["name"], description=r["description"]) for r in ranked] + listed:
+    for card in ([SkillCard(name=r["name"], description=r["description"]) for r in ranked + matched] + listed):
         if card.name not in names and card.name != "none":
             names.add(card.name)
             cards.append(card)
@@ -127,10 +140,18 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
                                 probe=probe, repeats=args.load_repeats, seed=args.seed, forced_lift_percentage_points=forced_lift)
     records = result.pop("records", None) or []  # by_request keeps the per-request picture; single choices are not needed later
     result["failure_reasons"] = sorted({r["error"] for r in records if r.get("error")})[:10]  # why a choice could not be made
+    by_name: dict[str, dict[str, Any]] = {}
+    for r in ranked:
+        by_name.setdefault(r["name"], {"name": r["name"]})["similarity"] = r["similarity"]
+    for r in matched:
+        by_name.setdefault(r["name"], {"name": r["name"]})["request_match"] = r["request_match"]
     result["competitors"] = {
         "source": "installed skills" + (" and --distractor-skills" if listed else ""),
-        "installed_available": len(pool), "selection": f"the {len(ranked)} installed skills with the most similar descriptions",
-        "used": [{"name": r["name"], "similarity": r["similarity"]} for r in ranked] + [{"name": c.name, "listed": True} for c in listed],
+        "installed_available": len(pool),
+        "selection": (f"the {len(ranked)} installed skills with the most similar descriptions (word overlap)"
+                      + (f" and the {len(matched)} that best match the skill's own requests (embeddings)" if matched else "")),
+        "semantic": semantic,
+        "used": list(by_name.values()) + [{"name": c.name, "listed": True} for c in listed],
     }
     result["model"] = args.model
     return result
@@ -282,6 +303,7 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--max-steps", type=int, default=12, help="Tool calls per sandboxed run.")
     evaluate.add_argument("--sandbox-dir", help="Folder for the temporary workspaces (default: the system temp folder).")
     evaluate.add_argument("--load-rate", action="store_true", help="Also measure how often the model picks this skill from its description among the installed skills it competes with (the most similar descriptions). Exit 1 when it is picked for fewer relevant requests than SKILLPROOF_MIN_LOAD_RATE or for more unrelated ones than SKILLPROOF_MAX_FALSE_LOAD_RATE.")
+    evaluate.add_argument("--embed-model", default="nomic-embed-text", help="Local Ollama embedding model used to add rivals by meaning: the installed skills that best match the skill's own requests. Pass '' to use word overlap only.")
     evaluate.add_argument("--competitors", type=int, default=15, help="How many of the most similar installed skills compete with it.")
     evaluate.add_argument("--competitors-root", action="append", default=[], help="Folder of installed skills to draw competitors from; repeat. Default: common agent locations.")
     evaluate.add_argument("--distractor-skills", help="JSONL of extra competing skills (name, description).")
@@ -299,6 +321,7 @@ def add(commands, conf) -> None:
     load.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for.")
     load.add_argument("--model", required=True, help="Local Ollama model that chooses.")
     load.add_argument("--ollama-url", default=conf.ollama_url)
+    load.add_argument("--embed-model", default="nomic-embed-text", help="Local Ollama embedding model used to add rivals by meaning: the installed skills that best match the skill's own requests. Pass '' to use word overlap only.")
     load.add_argument("--competitors", type=int, default=15)
     load.add_argument("--competitors-root", action="append", default=[])
     load.add_argument("--distractor-skills")

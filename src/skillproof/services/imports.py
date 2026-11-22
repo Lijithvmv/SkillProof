@@ -125,6 +125,7 @@ def import_installed(
     evidence_not_attached: list[dict[str, Any]] = []
     reassessed: list[dict[str, Any]] = []
     known: dict[str, list[SkillVersion]] = {}
+    backfilled: list[dict[str, Any]] = []
     unchanged = 0
     for key, name in sorted(names_by_family.items(), key=lambda pair: pair[1]):
         root, skill_dir = families[key]
@@ -133,6 +134,11 @@ def import_installed(
                          if v["package_fingerprint"] == fingerprint), None)
         if existing is not None:
             unchanged += 1  # recognised by its fingerprint before any analysis
+            if governance.artifacts is not None and not oversize and not governance.artifacts.has(principal.tenant_id, fingerprint):
+                # Registered before packages were kept: these are its exact bytes (same fingerprint), so keep them now and
+                # the version becomes distributable.
+                governance.store_package(principal, files)
+                backfilled.append({"skill_name": name, "version_id": existing["version_id"], "state": existing["state"]})
             skill_md = package.skill_md(package.as_text(files))
             _, matching = catalogue.runs_for(governance, principal, name, skill_md)
             had = set(((existing.get("assurance") or {}).get("evidence") or {}).get("experiment_ids") or [])
@@ -171,6 +177,7 @@ def import_installed(
         "updates_with_ask": sum(r["decision"] == "ask" for r in updates),
         "registered": registered,
         "reassessed": reassessed,
+        "packages_stored_for_existing_versions": backfilled,
         "evidence_not_attached": evidence_not_attached,
         "errors": errors,
         "limitations": "A skill's assurance cites the experiments recorded for its exact SKILL.md (evaluate-skill); "

@@ -11,6 +11,7 @@ from skillproof.models import CapabilityChange, EvaluationJob, FleetEntry, Fleet
 from skillproof.storage.registry import SQLiteSkillRegistry
 
 if TYPE_CHECKING:
+    from skillproof.storage.artifacts import ArtifactStore
     from skillproof.storage.fleet import FleetStore
     from skillproof.storage.jobs import JobStore
     from skillproof.storage.notify import NotificationStore
@@ -64,13 +65,45 @@ class GovernanceAccess:
     """
 
     def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore,
-                 jobs: JobStore | None = None, notifications: NotificationStore | None = None, fleet: FleetStore | None = None):
+                 jobs: JobStore | None = None, notifications: NotificationStore | None = None, fleet: FleetStore | None = None,
+                 artifacts: ArtifactStore | None = None):
         self.registry = registry
         self.approvals = approvals
         self.history = history
         self.jobs = jobs  # when the service runs evaluations
         self.notifications = notifications  # when alerts are configured
         self.fleet = fleet  # when machines report to this server
+        self.artifacts = artifacts  # package bytes, so approved versions can be distributed
+
+    def store_package(self, principal: Principal, files: dict[str, bytes], oversize: dict[str, str] | None = None) -> str:
+        authorize(principal, principal.tenant_id, "skill.register")
+        if self.artifacts is None:
+            from skillproof.storage.registry import RegistryError
+
+            raise RegistryError("package storage is not enabled on this server")
+        return self.artifacts.put(principal.tenant_id, files, actor_id=principal.user_id, oversize=oversize)
+
+    def package_bytes(self, principal: Principal, version_id: str) -> tuple[SkillVersion, bytes]:
+        """A version and its exact package (ZIP), re-checked against the version's fingerprint."""
+        authorize(principal, principal.tenant_id, "skill.read")
+        version = self.registry.get_version(principal.tenant_id, version_id)
+        if self.artifacts is None:
+            from skillproof.storage.registry import RegistryError
+
+            raise RegistryError("package storage is not enabled on this server")
+        return version, self.artifacts.get(principal.tenant_id, version["package_fingerprint"])
+
+    def approved_set(self, principal: Principal) -> list[dict[str, Any]]:
+        """Every skill's active (approved) version, and whether its package can be distributed."""
+        authorize(principal, principal.tenant_id, "skill.read")
+        out = []
+        for entry in self.registry.catalogue(principal.tenant_id):
+            active = entry.get("active")
+            if active:
+                fingerprint = active["package_fingerprint"]
+                out.append({"skill_name": entry["skill_name"], "version_id": active["version_id"], "fingerprint": fingerprint,
+                            "distributable": bool(self.artifacts and self.artifacts.has(principal.tenant_id, fingerprint))})
+        return out
 
     def fleet_versions(self, principal: Principal, names: set[str]) -> dict[str, list[SkillVersion]]:
         """The tenant's versions of each named skill, for a machine comparing what it runs (reporter permission)."""

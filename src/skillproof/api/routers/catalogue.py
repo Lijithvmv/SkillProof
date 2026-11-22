@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from fastapi import File, Form, HTTPException, Request, UploadFile
+from fastapi import File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from skillproof import package
@@ -65,6 +65,26 @@ async def register_version(
     if evaluate:
         result["job"] = guarded(lambda: catalogue.request_evaluation(governance, principal, version["version_id"], assessment.skill_md))
     return result
+
+
+@router.get("/api/v1/registry/approved")
+def registry_approved(request: Request) -> dict[str, Any]:
+    """Every skill's approved (active) version with its fingerprint: what each machine should be running (`sync`)."""
+    principal = current_principal(request)
+    governance = current_governance(request)
+    return {"tenant_id": principal.tenant_id, "approved": guarded(lambda: governance.approved_set(principal))}
+
+
+@router.get("/api/v1/registry/versions/{version_id}/package")
+def registry_package(version_id: str, request: Request) -> Response:
+    """The version's exact package as a ZIP, re-checked against its fingerprint; the fingerprint is sent in
+    X-SkillProof-Fingerprint so the receiver verifies what it installs."""
+    principal = current_principal(request)
+    governance = current_governance(request)
+    version, blob = guarded(lambda: governance.package_bytes(principal, version_id))
+    return Response(content=blob, media_type="application/zip",
+                    headers={"X-SkillProof-Fingerprint": version["package_fingerprint"],
+                             "Content-Disposition": f'attachment; filename="{version["skill_name"]}-{version["package_fingerprint"][:12]}.zip"'})
 
 
 @router.get("/api/v1/registry/catalogue")

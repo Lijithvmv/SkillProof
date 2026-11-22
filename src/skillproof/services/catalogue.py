@@ -4,10 +4,11 @@ worker all use it, so the same package is always judged by the same rules (stati
 the approved version, run evidence, the tenant's policy)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from skillproof import package
+from skillproof.ingestion import PackageError
 from skillproof.engines.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.engines.capabilities import build_manifest
@@ -24,6 +25,8 @@ class Assessment:
     manifest: dict[str, Any]        # capability manifest (with second opinions when configured)
     assurance: dict[str, Any]       # gates and decision, with inputs, policy, evidence provenance and subject
     skill_md: str                   # the main SKILL.md text the run evidence is bound to
+    files: dict[str, bytes] = field(default_factory=dict)      # the package itself, kept so it can be distributed
+    oversize: dict[str, str] = field(default_factory=dict)     # files too large to read (installed folders only)
 
     @property
     def name(self) -> str:
@@ -90,7 +93,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     assurance["evidence"] = provenance
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": catalogue_name, "package_fingerprint": report["package_fingerprint"]}
-    return Assessment(report=report, manifest=manifest, assurance=assurance, skill_md=skill_md)
+    return Assessment(report=report, manifest=manifest, assurance=assurance, skill_md=skill_md, files=files, oversize=dict(oversize or {}))
 
 
 def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version: SkillVersion, skill_md: str,
@@ -115,8 +118,18 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
 
 
 def register(governance: GovernanceAccess, principal: Principal, assessment: Assessment, *, artifact_uri: str | None = None) -> SkillVersion:
+    """Register the version and keep its exact package so the catalogue can distribute it once approved. A package
+    that cannot be kept (a file over the size limit, or more files than a package may hold) is still registered and
+    analysed; it is reported as not distributable."""
     version = governance.register_skill(principal, assessment.report, assessment.assurance, artifact_uri=artifact_uri,
                                         capability_manifest=assessment.manifest)
+    if governance.artifacts is not None and assessment.files:
+        try:
+            governance.store_package(principal, assessment.files, assessment.oversize)
+            version["distributable"] = True
+        except (ValueError, PackageError) as exc:
+            version["distributable"] = False
+            version["not_distributable_reason"] = str(exc)
     alerts.version_registered(governance, principal, version)
     return version
 

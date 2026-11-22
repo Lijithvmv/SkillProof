@@ -28,7 +28,7 @@ import logging
 
 from skillproof.logs import configure as configure_logging, log
 
-STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db", "notify.db", "fleet.db")
+STORE_FILES = ("registry.db", "approvals.db", "history.db", "jobs.db", "notify.db", "fleet.db", "artifacts.db")
 ENV_KEYS = {
     ("storage", "database_url"): "SKILLPROOF_DATABASE_URL",
     ("storage", "data_dir"): "SKILLPROOF_DATA_DIR",
@@ -194,7 +194,8 @@ def migrate_all(config: dict[str, Any]) -> dict[str, Any]:
     if governance is None:
         raise ServiceError("no storage configured")
     stores = {"registry": governance.registry.db, "approvals": governance.approvals.db, "history": governance.history.db,
-              "jobs": governance.jobs.db, "notify": governance.notifications.db, "fleet": governance.fleet.db}
+              "jobs": governance.jobs.db, "notify": governance.notifications.db, "fleet": governance.fleet.db,
+              "artifacts": governance.artifacts.db}
     report = {}
     for name, db in stores.items():
         rows = db.execute("SELECT version FROM schema_migrations WHERE store = ? ORDER BY version", (name,)).fetchall()

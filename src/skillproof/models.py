@@ -86,6 +86,8 @@ class SkillVersion(TypedDict, total=False):
     capabilities: dict[str, Any] | None
     capability_change: CapabilityChange | None
     events: list[AuditEvent]
+    distributable: bool              # its exact package is stored and can be installed by sync
+    not_distributable_reason: str
 
 
 class EvaluationJob(TypedDict, total=False):

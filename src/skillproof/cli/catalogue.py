@@ -108,7 +108,93 @@ def run_fleet_report(args) -> Result:
         return {"error": str(exc)}, 4
 
 
+class LocalApproved:
+    """The approved set and packages from a catalogue folder on this machine."""
+
+    def __init__(self, governance, principal):
+        self.governance, self.principal = governance, principal
+
+    def approved(self) -> list[dict[str, Any]]:
+        return self.governance.approved_set(self.principal)
+
+    def package(self, version_id: str) -> tuple[str, bytes]:
+        version, blob = self.governance.package_bytes(self.principal, version_id)
+        return version["package_fingerprint"], blob
+
+
+class ServerApproved:
+    """The approved set and packages from a SkillProof server (a reporter-role token is enough)."""
+
+    def __init__(self, server: str, token: str):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(server)
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
+            raise ValueError("the server must be an https URL (plain http only to this machine)")
+        self.server = server.rstrip("/")
+        self.headers = {"Authorization": f"Bearer {token}"} if token else {"X-SkillProof-Dev-User": "sync", "X-SkillProof-Dev-Role": "reporter"}
+
+    def _get(self, path: str):
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(self.server + path, headers=self.headers)
+        try:
+            return urllib.request.urlopen(request, timeout=60)
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"server answered HTTP {exc.code} for {path}: {exc.read()[:300].decode('utf-8', 'replace')}") from exc
+
+    def approved(self) -> list[dict[str, Any]]:
+        with self._get("/api/v1/registry/approved") as response:
+            return json.loads(response.read())["approved"]
+
+    def package(self, version_id: str) -> tuple[str, bytes]:
+        with self._get(f"/api/v1/registry/versions/{version_id}/package") as response:
+            return response.headers.get("X-SkillProof-Fingerprint", ""), response.read()
+
+
+def run_sync(args) -> Result:
+    from skillproof.logs import log
+    from skillproof.services import distribution
+
+    try:
+        roots = _roots(args)
+        governance = None
+        if args.server:
+            source = ServerApproved(args.server, os.environ.get(args.token_env, "").strip())
+        else:
+            governance = catalogue_at(Path(args.data_dir))
+            source = LocalApproved(governance, checker(args.tenant))
+        try:
+            families, names, packages, errors = installed_families(roots)
+            installed = [distribution.Installed(name=name, folder=families[key][1], fingerprint=packages[key][2]) for key, name in names.items()]
+            actions = distribution.plan(source.approved(), installed, strict=args.strict)
+            if args.apply:
+                distribution.apply(actions, source, Path(args.quarantine), log=lambda event, fields: log(event, **fields))
+        finally:
+            if governance is not None:
+                close_governance(governance)
+        result = distribution.summary(actions, args.apply)
+        result["unreadable"] = errors
+        pending = result["to_replace"] + (result["unapproved"] if args.strict else 0) + result["blocked"]
+        return result, 1 if result["failed"] or (not args.apply and pending) or (args.apply and result["blocked"]) else 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {"error": str(exc)}, 4
+
+
 def add(commands, conf) -> None:
+    sync = commands.add_parser("sync", help="Make this machine run what the catalogue approved: replace installed skills that are not the approved version (the old folder is moved to quarantine, never deleted), report unapproved ones (quarantine them with --strict). Shows the plan unless --apply. Exit 1 when something is (or, without --apply, would be) changed or cannot be fixed.")
+    sync.add_argument("--server", help="SkillProof server URL; omit to use the local catalogue in --data-dir.")
+    sync.add_argument("--token-env", default="SKILLPROOF_TOKEN", help="Environment variable holding the bearer access token.")
+    sync.add_argument("--data-dir", default=conf.data_dir or str(DEFAULT_CATALOGUE), help="Local catalogue storage, when no --server is given.")
+    sync.add_argument("--tenant", default="local")
+    sync.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
+    sync.add_argument("--strict", action="store_true", help="Also quarantine installed skills that have no approved version.")
+    sync.add_argument("--apply", action="store_true", help="Carry out the plan (default: report it only).")
+    sync.add_argument("--quarantine", default=str(Path.home() / ".skillproof" / "quarantine"), help="Where replaced or unapproved skill folders are moved.")
+    sync.add_argument("--output", default="-")
+    sync.set_defaults(run=run_sync)
+
     lock = commands.add_parser("lock-check", help="For each git dependency in an apm.lock.yaml, report what updating from the locked commit would add. Exit 1 when an update adds capabilities.")
     lock.add_argument("lockfile")
     lock.add_argument("--cache", default=str(Path.home() / ".skillproof" / "repos"), help="Where bare clones are kept (nothing is checked out).")

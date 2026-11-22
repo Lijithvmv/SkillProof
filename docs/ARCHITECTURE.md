@@ -48,8 +48,8 @@ skillproof/
   engines/     analyzer, semantic, security, capabilities/, triage, confidence, second_opinion, conformance,
                templates, evaluation, execution, checks, grader_check, activation, compatibility, operations,
                human_review, update_report, inventory, installed, apm_lock, monitoring, pilot
-  storage/     database (pool, migrations, row-level security), registry, approvals, history, jobs, notify, fleet
-  services/    catalogue, imports, evaluation (jobs worker), alerts, fleet
+  storage/     database (pool, migrations, row-level security), registry, approvals, history, jobs, notify, fleet, artifacts (package bytes)
+  services/    catalogue, imports, evaluation (jobs worker), alerts, fleet, distribution (sync)
   adapters/    ollama, openai_responses
   api/         main + routers/ + deps          cli/   analysis, catalogue, evaluation, operations
   config, errors, models, package, ingestion, logs, wiring, service, authorization, oidc
@@ -63,8 +63,8 @@ skillproof/
   config.py        settings          errors.py      typed errors
   package.py       reading packages + canonical fingerprint
   engines/         analysis, capabilities (split), triage, confidence, conformance, templates, evaluation, assurance
-  storage/         database, migrations, repositories (registry, approvals, history, jobs, notify, fleet)
-  services/        catalogue, evaluation (jobs + worker), alerts, fleet, imports
+  storage/         database, migrations, repositories (registry, approvals, history, jobs, notify, fleet, artifacts)
+  services/        catalogue, evaluation (jobs + worker), alerts, fleet, imports, distribution
   api/             app + one router per area           web/   catalogue page
   cli/             one module per command group        adapters/   ollama, openai
 ```
@@ -120,6 +120,7 @@ Every feature below keeps its tests; the suite must stay green through every sta
 | Evaluation jobs and worker | jobs, evaluation_jobs | test_evaluation_jobs |
 | Signed webhook alerts | notify | test_notify |
 | Fleet reporting | fleet | test_notify |
+| Package store and sync (enforcement) | storage/artifacts, services/distribution, cli sync | test_sync |
 | Installed-skill import, installed-vs-approved check | catalogue_import | test_catalogue_import, test_conformance |
 | Watch installed skills and plugins | installed | test_installed |
 | APM lockfile check | apm_lock | test_apm_lock |

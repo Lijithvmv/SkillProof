@@ -7,7 +7,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from skillproof.capabilities.positions import CATEGORIES, DOC_SUFFIXES, SCOPE_RANK, TEST_NAME, TEST_PATH
+from skillproof.engines.capabilities.positions import CATEGORIES, DOC_SUFFIXES, SCOPE_RANK, TEST_NAME, TEST_PATH
 
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from skillproof.capabilities.positions import CATEGORIES, MANIFEST_VERSION
+from skillproof.engines.capabilities.positions import CATEGORIES, MANIFEST_VERSION
 
 
 @dataclass

@@ -7,10 +7,10 @@ from typing import Any
 from fastapi import Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from skillproof.analyzer import analyze_files
+from skillproof.engines.analyzer import analyze_files
 from skillproof.ingestion import PackageError, read_skill_zip
-from skillproof.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
-from skillproof.security import scan_security
+from skillproof.engines.evaluation import BenchmarkTask, ComparisonRequest, compare_runs, validate_benchmark_task
+from skillproof.engines.security import scan_security
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 
 from fastapi import APIRouter

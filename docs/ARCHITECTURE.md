@@ -41,6 +41,23 @@ schema changes without migrations, single-connection storage, `print` instead of
 3. **Typed errors** (`NotFound`, `Conflict`, `Forbidden`, `InvalidInput`) map to HTTP status in one place.
 4. **Target layout**, reached in stages with compatibility imports so nothing that uses the old module paths breaks:
 
+Reached (2026-11-22):
+
+```
+skillproof/
+  engines/     analyzer, semantic, security, capabilities/, triage, confidence, second_opinion, conformance,
+               templates, evaluation, execution, checks, grader_check, activation, compatibility, operations,
+               human_review, update_report, inventory, installed, apm_lock, monitoring, pilot
+  storage/     database (pool, migrations, row-level security), registry, approvals, history, jobs, notify, fleet
+  services/    catalogue, imports, evaluation (jobs worker), alerts, fleet
+  adapters/    ollama, openai_responses
+  api/         main + routers/ + deps          cli/   analysis, catalogue, evaluation, operations
+  config, errors, models, package, ingestion, logs, wiring, service, authorization, oidc
+  governance, evidence   (stay at the top level until another session's edits are committed; then engines/)
+```
+
+Planned:
+
 ```
 skillproof/
   config.py        settings          errors.py      typed errors
@@ -73,7 +90,7 @@ skillproof/
 | `capabilities.py` split into a package (six modules, one-way dependencies, all 194 names still importable) | done | 6f4df32 |
 | Alerts and fleet orchestration out of the access layer into services | done | 992d093 |
 | Typed models at service boundaries; type check in CI (24 layered files clean) | done | 4cae529 |
-| Package layout (engines/, storage/) with compatibility imports | held: another session was editing modules it would move | |
+| Package layout: engines/, storage/, adapters/, services/ (33 modules moved; every old import path aliases the moved module) | done; governance.py and evidence.py stay in place until another session's edits to them are committed | see git log |
 
 ## Feature inventory (nothing may be lost)
 

@@ -6,16 +6,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from skillproof.activation import measure_activation, read_distractors, read_requests, read_skill_card
-from skillproof.evaluation import validate_benchmark_task
-from skillproof.execution import execute_experiment
-from skillproof.grader_check import check_grader, read_cases
-from skillproof.history import EvaluationHistoryStore
-from skillproof.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
-from skillproof.monitoring import monitor_skill_history
-from skillproof.ollama_adapter import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
-from skillproof.openai_adapter import OpenAIResponsesEvaluator, OpenAIResponsesRunner
-from skillproof.pilot import load_benchmark, read_manifest
+from skillproof.engines.activation import measure_activation, read_distractors, read_requests, read_skill_card
+from skillproof.engines.evaluation import validate_benchmark_task
+from skillproof.engines.execution import execute_experiment
+from skillproof.engines.grader_check import check_grader, read_cases
+from skillproof.storage.history import EvaluationHistoryStore
+from skillproof.engines.human_review import HumanAnnotation, compare_decision_agreement, compare_score_agreement, create_blind_review_bundle
+from skillproof.engines.monitoring import monitor_skill_history
+from skillproof.adapters.ollama import OllamaActivationProbe, OllamaEvaluator, OllamaRunner
+from skillproof.adapters.openai_responses import OpenAIResponsesEvaluator, OpenAIResponsesRunner
+from skillproof.engines.pilot import load_benchmark, read_manifest
 from skillproof.wiring import close_governance
 
 from skillproof.cli.common import catalogue_at, read_annotation_rows, skill_text, write_json
@@ -24,8 +24,8 @@ Result = tuple[dict[str, Any], int]
 
 
 def benchmark_draft(args) -> dict[str, Any]:
-    from skillproof.conformance import draft_benchmark, extract_claims, write_benchmark
-    from skillproof.ollama_adapter import ollama_json_asker
+    from skillproof.engines.conformance import draft_benchmark, extract_claims, write_benchmark
+    from skillproof.adapters.ollama import ollama_json_asker
 
     text = skill_text(args.skill)
     claims = extract_claims(text)
@@ -36,7 +36,7 @@ def benchmark_draft(args) -> dict[str, Any]:
     (out / "claims.json").write_text(json.dumps(claims, indent=2, ensure_ascii=False), encoding="utf-8")
     ask = ollama_json_asker(args.model, args.ollama_url, seed=args.seed)
     if args.mode == "templates":
-        from skillproof.templates import generate_benchmark
+        from skillproof.engines.templates import generate_benchmark
 
         drafted = generate_benchmark(text, claims, ask, tasks=args.tasks)
         status = "generated_from_rules"
@@ -56,8 +56,8 @@ def benchmark_draft(args) -> dict[str, Any]:
 
 def evaluate_skill(args) -> dict[str, Any]:
     from skillproof.authorization import Principal
-    from skillproof.checks import CheckedEvaluator
-    from skillproof.conformance import adherence, extract_claims
+    from skillproof.engines.checks import CheckedEvaluator
+    from skillproof.engines.conformance import adherence, extract_claims
 
     text = skill_text(args.skill)
     tasks = load_benchmark(args.benchmark)

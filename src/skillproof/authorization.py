@@ -4,16 +4,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from skillproof.approvals import ApprovalAction, SQLiteApprovalStore
-from skillproof.history import EvaluationHistoryStore
+from skillproof.storage.approvals import ApprovalAction, SQLiteApprovalStore
+from skillproof.storage.history import EvaluationHistoryStore
 from skillproof.governance import AssurancePolicy
 from skillproof.models import CapabilityChange, EvaluationJob, FleetEntry, FleetReportResult, SkillVersion
-from skillproof.registry import SQLiteSkillRegistry
+from skillproof.storage.registry import SQLiteSkillRegistry
 
 if TYPE_CHECKING:
-    from skillproof.fleet import FleetStore
-    from skillproof.jobs import JobStore
-    from skillproof.notify import NotificationStore
+    from skillproof.storage.fleet import FleetStore
+    from skillproof.storage.jobs import JobStore
+    from skillproof.storage.notify import NotificationStore
 
 
 Role = Literal["tenant_admin", "evaluator", "approver", "viewer", "reporter"]
@@ -80,7 +80,7 @@ class GovernanceAccess:
     def record_fleet_report(self, principal: Principal, host: str, compared: list[FleetEntry]) -> FleetReportResult:
         authorize(principal, principal.tenant_id, "fleet.report")
         if self.fleet is None:
-            from skillproof.registry import RegistryError
+            from skillproof.storage.registry import RegistryError
 
             raise RegistryError("fleet reporting is not enabled on this server")
         return self.fleet.record(principal.tenant_id, host, compared, reported_by=principal.user_id)
@@ -107,7 +107,7 @@ class GovernanceAccess:
 
     def _notify(self) -> NotificationStore:
         if self.notifications is None:
-            from skillproof.registry import RegistryError
+            from skillproof.storage.registry import RegistryError
 
             raise RegistryError("alerts are not enabled on this server")
         return self.notifications
@@ -133,7 +133,7 @@ class GovernanceAccess:
     def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> EvaluationJob:
         authorize(principal, principal.tenant_id, "evaluation.run")
         if self.jobs is None:
-            from skillproof.registry import RegistryError
+            from skillproof.storage.registry import RegistryError
 
             raise RegistryError("evaluation jobs are not enabled on this server")
         version = self.registry.get_version(principal.tenant_id, version_id)

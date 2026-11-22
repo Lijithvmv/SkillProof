@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skillproof.approvals import ApprovalStore
+from skillproof.storage.approvals import ApprovalStore
 from skillproof.authorization import GovernanceAccess
-from skillproof.fleet import FleetStore
-from skillproof.history import EvaluationHistoryStore
-from skillproof.jobs import JobStore
-from skillproof.notify import NotificationStore
-from skillproof.registry import SkillRegistry
+from skillproof.storage.fleet import FleetStore
+from skillproof.storage.history import EvaluationHistoryStore
+from skillproof.storage.jobs import JobStore
+from skillproof.storage.notify import NotificationStore
+from skillproof.storage.registry import SkillRegistry
 
 
 def open_governance(*, database_url: str = "", data_dir: str | Path = "") -> GovernanceAccess | None:

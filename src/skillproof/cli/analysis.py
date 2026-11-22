@@ -8,14 +8,14 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from skillproof.analyzer import analyze_files
-from skillproof.capabilities import build_manifest, diff_manifests, read_package_bytes
+from skillproof.engines.analyzer import analyze_files
+from skillproof.engines.capabilities import build_manifest, diff_manifests, read_package_bytes
 from skillproof.governance import AssuranceInput, AssurancePolicy, evaluate_assurance
 from skillproof.ingestion import PackageError, read_skill_zip
-from skillproof.inventory import inventory
-from skillproof.security import record_validation
-from skillproof.triage import triage
-from skillproof.update_report import build_update_report
+from skillproof.engines.inventory import inventory
+from skillproof.engines.security import record_validation
+from skillproof.engines.triage import triage
+from skillproof.engines.update_report import build_update_report
 
 Result = tuple[dict[str, Any], int]
 

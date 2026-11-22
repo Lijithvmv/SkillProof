@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from skillproof.apm_lock import check_lockfile
-from skillproof.catalogue_import import check_installed, import_installed, installed_families
+from skillproof.engines.apm_lock import check_lockfile
+from skillproof.services.imports import check_installed, import_installed, installed_families
 from skillproof.governance import AssurancePolicy
-from skillproof.installed import default_roots, scan_installed
+from skillproof.engines.installed import default_roots, scan_installed
 from skillproof.wiring import close_governance
 
 from skillproof.cli.common import DEFAULT_CATALOGUE, catalogue_at, checker, importer

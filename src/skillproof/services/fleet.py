@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from skillproof.authorization import GovernanceAccess, Principal
-from skillproof.fleet import compare
+from skillproof.storage.fleet import compare
 from skillproof.models import FleetReportResult
 from skillproof.services import alerts
 

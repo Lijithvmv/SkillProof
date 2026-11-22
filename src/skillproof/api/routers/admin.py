@@ -8,7 +8,7 @@ from fastapi import Request
 from pydantic import BaseModel, Field
 
 from skillproof.governance import AssurancePolicy
-from skillproof.notify import EVENTS
+from skillproof.storage.notify import EVENTS
 
 from fastapi import APIRouter
 from skillproof.api.deps import current_governance, current_principal, guarded

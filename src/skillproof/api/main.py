@@ -15,8 +15,8 @@ from starlette.responses import JSONResponse
 from skillproof import __version__
 from skillproof.logs import log
 from skillproof.oidc import AuthenticationError, verifier_from_environment
-from skillproof.evaluation_jobs import EvaluationSettings, start_worker
-from skillproof.notify import NotificationStore, start_deliverer
+from skillproof.services.evaluation import EvaluationSettings, start_worker
+from skillproof.storage.notify import NotificationStore, start_deliverer
 from skillproof.api.deps import governance_from_environment  # noqa: F401 - used by the service and workers
 
 

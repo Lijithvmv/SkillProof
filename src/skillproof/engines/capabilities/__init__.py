@@ -6,10 +6,10 @@ extraction (extraction.py, with the position rules in positions.py) lists what t
 the decoded text. diff.py reports what a new version adds. Nothing here executes package content, and nothing here is
 a verdict: the manifest is a list of facts with locations.
 
-Every name the single-module engine defined is still importable from `skillproof.capabilities`.
+Every name the single-module engine defined is still importable from `skillproof.engines.capabilities`.
 """
 from skillproof.ingestion import MAX_FILE_SIZE, MAX_FILES, MAX_TOTAL_SIZE, PackageError  # noqa: F401 - re-exported
-from skillproof.capabilities.positions import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.positions import (  # noqa: F401 - the engine's public surface
     AGENT_CONFIG,
     AGENT_INSTALL_DIR,
     AGENT_SPAWNING,
@@ -155,19 +155,19 @@ from skillproof.capabilities.positions import (  # noqa: F401 - the engine's pub
     matcher_scope,
     written_names,
 )
-from skillproof.capabilities.model import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.model import (  # noqa: F401 - the engine's public surface
     Manifest,
 )
-from skillproof.capabilities.loading import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.loading import (  # noqa: F401 - the engine's public surface
     _check_total,
     read_package_bytes,
 )
-from skillproof.capabilities.decoding import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.decoding import (  # noqa: F401 - the engine's public surface
     _printable,
     _try_base64,
     decode_text,
 )
-from skillproof.capabilities.extraction import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.extraction import (  # noqa: F401 - the engine's public surface
     CLIENT_SHAPE_ONLY,
     COMPARE_CALLS,
     DOC_NETS,
@@ -208,7 +208,7 @@ from skillproof.capabilities.extraction import (  # noqa: F401 - the engine's pu
     invoked_test_named,
     own_env_files,
 )
-from skillproof.capabilities.diff import (  # noqa: F401 - the engine's public surface
+from skillproof.engines.capabilities.diff import (  # noqa: F401 - the engine's public surface
     _hook_additions,
     _widenings,
     _widest,

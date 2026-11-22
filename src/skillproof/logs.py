@@ -38,5 +38,6 @@ def configure(level: str | None = None) -> None:
     logger.propagate = False
 
 
-def log(event: str, level: int = logging.INFO, **fields: object) -> None:
+def log(event: str, level: int = logging.INFO, /, **fields: object) -> None:
+    # level is positional-only, so a logged field called `level` can never replace it
     logging.getLogger(LOGGER_NAME).log(level, event, extra={"fields": fields})

@@ -13,9 +13,9 @@ import yaml
 from pathlib import PurePosixPath
 from typing import Any
 
-from skillproof.capabilities.decoding import decode_text
-from skillproof.capabilities.model import Manifest
-from skillproof.capabilities.positions import AGENT_CONFIG, AGENT_INSTALL_DIR, AGENT_SPAWNING, ALTERNATION, ANTI_EXAMPLE, ARGV_AGENT, BINARY_SUFFIXES, BRACKET_SEGMENT, CHANGELOG_FILE, COMMENT_LINE, CREDENTIALS, CSP_LINE, DESTRUCTIVE, DOC_COMMENT, DOC_SUFFIXES, ECHO_LINE, ENV_ALL, ENV_INHERIT, ENV_OUT, ENV_READ, FETCH_CUE, FILE_COPY, FRONTMATTER, IDENTIFIER_HOSTS, INLINE_CODE, INSTALL, IPV4, IP_DATA_KEY, LIST_ITEM, LOCAL_BIN, LOCATE_BEFORE, LOCKFILES, MULTI_INSTALL_TOOLS, NAMESPACE_CONTEXT, NEGATED, NEGATED_LABEL, NETWORK_CLIENTS, NOT_CONTACTED_CONTEXT, NOT_EXTERNAL, PERSISTENCE, PLACEHOLDER_ARG, PLACEHOLDER_HOST, PLACEHOLDER_PATH, PLACEHOLDER_TOKEN, PROCESS_EXEC, PROSE_FENCES, PROVENANCE, SCRIPT_SUFFIXES, SETTING_SHELL, SHELL_RC, SHELL_SCRIPT_SUFFIXES, STOP_PACKAGES, TABLE_ROW, TEST_NAME, TEST_PATH, TEXT_SUFFIXES, TOOL_ALIASES, URL, VENDORED, WRITE_CUE, YAML_TEXT_VALUE, _declared_tools, _more_packages, _prose_cue, called_names, config_write, contact_reason, delete_scope, describes_span, exec_names, exec_reason, in_message_string, is_secret_env, joined_path_line, mask_search_patterns, matcher_scope, written_names
+from skillproof.engines.capabilities.decoding import decode_text
+from skillproof.engines.capabilities.model import Manifest
+from skillproof.engines.capabilities.positions import AGENT_CONFIG, AGENT_INSTALL_DIR, AGENT_SPAWNING, ALTERNATION, ANTI_EXAMPLE, ARGV_AGENT, BINARY_SUFFIXES, BRACKET_SEGMENT, CHANGELOG_FILE, COMMENT_LINE, CREDENTIALS, CSP_LINE, DESTRUCTIVE, DOC_COMMENT, DOC_SUFFIXES, ECHO_LINE, ENV_ALL, ENV_INHERIT, ENV_OUT, ENV_READ, FETCH_CUE, FILE_COPY, FRONTMATTER, IDENTIFIER_HOSTS, INLINE_CODE, INSTALL, IPV4, IP_DATA_KEY, LIST_ITEM, LOCAL_BIN, LOCATE_BEFORE, LOCKFILES, MULTI_INSTALL_TOOLS, NAMESPACE_CONTEXT, NEGATED, NEGATED_LABEL, NETWORK_CLIENTS, NOT_CONTACTED_CONTEXT, NOT_EXTERNAL, PERSISTENCE, PLACEHOLDER_ARG, PLACEHOLDER_HOST, PLACEHOLDER_PATH, PLACEHOLDER_TOKEN, PROCESS_EXEC, PROSE_FENCES, PROVENANCE, SCRIPT_SUFFIXES, SETTING_SHELL, SHELL_RC, SHELL_SCRIPT_SUFFIXES, STOP_PACKAGES, TABLE_ROW, TEST_NAME, TEST_PATH, TEXT_SUFFIXES, TOOL_ALIASES, URL, VENDORED, WRITE_CUE, YAML_TEXT_VALUE, _declared_tools, _more_packages, _prose_cue, called_names, config_write, contact_reason, delete_scope, describes_span, exec_names, exec_reason, in_message_string, is_secret_env, joined_path_line, mask_search_patterns, matcher_scope, written_names
 
 
 # --------------------------------------------------------------------------------------------- extraction
@@ -703,7 +703,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     _FILE_CACHE.clear()
                 _FILE_CACHE[key] = manifest.ops
                 _replay(result, manifest.ops)
-    from skillproof.confidence import add_blocks  # block kind and stated purpose, read by triage's confidence
+    from skillproof.engines.confidence import add_blocks  # block kind and stated purpose, read by triage's confidence
 
     out = result.to_dict()
     add_blocks(out, files)

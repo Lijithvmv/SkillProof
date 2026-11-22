@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from skillproof import package
-from skillproof.analyzer import analyze_files
+from skillproof.engines.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
-from skillproof.capabilities import build_manifest
+from skillproof.engines.capabilities import build_manifest
 from skillproof.evidence import instructions_fingerprint, measured_evidence
 from skillproof.governance import AssuranceInput, AssurancePolicy, SecurityFinding, assess_version
 from skillproof.models import EvaluationJob, SkillVersion
-from skillproof.second_opinion import add_second_opinions
+from skillproof.engines.second_opinion import add_second_opinions
 from skillproof.services import alerts
 
 

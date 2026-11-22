@@ -8,7 +8,7 @@ import re
 import unicodedata
 
 
-from skillproof.capabilities.positions import BASE64_RUN, CHR_CHAIN, CONFUSABLES, ESCAPES, FROM_CHAR_CODE, HEX_RUN, QUOTED, SPLIT_LITERALS, ZERO_WIDTH
+from skillproof.engines.capabilities.positions import BASE64_RUN, CHR_CHAIN, CONFUSABLES, ESCAPES, FROM_CHAR_CODE, HEX_RUN, QUOTED, SPLIT_LITERALS, ZERO_WIDTH
 
 
 # --------------------------------------------------------------------------------------------- decoding

@@ -1,6 +1,6 @@
 """Which events raise which alert, with what payload. Alerts are best effort by design: queuing one never raises, so
 an alert can never block or undo the action it reports. Payloads carry ids, names, levels and counts, never skill
-contents (delivery and signing: skillproof.notify)."""
+contents (delivery and signing: skillproof.storage.notify)."""
 from __future__ import annotations
 
 from typing import Any

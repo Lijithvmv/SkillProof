@@ -33,7 +33,13 @@ put the approved version back, could not stop the unapproved one, and did not ke
 4. **Load rate in the decision.** A skill that is never picked does nothing (Tessl: loaded in 41% of tasks unforced
    vs 98% forced); the catalogue should show and gate on it.
 
-Gap 1 is built: the package store, the approved-set and package API, and `skillproof sync` (plan, verified install, reversible quarantine). It has been tested on fixtures and dry-run on one real machine: 212 installed skills, 1 approved and matching, 211 never approved, 0 changed. Not yet exercised: `--apply` on a real machine, and the server path against a deployed server.
+Gap 1 is built: the package store, the approved-set and package API, and `skillproof sync` (plan, verified install, reversible quarantine). It has been tested on fixtures and dry-run on one real machine: 212 installed skills, 1 approved and matching, 211 never approved, 0 changed. Exercised end to end on copies of four real installed skills (`scripts/sync_e2e.py`, 29 of 29 checks): three
+approved through a running server's two-person flow, one copy given an injected instruction and script, one copy missing
+a file, and one never-approved skill. A dry run changed nothing. `sync --server ... --apply --strict` reinstalled both drifted skills
+from the server's verified packages (fingerprints on disk equal the approved ones). It quarantined the tampered folder and the
+unapproved skill intact, with restore records, and a rerun found the machine matching. The real skill folders were
+unchanged. One more real finding: a fourth candidate (claude-md-improver) could not enter review, because its instruction quality
+scored 51, under the minimum of 60. Not yet exercised: a deployed server with OIDC tokens, and real (not copied) agent folders.
 
 Gap 2 is built: provenance on every version (human, agent or unknown; agent identities from the token's delegation
 claim or an agent OAuth client; declarations only raise the bar). Agent-written and unknown updates are reviewed as new
@@ -60,6 +66,6 @@ Weakest part: the closest installed competitor had similarity 0.055, so this mac
 notes and the run is the easy case; the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
-All four gaps have a first build. Open: `sync --apply` and the server path on a real machine; agents acting under a
+All four gaps have a first build. Open: sync against a deployed server with OIDC tokens; agents acting under a
 person's token; commands that need their output in the sandbox; load rate against a real close competitor and
 tenant-level thresholds.

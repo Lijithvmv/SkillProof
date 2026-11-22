@@ -68,12 +68,12 @@ skillproof/
 | Structured JSON logs with request ids | done | 217181f |
 | Lint gate in CI (found: an undefined name in dead code, 16 unused imports) | done | 183544a |
 | API split into routers + shared dependencies (same 39 routes) | done | b540226 |
-| One settings module | open | |
-| CLI split by command group | open | |
-| `capabilities.py` split into a package | open | |
-| Alerts and fleet orchestration out of the access layer into services | open | |
-| Typed models at service boundaries; type check in CI | open | |
-| Package layout (engines/, storage/) with compatibility imports | open | |
+| One settings module (40 settings, validated; production refuses to start with problems) | done | 079120d |
+| CLI split by command group (23 of 24 help texts identical; one store factory for API and CLI) | done | 7e03fca |
+| `capabilities.py` split into a package (six modules, one-way dependencies, all 194 names still importable) | done | 6f4df32 |
+| Alerts and fleet orchestration out of the access layer into services | done | 992d093 |
+| Typed models at service boundaries; type check in CI (24 layered files clean) | done | 4cae529 |
+| Package layout (engines/, storage/) with compatibility imports | held: another session was editing modules it would move | |
 
 ## Feature inventory (nothing may be lost)
 

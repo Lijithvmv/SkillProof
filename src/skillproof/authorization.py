@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from skillproof.approvals import ApprovalAction, SQLiteApprovalStore
 from skillproof.history import EvaluationHistoryStore
+from skillproof.governance import AssurancePolicy
+from skillproof.models import CapabilityChange, EvaluationJob, FleetEntry, FleetReportResult, SkillVersion
 from skillproof.registry import SQLiteSkillRegistry
+
+if TYPE_CHECKING:
+    from skillproof.fleet import FleetStore
+    from skillproof.jobs import JobStore
+    from skillproof.notify import NotificationStore
 
 
 Role = Literal["tenant_admin", "evaluator", "approver", "viewer", "reporter"]
@@ -57,20 +64,20 @@ class GovernanceAccess:
     """
 
     def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore,
-                 jobs: Any | None = None, notifications: Any | None = None, fleet: Any | None = None):
+                 jobs: JobStore | None = None, notifications: NotificationStore | None = None, fleet: FleetStore | None = None):
         self.registry = registry
         self.approvals = approvals
         self.history = history
-        self.jobs = jobs  # skillproof.jobs.JobStore, when the service runs evaluations
-        self.notifications = notifications  # skillproof.notify.NotificationStore, when alerts are configured
-        self.fleet = fleet  # skillproof.fleet.FleetStore, when machines report to this server
+        self.jobs = jobs  # when the service runs evaluations
+        self.notifications = notifications  # when alerts are configured
+        self.fleet = fleet  # when machines report to this server
 
-    def fleet_versions(self, principal: Principal, names: set[str]) -> dict[str, list[dict[str, Any]]]:
+    def fleet_versions(self, principal: Principal, names: set[str]) -> dict[str, list[SkillVersion]]:
         """The tenant's versions of each named skill, for a machine comparing what it runs (reporter permission)."""
         authorize(principal, principal.tenant_id, "fleet.report")
         return {name: self.registry.list_versions(principal.tenant_id, name) for name in names if name}
 
-    def record_fleet_report(self, principal: Principal, host: str, compared: list[dict[str, Any]]) -> dict[str, Any]:
+    def record_fleet_report(self, principal: Principal, host: str, compared: list[FleetEntry]) -> FleetReportResult:
         authorize(principal, principal.tenant_id, "fleet.report")
         if self.fleet is None:
             from skillproof.registry import RegistryError
@@ -98,17 +105,15 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "skill.read")
         return [] if self.notifications is None else self.notifications.notifications(principal.tenant_id, limit)
 
-    def _notify(self) -> Any:
+    def _notify(self) -> NotificationStore:
         if self.notifications is None:
             from skillproof.registry import RegistryError
 
             raise RegistryError("alerts are not enabled on this server")
         return self.notifications
 
-    def tenant_policy(self, principal: Principal) -> Any:
+    def tenant_policy(self, principal: Principal) -> AssurancePolicy:
         """The tenant's assurance policy (stored by a tenant admin), or the default policy."""
-        from skillproof.governance import AssurancePolicy
-
         authorize(principal, principal.tenant_id, "skill.read")
         stored = self.registry.get_policy(principal.tenant_id)
         return AssurancePolicy(**stored["policy"]) if stored else AssurancePolicy()
@@ -121,11 +126,11 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "policy.manage")
         return self.registry.set_policy(principal.tenant_id, policy.model_dump(), actor_id=principal.user_id)
 
-    def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any]) -> CapabilityChange:
         authorize(principal, principal.tenant_id, "skill.register")
         return self.registry.preview_change(principal.tenant_id, skill_name, manifest)
 
-    def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> EvaluationJob:
         authorize(principal, principal.tenant_id, "evaluation.run")
         if self.jobs is None:
             from skillproof.registry import RegistryError
@@ -134,7 +139,7 @@ class GovernanceAccess:
         version = self.registry.get_version(principal.tenant_id, version_id)
         return self.jobs.enqueue(principal.tenant_id, version_id, version["skill_name"], payload, requested_by=principal.user_id)
 
-    def version_jobs(self, principal: Principal, version_id: str) -> list[dict[str, Any]]:
+    def version_jobs(self, principal: Principal, version_id: str) -> list[EvaluationJob]:
         authorize(principal, principal.tenant_id, "evaluation.read")
         return [] if self.jobs is None else self.jobs.for_version(principal.tenant_id, version_id)
 
@@ -145,7 +150,7 @@ class GovernanceAccess:
     def register_skill(
         self, principal: Principal, skill_report: dict[str, Any], assurance_report: dict[str, Any], *,
         artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> SkillVersion:
         authorize(principal, principal.tenant_id, "skill.register")
         return self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id,
                                       artifact_uri=artifact_uri, capability_manifest=capability_manifest)
@@ -153,21 +158,21 @@ class GovernanceAccess:
     def promote_skill(
         self, principal: Principal, version_id: str, assurance_report: dict[str, Any], approval_record: dict[str, Any],
         *, capability_ack: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> SkillVersion:
         authorize(principal, principal.tenant_id, "skill.promote")
         return self.registry.promote(principal.tenant_id, version_id, assurance_report, approval_record,
                                      actor_id=principal.user_id, capability_ack=capability_ack)
 
-    def reassess_skill(self, principal: Principal, version_id: str, assurance_report: dict[str, Any]) -> dict[str, Any]:
+    def reassess_skill(self, principal: Principal, version_id: str, assurance_report: dict[str, Any]) -> SkillVersion:
         authorize(principal, principal.tenant_id, "skill.register")
         return self.registry.reassess(principal.tenant_id, version_id, assurance_report, actor_id=principal.user_id)
 
-    def rollback_skill(self, principal: Principal, skill_name: str, reason: str) -> dict[str, Any]:
+    def rollback_skill(self, principal: Principal, skill_name: str, reason: str) -> SkillVersion:
         """Restore the last approved version. The same permission as promotion: it changes what is live."""
         authorize(principal, principal.tenant_id, "skill.promote")
         return self.registry.rollback(principal.tenant_id, skill_name, actor_id=principal.user_id, reason=reason)
 
-    def promote_version(self, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
+    def promote_version(self, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> SkillVersion:
         """Promote using the assurance report stored with the version and the tenant's own approval record."""
         authorize(principal, principal.tenant_id, "skill.promote")
         assurance = self.registry.get_assurance(principal.tenant_id, version_id)
@@ -175,11 +180,11 @@ class GovernanceAccess:
         return self.registry.promote(principal.tenant_id, version_id, assurance, record,
                                      actor_id=principal.user_id, capability_ack=capability_ack)
 
-    def get_skill(self, principal: Principal, version_id: str) -> dict[str, Any]:
+    def get_skill(self, principal: Principal, version_id: str) -> SkillVersion:
         authorize(principal, principal.tenant_id, "skill.read")
         return self.registry.get_version(principal.tenant_id, version_id)
 
-    def list_skill_versions(self, principal: Principal, skill_name: str) -> list[dict[str, Any]]:
+    def list_skill_versions(self, principal: Principal, skill_name: str) -> list[SkillVersion]:
         authorize(principal, principal.tenant_id, "skill.read")
         return self.registry.list_versions(principal.tenant_id, skill_name)
 
@@ -197,7 +202,7 @@ class GovernanceAccess:
         assurance = self.registry.get_assurance(principal.tenant_id, version_id)
         return self.approvals.submit_for_review(assurance, submitter_id=principal.user_id, tenant_id=principal.tenant_id)
 
-    def mark_false_alarm(self, principal: Principal, version_id: str, category: str, value: str, reason: str) -> dict[str, Any]:
+    def mark_false_alarm(self, principal: Principal, version_id: str, category: str, value: str, reason: str) -> SkillVersion:
         """A reviewer says one raised item is not a real capability. Needs the reviewer's permission, never the author's."""
         authorize(principal, principal.tenant_id, "approval.decide")
         return self.registry.mark_false_alarm(principal.tenant_id, version_id, category, value, reason, actor_id=principal.user_id)

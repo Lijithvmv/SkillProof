@@ -9,12 +9,13 @@ the `fleet.running_unapproved` alert. Tables have tenant row-level security.
 from __future__ import annotations
 
 from skillproof.errors import Conflict, NotFound
+from skillproof.models import FleetEntry, FleetReportResult, SkillVersion
 
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping, Sequence
 
 from skillproof.storage import Database, migrate, tenant_policy
 
@@ -47,7 +48,7 @@ class FleetStore:
         self.db = Database(database)
         migrate(self.db, "fleet", [(1, "latest report per machine", SCHEMA, SCHEMA + tenant_policy("fleet_hosts"))])
 
-    def record(self, tenant_id: str, host: str, skills: list[dict[str, Any]], *, reported_by: str) -> dict[str, Any]:
+    def record(self, tenant_id: str, host: str, skills: list[FleetEntry], *, reported_by: str) -> FleetReportResult:
         if not HOST.match(host or ""):
             raise FleetError("host must be a machine name (letters, digits, dot, dash, underscore)")
         if len(skills) > MAX_SKILLS:
@@ -62,7 +63,7 @@ class FleetStore:
                        (tenant_id, host, reported_by, now, json.dumps(skills), json.dumps(counts)))
         before = {(s["skill_name"], s["installed_fingerprint"]) for s in json.loads(previous["skills_json"]) if s["status"] == "running_unapproved"} if previous else set()
         newly = [s for s in skills if s["status"] == "running_unapproved" and (s["skill_name"], s["installed_fingerprint"]) not in before]
-        return {"host": host, "reported_at": now, "counts": counts, "newly_unapproved": newly}
+        return {"host": host, "reported_at": now, "counts": counts, "newly_unapproved": newly}  # noqa: typed by FleetReportResult
 
     def hosts(self, tenant_id: str) -> list[dict[str, Any]]:
         with self.db.transaction(tenant_id) as db:
@@ -75,7 +76,7 @@ class FleetStore:
         self.db.close()
 
 
-def compare(versions_by_name: dict[str, list[dict[str, Any]]], installed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compare(versions_by_name: Mapping[str, Sequence[SkillVersion]], installed: list[dict[str, Any]]) -> list[FleetEntry]:
     """Each installed skill's status against the tenant's versions of that name."""
     out = []
     for item in installed:
@@ -85,12 +86,12 @@ def compare(versions_by_name: dict[str, list[dict[str, Any]]], installed: list[d
         versions = versions_by_name.get(name, [])
         active = next((v for v in versions if v["state"] == "active"), None)
         known = next((v for v in versions if v["package_fingerprint"] == fingerprint), None)
-        status = "never_approved" if active is None else "approved" if active["package_fingerprint"] == fingerprint else "running_unapproved"
-        entry = {"skill_name": name, "installed_fingerprint": fingerprint, "status": status,
+        status: Literal["approved", "running_unapproved", "never_approved"] = "never_approved" if active is None else "approved" if active["package_fingerprint"] == fingerprint else "running_unapproved"
+        entry: FleetEntry = {"skill_name": name, "installed_fingerprint": fingerprint, "status": status,
                  "approved_version_id": active["version_id"] if active else None,
                  "installed_version_id": known["version_id"] if known else None}
-        if status == "running_unapproved" and known and known.get("capability_change"):
-            change = known["capability_change"]
+        change = (known or {}).get("capability_change")
+        if status == "running_unapproved" and change:
             entry["adds_over_approved"] = {"decision": change.get("decision"), "counts": change.get("counts")}
         out.append(entry)
     return out

@@ -6,10 +6,11 @@ from typing import Any
 
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.fleet import compare
+from skillproof.models import FleetReportResult
 from skillproof.services import alerts
 
 
-def report(governance: GovernanceAccess, principal: Principal, host: str, installed: list[dict[str, Any]]) -> dict[str, Any]:
+def report(governance: GovernanceAccess, principal: Principal, host: str, installed: list[dict[str, Any]]) -> FleetReportResult:
     names = {str(item.get("skill_name", "")).strip() for item in installed}
     compared = compare(governance.fleet_versions(principal, names), installed)
     result = governance.record_fleet_report(principal, host, compared)

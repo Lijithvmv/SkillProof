@@ -12,7 +12,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from skillproof.storage import Database, add_columns, append_only, migrate, tenant_policy
 
@@ -103,11 +103,11 @@ class ApprovalStore:
         return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     @staticmethod
-    def _hash_report(report: dict[str, Any]) -> str:
+    def _hash_report(report: Mapping[str, Any]) -> str:
         serialized = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    def submit_for_review(self, report: dict[str, Any], *, submitter_id: str, tenant_id: str = "default") -> dict[str, Any]:
+    def submit_for_review(self, report: Mapping[str, Any], *, submitter_id: str, tenant_id: str = "default") -> dict[str, Any]:
         if not submitter_id.strip() or not tenant_id.strip():
             raise ApprovalError("submitter_id and tenant_id are required")
         if report.get("decision") != "eligible_for_human_approval":
@@ -168,7 +168,7 @@ class ApprovalStore:
         record = {key: value for key, value in dict(row).items() if key != "seq"}
         return {**record, "events": [dict(event) for event in events]}
 
-    def list_for_report(self, report: dict[str, Any], *, tenant_id: str = "default") -> list[dict[str, Any]]:
+    def list_for_report(self, report: Mapping[str, Any], *, tenant_id: str = "default") -> list[dict[str, Any]]:
         """Every approval request in the tenant for exactly this report, newest first."""
         digest = self._hash_report(report)
         with self.db.transaction(tenant_id) as db:

@@ -11,6 +11,7 @@ artifact_uri through its own object store. Package bytes are not stored here.
 from __future__ import annotations
 
 from skillproof.errors import Conflict, NotFound
+from skillproof.models import AssuranceReport, CapabilityChange, ChangeItem, SkillVersion
 
 import hashlib
 import json
@@ -18,7 +19,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, cast
 
 from skillproof.capabilities import diff_manifests
 from skillproof.storage import Database, add_columns, append_only, migrate, tenant_policy
@@ -167,7 +168,7 @@ MIGRATIONS = [
 ]
 
 
-def _canonical_hash(value: dict[str, Any]) -> str:
+def _canonical_hash(value: Mapping[str, object]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -185,7 +186,7 @@ class SkillRegistry:
     def register(
         self, tenant_id: str, skill_report: dict[str, Any], assurance_report: dict[str, Any],
         *, actor_id: str, artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> SkillVersion:
         tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
         if not tenant_id or not actor_id:
             raise RegistryError("tenant_id and actor_id are required")
@@ -238,7 +239,7 @@ class SkillRegistry:
                             f"{change['decision']} against {change['against']} {change['change_hash'][:12]}", now)
         return self.get_version(tenant_id, version_id)
 
-    def reassess(self, tenant_id: str, version_id: str, assurance_report: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+    def reassess(self, tenant_id: str, version_id: str, assurance_report: Mapping[str, Any], *, actor_id: str) -> SkillVersion:
         """Replace the assurance report of a version still waiting for a decision, when new evidence exists for its
         exact package. An approval request made on the old report no longer matches (promotion checks the hash), so it
         must be submitted again. Active and superseded versions keep the report they were approved on."""
@@ -269,7 +270,7 @@ class SkillRegistry:
                             f"{old_decision} -> {assurance_report.get('decision')}; replaces report {row['assurance_hash'][:12]}", now)
         return self.get_version(tenant_id, version_id)
 
-    def rollback(self, tenant_id: str, skill_name: str, *, actor_id: str, reason: str) -> dict[str, Any]:
+    def rollback(self, tenant_id: str, skill_name: str, *, actor_id: str, reason: str) -> SkillVersion:
         """Make the last superseded version active again and retire the active one, in one audited step. Only a version
         that was approved and promoted before can come back; nothing new is approved by a rollback."""
         tenant_id, actor_id, reason = tenant_id.strip(), actor_id.strip(), (reason or "").strip()
@@ -314,18 +315,20 @@ class SkillRegistry:
                        "updated_at=excluded.updated_at", (tenant_id, body, actor_id, now))
             db.execute("INSERT INTO policy_events (tenant_id, actor_id, policy_json, occurred_at) VALUES (?, ?, ?, ?)",
                        (tenant_id, actor_id, body, now))
-        return self.get_policy(tenant_id)
+        stored = self.get_policy(tenant_id)
+        assert stored is not None  # written in this call
+        return stored
 
-    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> CapabilityChange:
         """What a manifest would add over the tenant's active version (or the latest one while nothing is approved),
         ranked, without registering anything. Used to put the capability change into the assurance gate."""
         with self.db.transaction(tenant_id):
             return self._change(tenant_id, skill_name, manifest, fallback_previous=True)
 
     def promote(
-        self, tenant_id: str, version_id: str, assurance_report: dict[str, Any],
-        approval_record: dict[str, Any], *, actor_id: str, capability_ack: str | None = None,
-    ) -> dict[str, Any]:
+        self, tenant_id: str, version_id: str, assurance_report: Mapping[str, Any],
+        approval_record: Mapping[str, Any], *, actor_id: str, capability_ack: str | None = None,
+    ) -> SkillVersion:
         tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
         if not tenant_id or not actor_id:
             raise RegistryError("tenant_id and actor_id are required")
@@ -371,7 +374,7 @@ class SkillRegistry:
             self._event(version_id, tenant_id, actor_id, "promoted", approval_record.get("request_id", ""), now)
         return self.get_version(tenant_id, version_id)
 
-    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False) -> dict[str, Any]:
+    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False) -> CapabilityChange:
         """What this manifest adds over the tenant's active version of the skill, ranked by triage. Runs inside the
         caller's transaction.
 
@@ -401,13 +404,13 @@ class SkillRegistry:
         diff = diff_manifests(old, manifest)
         ranked = triage(diff, new_manifest=manifest, tenant_counts=self._confidence_counts(tenant_id))
         items, dismissed = self._apply_false_alarms(tenant_id, skill_name, ranked["items"])
-        change = {
+        change: CapabilityChange = {
             "against": against,
             "against_version_id": against_id,
             "status": diff["status"],
-            "decision": max((item["level"] for item in items), key=LEVELS.get, default="none"),
+            "decision": max((item["level"] for item in items), key=lambda level: LEVELS[level], default="none"),
             "counts": {level: sum(item["level"] == level for item in items) for level in LEVELS},
-            "items": items[:MAX_CHANGE_ITEMS],
+            "items": cast(list[ChangeItem], items[:MAX_CHANGE_ITEMS]),
             "items_total": len(items),
             "dismissed": dismissed,
             "combinations": ranked["combinations"],
@@ -467,7 +470,7 @@ class SkillRegistry:
                                   "reason": mark["reason"], "marked_by": mark["marked_by"], "marked_at": mark["marked_at"]})
         return kept, dismissed
 
-    def mark_false_alarm(self, tenant_id: str, version_id: str, category: str, value: str, reason: str, *, actor_id: str) -> dict[str, Any]:
+    def mark_false_alarm(self, tenant_id: str, version_id: str, category: str, value: str, reason: str, *, actor_id: str) -> SkillVersion:
         """A reviewer marks one raised item of a version as not a real capability. The person who registered the version
         cannot mark its items, the mark is audited, and the version's change is compared again so the page and the
         acknowledgement hash reflect it."""
@@ -496,7 +499,7 @@ class SkillRegistry:
             )
             self._event(version_id, tenant_id, actor_id, "false_alarm_marked", f"{category}: {value} - {reason}"[:600], now)
             if row["capabilities_json"] and row["state"] in {"pending_review", "not_eligible"}:
-                against_active = change.get("against") in {"active_version", "active_version_without_manifest"}
+                against_active = (change or {}).get("against") in {"active_version", "active_version_without_manifest"}
                 fresh = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]),
                                      fallback_previous=not against_active)
                 summary = json.loads(row["summary_json"])
@@ -540,7 +543,7 @@ class SkillRegistry:
                 entry["waiting"].append(brief)
         return list(skills.values())
 
-    def get_assurance(self, tenant_id: str, version_id: str) -> dict[str, Any]:
+    def get_assurance(self, tenant_id: str, version_id: str) -> AssuranceReport:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT assurance_json FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
         if row is None:
@@ -555,7 +558,7 @@ class SkillRegistry:
             (version_id, tenant_id, actor_id, action, detail, timestamp),
         )
 
-    def _decode(self, row: Any) -> dict[str, Any]:
+    def _decode(self, row: Any) -> SkillVersion:
         result = {key: value for key, value in dict(row).items() if key != "seq"}
         result["summary"] = json.loads(result.pop("summary_json"))
         for column, key in (("assurance_json", "assurance"), ("capabilities_json", "capabilities"), ("change_json", "capability_change")):
@@ -564,16 +567,16 @@ class SkillRegistry:
         result["events"] = [dict(event) for event in self.db.execute(
             "SELECT actor_id, action, detail, occurred_at FROM registry_events WHERE version_id=? ORDER BY event_id", (row["version_id"],)
         ).fetchall()]
-        return result
+        return cast(SkillVersion, result)
 
-    def get_version(self, tenant_id: str, version_id: str) -> dict[str, Any]:
+    def get_version(self, tenant_id: str, version_id: str) -> SkillVersion:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
                 raise RegistryNotFound("skill version not found in this tenant")
             return self._decode(row)
 
-    def list_versions(self, tenant_id: str, skill_name: str) -> list[dict[str, Any]]:
+    def list_versions(self, tenant_id: str, skill_name: str) -> list[SkillVersion]:
         with self.db.transaction(tenant_id) as db:
             rows = db.execute(
                 f"SELECT * FROM skill_versions WHERE tenant_id=? AND skill_name=? ORDER BY created_at DESC, {db.insertion_order} DESC",
@@ -581,7 +584,7 @@ class SkillRegistry:
             ).fetchall()
             return [self._decode(row) for row in rows]
 
-    def get_active(self, tenant_id: str, skill_name: str) -> dict[str, Any]:
+    def get_active(self, tenant_id: str, skill_name: str) -> SkillVersion:
         with self.db.transaction(tenant_id) as db:
             row = db.execute(
                 "SELECT * FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'", (tenant_id, skill_name)
@@ -601,5 +604,5 @@ def _evidence_files(item: dict[str, Any]) -> list[str]:
     return sorted({re.sub(r":(?:\d+|decoded)$", "", location) for location in item.get("locations") or []})
 
 
-def _dump(value: dict[str, Any] | None) -> str | None:
+def _dump(value: Mapping[str, object] | None) -> str | None:
     return None if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

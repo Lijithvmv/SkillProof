@@ -36,3 +36,12 @@ target-version = "py311"
 # Real defects only: undefined names, unused imports and variables, syntax errors, and bugbear checks.
 select = ["F", "E9", "B"]
 ignore = ["B008"]  # FastAPI declares File()/Form() parameters as defaults by design
+
+[tool.mypy]
+# The layered architecture is type-checked in CI: interfaces, services, the access layer, the stores, models and config.
+# The analysis engines (capabilities, triage, evaluation) are checked by their tests and lint only.
+files = ["src/skillproof/api", "src/skillproof/services", "src/skillproof/authorization.py", "src/skillproof/registry.py",
+         "src/skillproof/approvals.py", "src/skillproof/jobs.py", "src/skillproof/fleet.py", "src/skillproof/wiring.py",
+         "src/skillproof/models.py", "src/skillproof/config.py", "src/skillproof/errors.py", "src/skillproof/package.py"]
+ignore_missing_imports = true
+follow_imports = "silent"

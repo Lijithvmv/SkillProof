@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from skillproof.authorization import GovernanceAccess, Principal
+from skillproof.models import FleetEntry, SkillVersion
 
 
 def emit(governance: GovernanceAccess, tenant_id: str, event: str, payload: dict[str, Any]) -> None:
@@ -17,7 +18,7 @@ def emit(governance: GovernanceAccess, tenant_id: str, event: str, payload: dict
         pass
 
 
-def version_registered(governance: GovernanceAccess, principal: Principal, version: dict[str, Any]) -> None:
+def version_registered(governance: GovernanceAccess, principal: Principal, version: SkillVersion) -> None:
     change = version.get("capability_change") or {}
     if change.get("decision") == "block" and version.get("created_at") == version.get("updated_at"):  # new, not a re-upload
         emit(governance, principal.tenant_id, "version.block_level_addition", {
@@ -26,15 +27,15 @@ def version_registered(governance: GovernanceAccess, principal: Principal, versi
             "block_items": [f"{i['category']}: {i['value']}" for i in change.get("items", []) if i["level"] == "block"][:10]})
 
 
-def version_promoted(governance: GovernanceAccess, principal: Principal, version: dict[str, Any], request_id: str) -> None:
+def version_promoted(governance: GovernanceAccess, principal: Principal, version: SkillVersion, request_id: str) -> None:
     emit(governance, principal.tenant_id, "version.promoted", {"version_id": version["version_id"], "skill_name": version["skill_name"],
                                                                "promoted_by": principal.user_id, "approval_request_id": request_id})
 
 
-def version_rolled_back(governance: GovernanceAccess, principal: Principal, skill_name: str, restored: dict[str, Any], reason: str) -> None:
+def version_rolled_back(governance: GovernanceAccess, principal: Principal, skill_name: str, restored: SkillVersion, reason: str) -> None:
     emit(governance, principal.tenant_id, "version.rolled_back", {"skill_name": skill_name, "restored_version_id": restored["version_id"],
                                                                   "by": principal.user_id, "reason": reason[:500]})
 
 
-def fleet_unapproved(governance: GovernanceAccess, tenant_id: str, host: str, entry: dict[str, Any]) -> None:
+def fleet_unapproved(governance: GovernanceAccess, tenant_id: str, host: str, entry: FleetEntry) -> None:
     emit(governance, tenant_id, "fleet.running_unapproved", {"host": host, **entry})

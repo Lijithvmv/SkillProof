@@ -11,12 +11,13 @@ reading any tenant's data; it then works inside that job's tenant.
 from __future__ import annotations
 
 from skillproof.errors import Conflict, NotFound
+from skillproof.models import EvaluationJob
 
 import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from skillproof.storage import Database, migrate, tenant_policy
 
@@ -63,7 +64,7 @@ class JobStore:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    def enqueue(self, tenant_id: str, version_id: str, skill_name: str, payload: dict[str, Any], *, requested_by: str) -> dict[str, Any]:
+    def enqueue(self, tenant_id: str, version_id: str, skill_name: str, payload: dict[str, Any], *, requested_by: str) -> EvaluationJob:
         """Queue an evaluation of one version. A version with a job still queued or running gets that job back."""
         if not tenant_id.strip() or not requested_by.strip():
             raise JobError("tenant_id and requested_by are required")
@@ -81,7 +82,7 @@ class JobStore:
                 db.execute("INSERT INTO job_queue (job_id, tenant_id, created_at) VALUES (?, ?, ?)", (job_id, tenant_id, now))
         return self.get(tenant_id, job_id)
 
-    def claim(self) -> tuple[str, dict[str, Any]] | None:
+    def claim(self) -> tuple[str, EvaluationJob] | None:
         """Take the oldest queued job and mark it running. Returns (tenant_id, job with payload) or None."""
         now = self._now()
         with self.db.transaction(None, write=True) as db:
@@ -96,18 +97,18 @@ class JobStore:
             job = db.execute("SELECT * FROM evaluation_jobs WHERE job_id=?", (job_id,)).fetchone()
         return (tenant_id, self._decode(job, payload=True)) if job else None
 
-    def _close(self, tenant_id: str, job_id: str, sql: str, params: tuple) -> dict[str, Any]:
+    def _close(self, tenant_id: str, job_id: str, sql: str, params: tuple) -> EvaluationJob:
         with self.db.transaction(tenant_id, write=True) as db:
             db.execute(sql, params)
         with self.db.transaction(None, write=True) as db:
             db.execute("DELETE FROM job_queue WHERE job_id=?", (job_id,))
         return self.get(tenant_id, job_id)
 
-    def finish(self, tenant_id: str, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    def finish(self, tenant_id: str, job_id: str, result: dict[str, Any]) -> EvaluationJob:
         return self._close(tenant_id, job_id, "UPDATE evaluation_jobs SET state='done', result_json=?, finished_at=? WHERE job_id=?",
                            (json.dumps(result, ensure_ascii=False), self._now(), job_id))
 
-    def fail(self, tenant_id: str, job_id: str, error: str) -> dict[str, Any]:
+    def fail(self, tenant_id: str, job_id: str, error: str) -> EvaluationJob:
         return self._close(tenant_id, job_id, "UPDATE evaluation_jobs SET state='failed', error=?, finished_at=? WHERE job_id=?",
                            (error[:2000], self._now(), job_id))
 
@@ -121,27 +122,27 @@ class JobStore:
                 db.execute("UPDATE evaluation_jobs SET state='queued', started_at=NULL WHERE job_id=?", (row["job_id"],))
         return len(claimed)
 
-    def get(self, tenant_id: str, job_id: str) -> dict[str, Any]:
+    def get(self, tenant_id: str, job_id: str) -> EvaluationJob:
         with self.db.transaction(tenant_id) as db:
             row = db.execute("SELECT * FROM evaluation_jobs WHERE tenant_id=? AND job_id=?", (tenant_id, job_id)).fetchone()
         if row is None:
             raise JobNotFound("job not found in this tenant")
         return self._decode(row)
 
-    def for_version(self, tenant_id: str, version_id: str) -> list[dict[str, Any]]:
+    def for_version(self, tenant_id: str, version_id: str) -> list[EvaluationJob]:
         with self.db.transaction(tenant_id) as db:
             rows = db.execute("SELECT * FROM evaluation_jobs WHERE tenant_id=? AND version_id=? ORDER BY created_at DESC",
                               (tenant_id, version_id)).fetchall()
         return [self._decode(r) for r in rows]
 
     @staticmethod
-    def _decode(row: Any, *, payload: bool = False) -> dict[str, Any]:
+    def _decode(row: Any, *, payload: bool = False) -> EvaluationJob:
         job = {k: row[k] for k in ("job_id", "tenant_id", "version_id", "skill_name", "state", "requested_by", "error",
                                    "created_at", "started_at", "finished_at")}
         job["result"] = json.loads(row["result_json"]) if row["result_json"] else None
         if payload:
             job["payload"] = json.loads(row["payload_json"])
-        return job
+        return cast(EvaluationJob, job)
 
     def close(self) -> None:
         self.db.close()

@@ -12,7 +12,8 @@ from skillproof.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
 from skillproof.capabilities import build_manifest
 from skillproof.evidence import instructions_fingerprint, measured_evidence
-from skillproof.governance import AssuranceInput, AssurancePolicy, assess_version
+from skillproof.governance import AssuranceInput, AssurancePolicy, SecurityFinding, assess_version
+from skillproof.models import EvaluationJob, SkillVersion
 from skillproof.second_opinion import add_second_opinions
 from skillproof.services import alerts
 
@@ -82,7 +83,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
         structural_score=report.get("structural_score"),
         instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
         security_score=security.get("security_score"),
-        security_findings=[{"code": f["code"], "severity": f["severity"]} for f in security.get("findings", [])],
+        security_findings=[SecurityFinding(code=f["code"], severity=f["severity"]) for f in security.get("findings", [])],
         capability_decision=change["decision"], capability_counts=change["counts"],
         **behaviour,
     ), policy or governance.tenant_policy(principal))
@@ -92,8 +93,8 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     return Assessment(report=report, manifest=manifest, assurance=assurance, skill_md=skill_md)
 
 
-def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version: dict[str, Any], skill_md: str,
-                     policy: AssurancePolicy | None = None) -> dict[str, Any] | None:
+def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version: SkillVersion, skill_md: str,
+                     policy: AssurancePolicy | None = None) -> SkillVersion | None:
     """Assess a version still waiting for a decision again, on every run recorded for its exact SKILL.md, keeping its
     static inputs and judging on the tenant's policy now. Returns the updated version, or None when there is nothing
     new to judge or the version is no longer waiting (an approved version keeps the report it was approved on)."""
@@ -106,30 +107,33 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
         return None
     measured = measured_evidence(records, matching, skill_md)
     provenance = measured.pop("provenance")
-    report = reassess_with_runs(version["assurance"], measured, provenance, policy or governance.tenant_policy(principal))
+    previous = version.get("assurance")
+    if not previous:
+        return None
+    report = reassess_with_runs(dict(previous), measured, provenance, policy or governance.tenant_policy(principal))
     return governance.reassess_skill(principal, version["version_id"], report)
 
 
-def register(governance: GovernanceAccess, principal: Principal, assessment: Assessment, *, artifact_uri: str | None = None) -> dict[str, Any]:
+def register(governance: GovernanceAccess, principal: Principal, assessment: Assessment, *, artifact_uri: str | None = None) -> SkillVersion:
     version = governance.register_skill(principal, assessment.report, assessment.assurance, artifact_uri=artifact_uri,
                                         capability_manifest=assessment.manifest)
     alerts.version_registered(governance, principal, version)
     return version
 
 
-def promote(governance: GovernanceAccess, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> dict[str, Any]:
+def promote(governance: GovernanceAccess, principal: Principal, version_id: str, request_id: str, *, capability_ack: str | None = None) -> SkillVersion:
     version = governance.promote_version(principal, version_id, request_id, capability_ack=capability_ack)
     alerts.version_promoted(governance, principal, version, request_id)
     return version
 
 
-def rollback(governance: GovernanceAccess, principal: Principal, skill_name: str, reason: str) -> dict[str, Any]:
+def rollback(governance: GovernanceAccess, principal: Principal, skill_name: str, reason: str) -> SkillVersion:
     restored = governance.rollback_skill(principal, skill_name, reason)
     alerts.version_rolled_back(governance, principal, skill_name, restored, reason)
     return restored
 
 
-def request_evaluation(governance: GovernanceAccess, principal: Principal, version_id: str, skill_md: str) -> dict[str, Any]:
+def request_evaluation(governance: GovernanceAccess, principal: Principal, version_id: str, skill_md: str) -> EvaluationJob:
     """Queue a run-evidence job for a version, bound to the exact SKILL.md text it holds."""
     payload = {"skill_md": skill_md, "instructions_fingerprint": instructions_fingerprint(skill_md)}
     return governance.enqueue_evaluation(principal, version_id, payload)

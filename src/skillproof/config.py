@@ -16,6 +16,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_AUTH_MODE | auth_mode | `local` (development identity headers) or `oidc` |
 | SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated) |
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
+| SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE | human_attestation_max_age_seconds | seconds since the token's interactive sign-in (auth_time) within which a "human-written" attestation counts (900) |
 | SKILLPROOF_MIN_LOAD_RATE / SKILLPROOF_MAX_FALSE_LOAD_RATE | min_load_rate, max_false_load_rate | load-rate gate: least share of relevant requests that pick the skill (0.5), most share of unrelated ones (0.2) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
 | SKILLPROOF_SECOND_OPINION_MODEL / _URL | second_opinion | local-model second opinion on risk items; off when no model is set |
@@ -102,6 +103,9 @@ class Settings:
     pilot_grader_model: str = ""
     # Load-rate gate (a version citing a load-rate run): the least share of relevant requests that must pick the skill,
     # and the most share of unrelated requests that may. Defaults are starting points, not validated thresholds.
+    # A person's attestation that they wrote a version counts only from a token whose interactive sign-in (auth_time)
+    # is this recent; an unattended agent using a person's token carries an old one.
+    human_attestation_max_age_seconds: int = 900
     min_load_rate: float = 0.5
     max_false_load_rate: float = 0.2
 
@@ -141,6 +145,7 @@ def settings() -> Settings:
         pilot_provider=_get("SKILLPROOF_PROVIDER", "openai") or "openai",
         pilot_model=_get("SKILLPROOF_MODEL") or _get("SKILLPROOF_OPENAI_MODEL"),
         pilot_grader_model=_get("SKILLPROOF_GRADER_MODEL") or _get("SKILLPROOF_OPENAI_GRADER_MODEL"),
+        human_attestation_max_age_seconds=_int("SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE", 900),
         min_load_rate=_float("SKILLPROOF_MIN_LOAD_RATE", 0.5),
         max_false_load_rate=_float("SKILLPROOF_MAX_FALSE_LOAD_RATE", 0.2),
     )

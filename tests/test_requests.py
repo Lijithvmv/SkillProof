@@ -40,8 +40,8 @@ def card(folder, name, description):
 
 
 # Decision: without hand-written requests, load-rate writes the skill's own requests from its description and near
-# misses for its closest rival (by request match), counts the near misses as requests it must not take, and keeps
-# everything it wrote and dropped in the result for review.
+# misses for its closest rival (by request match), drops a request that does not ask for the skill's specific purpose,
+# counts the near misses as requests it must not take, and keeps everything it wrote and dropped for review.
 def test_load_rate_generates_own_requests_and_near_misses(tmp_path, monkeypatch):
     import skillproof.adapters.ollama as ollama
 
@@ -50,11 +50,18 @@ def test_load_rate_generates_own_requests_and_near_misses(tmp_path, monkeypatch)
     card(root / "pptx", "pptx", "Make slide decks.")
     skill = tmp_path / "create-pr"
     card(skill, "create-pr", "Create a pull request. Use when the user wants to open a PR.")
-    written = {"create-pr": ["My feature is finished, get it reviewed.", "Use create-pr please.", "Send my branch to the team for merging."],
+    written = {"create-pr": ["My feature is finished, get it reviewed.", "Use create-pr please.", "Send my branch to the team for merging.",
+                             "Help me with anything on my code."],
                "create-draft-pr": ["I'm halfway done, share it early without merging.", "Show my unfinished branch to others."]}
 
     def asker(model, url, **kwargs):
-        return lambda prompt, schema: json.dumps({"requests": written[prompt.split("Tool name: ")[1].split("\n")[0]]})
+        def ask(prompt, schema):
+            if "Messages:" in prompt:  # the purpose check: everything fits except a generic request
+                lines = [line for line in prompt.split("Messages:\n")[1].split("\n") if line[:1].isdigit()]
+                return json.dumps({"verdicts": [{"index": i, "fits": "anything" not in line, "reason": "generic"}
+                                                for i, line in enumerate(lines, 1)]})
+            return json.dumps({"requests": written[prompt.split("Tool name: ")[1].split("\n")[0]]})
+        return ask
 
     class Embedder:
         def __init__(self, **kwargs):
@@ -80,8 +87,10 @@ def test_load_rate_generates_own_requests_and_near_misses(tmp_path, monkeypatch)
     requests = result["requests"]
     assert requests["source"] == "generated_from_descriptions"
     assert requests["relevant"] == ["My feature is finished, get it reviewed.", "Send my branch to the team for merging."]
-    reasons = [d["reason"] for d in requests["dropped"]]
-    assert reasons[0] == "names the skill" and set(reasons) == {"names the skill", "duplicate"}  # later rounds repeat
+    reasons = [d["reason"].split(" (")[0] for d in requests["dropped"]]
+    assert reasons[:2] == ["names the skill", "off the skill's purpose"]  # the generic request is judged off purpose
+    assert set(reasons) == {"names the skill", "off the skill's purpose", "duplicate"}  # later rounds repeat
+    assert requests["purpose_judge"] == "m"
     assert {n["rival"] for n in requests["near_misses"]} == {"create-draft-pr"} and len(requests["near_misses"]) == 2
     assert result["relevant"]["activation_rate"] == 1.0 and result["unrelated"]["trials"] == 2
     assert result["unrelated"]["false_activation_rate"] == 0.0 and code == 0
@@ -101,3 +110,18 @@ def test_rejected_requests_are_fed_back():
     kept, dropped = write_requests("create-pr", DESCRIPTION, ask, 1)
     assert kept == ["My feature is done, send it to the team for review."] and len(prompts) == 2
     assert "rejected: copies the description" in prompts[1] and "Open a PR with the session's changes." in prompts[1]
+
+
+# Decision: the purpose check judges against the skill's own description; a request it gives no verdict for is not
+# trusted, and the reason is kept.
+def test_off_purpose_requests_are_identified():
+    from skillproof.engines.requests import off_purpose
+
+    def ask(prompt, schema):
+        assert "claude-security" not in prompt  # rivals are never shown to the judge
+        return json.dumps({"verdicts": [{"index": 1, "fits": True, "reason": "security"},
+                                        {"index": 2, "fits": False, "reason": "general code review"}]})
+
+    requests = ["Audit this diff for injection.", "Review my profile function.", "Check auth in this change."]
+    assert off_purpose(requests, "review-security", "Review code changes with Security Review subagent.", ask) == {
+        1: "general code review", 2: "no verdict"}

@@ -105,16 +105,20 @@ class OIDCAccessTokenVerifier:
         # Agent identities. Delegation (RFC 8693 `act` claim): the token was issued to an agent acting for `sub`; the
         # agent is the identity that acts and the person it acts for is kept, so neither can approve what it wrote. A
         # token from an OAuth client the tenant issued to an agent (SKILLPROOF_OIDC_AGENT_CLIENTS) is an agent too.
+        signed_in = claims.get("auth_time")
+        signed_in_at = signed_in if isinstance(signed_in, int) and not isinstance(signed_in, bool) else None
         actor = claims.get("act")
         if actor is not None and (not isinstance(actor, dict) or not isinstance(actor.get("sub"), str) or not actor["sub"].strip()):
             raise AuthenticationError("access token has a malformed act (delegation) claim")
         try:
             if actor is not None:
                 return Principal(user_id=actor["sub"], tenant_id=tenant_id, role=role_value,  # type: ignore[arg-type]
-                                 actor_kind="agent", on_behalf_of=subject)
+                                 actor_kind="agent", on_behalf_of=subject, identity_source="oidc", signed_in_at=signed_in_at)
             if claims.get("client_id") in self.settings.agent_clients:
-                return Principal(user_id=subject, tenant_id=tenant_id, role=role_value, actor_kind="agent")  # type: ignore[arg-type]
-            return Principal(user_id=subject, tenant_id=tenant_id, role=role_value)  # type: ignore[arg-type]
+                return Principal(user_id=subject, tenant_id=tenant_id, role=role_value, actor_kind="agent",  # type: ignore[arg-type]
+                                 identity_source="oidc", signed_in_at=signed_in_at)
+            return Principal(user_id=subject, tenant_id=tenant_id, role=role_value,  # type: ignore[arg-type]
+                             identity_source="oidc", signed_in_at=signed_in_at)
         except ValueError as exc:
             raise AuthenticationError("access token principal claims are invalid") from exc
 

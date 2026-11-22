@@ -232,3 +232,47 @@ def test_rivals_by_meaning_join_the_competitors(tmp_path, monkeypatch):
     monkeypatch.setattr(ollama, "OllamaEmbedder", Broken)
     result = cli_evaluation.measure_load_rate(args, ["Check this diff for vulnerabilities."], None)
     assert result["competitors"]["semantic"] == {"status": "unavailable", "reason": "Could not reach Ollama"}
+
+
+# Decision: a tenant sets its own load-rate thresholds and the gate uses them; only a person with policy.manage can
+# change them (never an agent identity), values outside 0..1 are refused, and every change is kept append-only.
+def test_tenant_load_rate_thresholds(tmp_path):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    from skillproof.api.main import app
+
+    governance = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "r.db"), approvals=SQLiteApprovalStore(tmp_path / "a.db"),
+                                  history=EvaluationHistoryStore(tmp_path / "h.db"))
+    app.state.governance = governance
+    try:
+        client = TestClient(app)
+        admin = {"x-skillproof-dev-user": "ada", "x-skillproof-dev-role": "tenant_admin"}
+        viewer = {"x-skillproof-dev-user": "vic", "x-skillproof-dev-role": "viewer"}
+        agent = {**admin, "x-skillproof-dev-user": "agent:bot", "x-skillproof-dev-actor": "agent"}
+        assert client.get("/api/v1/policy/gates", headers=viewer).json()["source"] == "default"
+        assert client.put("/api/v1/policy/gates", json={"min_load_rate": 0.9, "max_false_load_rate": 0.1}, headers=viewer).status_code == 403
+        assert client.put("/api/v1/policy/gates", json={"min_load_rate": 0.9, "max_false_load_rate": 0.1}, headers=agent).status_code == 403
+        assert client.put("/api/v1/policy/gates", json={"min_load_rate": 1.5, "max_false_load_rate": 0.1}, headers=admin).status_code == 422
+        put = client.put("/api/v1/policy/gates", json={"min_load_rate": 0.9, "max_false_load_rate": 0.1}, headers=admin)
+        assert put.status_code == 200 and put.json()["settings"] == {"min_load_rate": 0.9, "max_false_load_rate": 0.1}
+        assert put.json()["source"] == "tenant" and put.json()["updated_by"] == "ada"
+    finally:
+        app.state.governance = None
+
+    reader = Principal(user_id="eval", tenant_id="local", role="evaluator")
+    strict = assurance()
+    catalogue.apply_load_rate(strict, {"activation_rate": 0.75, "candidate_skills": 9}, governance.gate_settings(reader)["settings"])
+    assert strict["decision"] == "not_ready" and "minimum 90%" in strict["gates"][-1]["message"]
+    lenient = assurance()
+    catalogue.apply_load_rate(lenient, {"activation_rate": 0.75, "candidate_skills": 9})  # server default floor 50%
+    assert lenient["decision"] == "eligible_for_human_approval"
+    governance.registry.close(); governance.approvals.close(); governance.history.close()
+    with sqlite3.connect(tmp_path / "r.db") as db:
+        assert db.execute("SELECT count(*) FROM gate_settings_events").fetchone()[0] == 1
+        try:
+            db.execute("DELETE FROM gate_settings_events")
+            raise AssertionError("history must be append-only")
+        except sqlite3.DatabaseError as exc:
+            assert "append-only" in str(exc)

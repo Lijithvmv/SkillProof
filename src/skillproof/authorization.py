@@ -50,6 +50,8 @@ class Principal:
     role: Role
     actor_kind: ActorKind = "human"   # 'agent' for an agent identity (a token with a delegation `act` claim)
     on_behalf_of: str | None = None   # the person an agent identity acts for
+    identity_source: str = "local"    # 'oidc' for a verified access token, 'local' for development sign-in
+    signed_in_at: int | None = None   # the token's auth_time: when the person last signed in interactively (epoch s)
 
     def __post_init__(self) -> None:
         if not self.user_id.strip() or not self.tenant_id.strip():
@@ -172,6 +174,22 @@ class GovernanceAccess:
     def set_tenant_policy(self, principal: Principal, policy: Any) -> dict[str, Any]:
         authorize(principal, principal.tenant_id, "policy.manage")
         return self.registry.set_policy(principal.tenant_id, policy.model_dump(), actor_id=principal.user_id)
+
+    def gate_settings(self, principal: Principal) -> dict[str, Any]:
+        """The load-rate thresholds in force for the tenant: its own, else the server defaults."""
+        from skillproof.config import settings
+
+        authorize(principal, principal.tenant_id, "skill.read")
+        stored = self.registry.get_gate_settings(principal.tenant_id)
+        defaults = {"min_load_rate": settings().min_load_rate, "max_false_load_rate": settings().max_false_load_rate}
+        return {"settings": {**defaults, **((stored or {}).get("settings") or {})}, "source": "tenant" if stored else "default",
+                "updated_by": (stored or {}).get("updated_by"), "updated_at": (stored or {}).get("updated_at")}
+
+    def set_gate_settings(self, principal: Principal, values: dict[str, Any]) -> dict[str, Any]:
+        """Change the tenant's load-rate thresholds (a person with policy.manage; agents cannot)."""
+        authorize(principal, principal.tenant_id, "policy.manage")
+        self.registry.set_gate_settings(principal.tenant_id, values, actor_id=principal.user_id)
+        return self.gate_settings(principal)
 
     def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any], *,
                        full_review: bool = False) -> CapabilityChange:

@@ -35,6 +35,28 @@ def put_policy(policy: AssurancePolicy, request: Request) -> dict[str, Any]:
     return {"tenant_id": principal.tenant_id, **guarded(lambda: governance.set_tenant_policy(principal, policy))}
 
 
+class GateSettings(BaseModel):
+    """Load-rate thresholds for this tenant's LOAD_RATE gate."""
+    min_load_rate: float = Field(ge=0, le=1, description="Least share of relevant requests that must pick the skill.")
+    max_false_load_rate: float = Field(ge=0, le=1, description="Most share of unrelated requests that may pick it.")
+
+
+@router.get("/api/v1/policy/gates")
+def get_gate_settings(request: Request) -> dict[str, Any]:
+    """The load-rate thresholds in force for the tenant (its own or the server defaults) and who last changed them."""
+    principal = current_principal(request)
+    governance = current_governance(request)
+    return {"tenant_id": principal.tenant_id, **guarded(lambda: governance.gate_settings(principal))}
+
+
+@router.put("/api/v1/policy/gates")
+def put_gate_settings(body: GateSettings, request: Request) -> dict[str, Any]:
+    """Set the tenant's load-rate thresholds (a person with policy.manage). New assessments use them; every change is kept."""
+    principal = current_principal(request)
+    governance = current_governance(request)
+    return {"tenant_id": principal.tenant_id, **guarded(lambda: governance.set_gate_settings(principal, body.model_dump()))}
+
+
 class WebhookRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     events: list[str] = Field(min_length=1, max_length=len(EVENTS))

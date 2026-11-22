@@ -27,7 +27,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-ROLES = ("tenant_admin", "evaluator", "approver", "viewer")
+ROLES = ("tenant_admin", "evaluator", "approver", "viewer", "reporter")
 
 
 def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof-api", client_id: str = "skillproof-catalogue") -> FastAPI:
@@ -71,13 +71,14 @@ def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof
     @app.post("/authorize")
     def authorize(client_id_: str = Form(alias="client_id"), redirect_uri: str = Form(), state: str = Form(""),
                   code_challenge: str = Form(), user: str = Form(), role: str = Form(), tenant: str = Form(),
-                  nonce: str = Form("")) -> RedirectResponse:
+                  nonce: str = Form(""), agent: str = Form("")) -> RedirectResponse:
         check_request(client_id_, redirect_uri)
         if role not in ROLES or not user.strip() or not tenant.strip():
             raise HTTPException(400, "user, role and tenant are required")
         code = secrets.token_urlsafe(32)
         codes[code] = {"client_id": client_id_, "redirect_uri": redirect_uri, "challenge": code_challenge, "sub": user.strip(),
-                       "role": role, "tenant": tenant.strip(), "nonce": nonce, "expires": time.time() + 60}
+                       "role": role, "tenant": tenant.strip(), "nonce": nonce, "expires": time.time() + 60,
+                       "auth_time": int(time.time()), "agent": agent.strip()}  # the interactive sign-in happens here
         return RedirectResponse(redirect_uri + "?" + urlencode({"code": code, "state": state}), status_code=303)
 
     @app.post("/token")
@@ -97,7 +98,10 @@ def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof
             return JSONResponse({"error": error, "error_description": "code, client, redirect or PKCE verifier does not match"}, status_code=400)
         now = int(time.time())
         claims = {"iss": issuer, "aud": audience, "sub": grant["sub"], "iat": now, "exp": now + 900, "jti": str(uuid.uuid4()),
-                  "client_id": client_id_, "skillproof_role": grant["role"], "tenant_id": grant["tenant"]}
+                  "client_id": client_id_, "skillproof_role": grant["role"], "tenant_id": grant["tenant"],
+                  "auth_time": grant["auth_time"]}
+        if grant["agent"]:  # delegation: an agent acting for the signed-in person (RFC 8693 act claim)
+            claims["act"] = {"sub": grant["agent"]}
         access = jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid, "typ": "at+jwt"})
         return JSONResponse({"access_token": access, "token_type": "Bearer", "expires_in": 900},
                             headers={"Cache-Control": "no-store"})

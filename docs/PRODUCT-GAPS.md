@@ -39,15 +39,23 @@ a file, and one never-approved skill. A dry run changed nothing. `sync --server 
 from the server's verified packages (fingerprints on disk equal the approved ones). It quarantined the tampered folder and the
 unapproved skill intact, with restore records, and a rerun found the machine matching. The real skill folders were
 unchanged. One more real finding: a fourth candidate (claude-md-improver) could not enter review, because its instruction quality
-scored 51, under the minimum of 60. Not yet exercised: a deployed server with OIDC tokens, and real (not copied) agent folders.
+scored 51, under the minimum of 60. The same 29 checks, plus 2 more, passed with OIDC sign-in (`--oidc`: every person and the machine signed in through
+the code + PKCE flow of the development provider; a call without a token got 401, and a reporter token trying to
+register a version got 403): 31 of 31. Not yet exercised: a production identity provider, and real (not copied) agent folders.
 
 Gap 2 is built: provenance on every version (human, agent or unknown; agent identities from the token's delegation
 claim or an agent OAuth client; declarations only raise the bar). Agent-written and unknown updates are reviewed as new
 skills, with the update's own diff kept beside the full review. No author approves its own version, and agent
 identities cannot decide, promote, dismiss or change policy. Tested on fixtures, through the API, and on PostgreSQL.
-Weakest part: an agent that writes skills through a person's own session, with a person's token, is recorded as
-that person. Provenance is only as good as the identities the tenant issues; installed folders stay `unknown`, never
+An agent using a person's own token: with OIDC, "a person wrote it" now counts only from a token whose interactive
+sign-in (auth_time) is under 15 minutes old; an older or missing sign-in time records the version as unknown, and it
+is reviewed as a new skill. Weakest part: an agent acting within minutes of the person signing in, with their token,
+still passes as that person. Provenance is only as good as the identities the tenant issues; installed folders stay `unknown`, never
 `human`.
+
+Commands: read-only inspection commands are now answered by Python against the workspace (no process starts), so
+an agent that looks before it acts sees real output; reading a credential file this way is recorded like read_file.
+Everything else is still recorded only.
 
 Gap 3 is built: sandboxed tool runs (`evaluate-skill --sandbox`) with protected-path rules, a canary credential,
 trajectories ranked by the capability engine, attribution against baseline runs, and the result in the assurance gate.
@@ -91,9 +99,18 @@ three rounds. Generated against hand-written on this machine:
   Generated requests can drift from what makes a skill distinct, so they are saved for review and labelled; hand-written
   ones remain the reference.
 (The create-draft-pr and review-security generated runs used the first, stricter filter.)
+The suggested fix for drift, dropping a request that matches a rival better than the skill, was tested against the data
+first and rejected: all four hand-written security requests matched claude-security better than review-security, so it
+would have deleted exactly the requests that exposed the real rival. Instead a purpose check judges each written request
+against the skill's own description only ("does it ask for what this skill is specifically for?"). On review-security's
+requests, gemma4 kept 5 of 6 generated (it dropped the profile-function request) and 4 of 4 hand-written; qwen2.5-coder
+also wrongly dropped one genuine security request. With the purpose check on (gemma4 judge), review-security measured
+9 of 12 (75%), every miss to claude-security. Hand-written short audit requests gave 3 of 8. Both request styles are
+fair, so the rate depends on the mix of requests: the per-request breakdown shows which kinds a rival takes.
 Weakest part: the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
-All four gaps have a first build. Open: sync against a deployed server with OIDC tokens; agents acting under a
-person's token; commands that need their output in the sandbox; generated load-rate requests can drift from a skill's distinct purpose (review them); tenant-level
-thresholds.
+All four gaps have a first build. Open: a production identity provider for sync; an agent acting within minutes of
+a person's sign-in on their token; commands with pipes or that change files are still only recorded; the purpose check
+can wrongly drop a fair request (in the review-security run it dropped 1 of 8 candidates that asked for a security check); load rate depends on the request mix, so hand-written requests
+stay the reference.

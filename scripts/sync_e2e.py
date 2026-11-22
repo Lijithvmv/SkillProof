@@ -28,6 +28,9 @@ parser.add_argument("work")
 parser.add_argument("approved", nargs="+")
 parser.add_argument("--unapproved", required=True)
 parser.add_argument("--server", default="http://127.0.0.1:8796")
+parser.add_argument("--oidc", help="Issuer of a development OIDC provider (scripts/dev_oidc_provider.py). Every call then uses "
+                                   "a bearer token from a real code + PKCE sign-in, and sync uses a reporter token.")
+parser.add_argument("--redirect", default="http://127.0.0.1:8796/catalogue", help="Redirect URI the provider accepts.")
 cli = parser.parse_args()
 BASE = Path(cli.work)
 SERVER = cli.server
@@ -46,8 +49,46 @@ def check(label, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + label + (f"  [{detail}]" if detail else ""), flush=True)
 
 
-def call(method, path, user, role, body=None, files=None):
-    headers = {"X-SkillProof-Dev-User": user, "X-SkillProof-Dev-Role": role}
+TOKENS: dict = {}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def token_for(user, role):
+    """An access token from the provider's sign-in: authorize (with PKCE), read the code from the redirect, exchange it."""
+    import base64
+    import hashlib
+    import secrets
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    if (user, role) in TOKENS:
+        return TOKENS[(user, role)]
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    form = urlencode({"client_id": "skillproof-catalogue", "redirect_uri": cli.redirect, "state": "s", "code_challenge": challenge,
+                      "user": user, "role": role, "tenant": "local"}).encode()
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(urllib.request.Request(cli.oidc + "/authorize", data=form, method="POST"), timeout=30)
+        raise RuntimeError("the provider did not redirect with a code")
+    except urllib.error.HTTPError as exc:
+        location = exc.headers["Location"]
+    code = parse_qs(urlparse(location).query)["code"][0]
+    exchange = urlencode({"grant_type": "authorization_code", "code": code, "redirect_uri": cli.redirect,
+                          "client_id": "skillproof-catalogue", "code_verifier": verifier}).encode()
+    with urllib.request.urlopen(urllib.request.Request(cli.oidc + "/token", data=exchange, method="POST"), timeout=30) as response:
+        TOKENS[(user, role)] = json.loads(response.read())["access_token"]
+    return TOKENS[(user, role)]
+
+
+def call(method, path, user, role, body=None, files=None, token=None):
+    if cli.oidc:
+        headers = {"Authorization": "Bearer " + (token or token_for(user, role))} if token != "" else {}
+    else:
+        headers = {"X-SkillProof-Dev-User": user, "X-SkillProof-Dev-Role": role}
     data = None
     if files is not None:
         boundary = uuid.uuid4().hex
@@ -85,9 +126,14 @@ def fp(folder: Path) -> str:
 
 
 def sync(*extra):
+    import os
+
     out = BASE / "sync.json"
+    env = dict(os.environ)
+    if cli.oidc:
+        env["SKILLPROOF_TOKEN"] = token_for("sync@test-machine", "reporter")
     code = subprocess.run([SKILLPROOF, "sync", "--server", SERVER, "--root", str(BASE / "machine"), "--output", str(out), *extra],
-                          capture_output=True, text=True).returncode
+                          capture_output=True, text=True, env=env).returncode
     return code, json.loads(out.read_text(encoding="utf-8"))
 
 
@@ -120,7 +166,13 @@ for name in APPROVE:
           f"HTTP {status} {promoted.get('detail', '')}"[:200])
     approved[name] = version["package_fingerprint"]
 
-status, listing = call("GET", "/api/v1/registry/approved", "sync", "reporter")
+if cli.oidc:
+    status, _ = call("GET", "/api/v1/registry/approved", "nobody", "viewer", token="")
+    check("OIDC: a call without a token is refused", status == 401, f"HTTP {status}")
+    status, _ = call("POST", "/api/v1/registry/versions", "sync@test-machine", "reporter", {"evidence_json": EVIDENCE},
+                     {"file": ("x.zip", zipped(machine / APPROVE[0]))})
+    check("OIDC: a reporter token cannot register a version", status == 403, f"HTTP {status}")
+status, listing = call("GET", "/api/v1/registry/approved", "sync@test-machine", "reporter")
 check("reporter token reads the approved set", status == 200 and {a["skill_name"] for a in listing["approved"]} == set(approved))
 
 # The machine drifts: one approved skill is changed (instruction appended, a script added), one is deleted file-wise.

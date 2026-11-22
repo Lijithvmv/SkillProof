@@ -7,7 +7,11 @@ not meaning). So the model writes requests as a user would, and every request is
 - it must not name the skill;
 - it must not echo the description it was written from: four or more of its content words in a row (filler words
   left out), or most of its own content words taken from it (a natural phrase such as "create a pull request" alone is how people ask, and stays);
-- it must be a short, distinct request.
+- it must be a short, distinct request;
+- it must ask for what this skill is specifically for (judged against its own description only, never against
+  rivals): a request a general tool in the same area would serve just as well has drifted off the skill's purpose and
+  would test the wrong thing. Rivals are deliberately not consulted: a fair request that a rival also matches is
+  exactly the case a load-rate test exists to catch.
 
 What fails is dropped with the reason and kept in the result. The skill's own requests are written from its
 description; the near misses (requests it must NOT take) are written from the descriptions of its closest rivals,
@@ -77,6 +81,40 @@ def check(request: str, name: str, description: str, seen: set[str]) -> str | No
     return None
 
 
+PURPOSE_SCHEMA = {"type": "object", "properties": {"verdicts": {"type": "array", "items": {
+    "type": "object", "properties": {"index": {"type": "integer"}, "fits": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["index", "fits", "reason"]}}}, "required": ["verdicts"]}
+PURPOSE_PROMPT = """Below is one tool an AI assistant can load, and numbered user messages. For each message, decide whether
+it asks for what THIS tool is specifically for: the thing that sets it apart in its description. A message about the
+same general area that a general-purpose tool would serve just as well, without the tool's specific purpose, does not
+fit. Judge each message on its own against this description only.
+
+Tool name: {name}
+Tool description: {description}
+
+Messages:
+{messages}
+
+Return JSON: {{"verdicts": [{{"index": 1, "fits": true, "reason": "..."}}, ...]}}"""
+
+
+def off_purpose(requests: list[str], name: str, description: str, ask: Callable[[str, dict], str]) -> dict[int, str]:
+    """Indexes of requests that do not ask for the skill's specific purpose, with the judge's reason. A request the
+    judge gave no verdict for is treated as off purpose (it was not confirmed)."""
+    if not requests:
+        return {}
+    listing = "\n".join(f"{i}. {r}" for i, r in enumerate(requests, 1))
+    raw = ask(PURPOSE_PROMPT.format(name=name, description=description, messages=listing), PURPOSE_SCHEMA)
+    try:
+        verdicts = json.loads(raw).get("verdicts") or []
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise RuntimeError(f"the purpose check returned no verdicts for {name}: {raw[:120]!r}") from exc
+    fits = {int(v["index"]): (bool(v.get("fits")), str(v.get("reason", ""))[:200]) for v in verdicts
+            if isinstance(v, dict) and isinstance(v.get("index"), int)}
+    return {i - 1: (fits.get(i, (False, "no verdict"))[1] or "not its specific purpose")
+            for i in range(1, len(requests) + 1) if not fits.get(i, (False, ""))[0]}
+
+
 FEEDBACK = """
 
 These earlier messages were rejected; write different ones that avoid the same problem:
@@ -84,9 +122,10 @@ These earlier messages were rejected; write different ones that avoid the same p
 
 
 def write_requests(name: str, description: str, ask: Callable[[str, dict], str], n: int,
-                   rounds: int = 3) -> tuple[list[str], list[dict[str, str]]]:
-    """Up to n usable requests for one skill, and the dropped ones with reasons. Rejected requests are shown back to
-    the model with their reasons, for up to `rounds` rounds."""
+                   rounds: int = 3, judge: Callable[[str, dict], str] | None = None) -> tuple[list[str], list[dict[str, str]]]:
+    """Up to n usable requests for one skill, and the dropped ones with reasons. With `judge`, each round's candidates
+    are also checked for the skill's specific purpose (off_purpose). Rejected requests are shown back to the model with
+    their reasons, for up to `rounds` rounds."""
     kept: list[str] = []
     dropped: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -100,11 +139,18 @@ def write_requests(name: str, description: str, ask: Callable[[str, dict], str],
             items = json.loads(raw).get("requests") or []
         except (json.JSONDecodeError, AttributeError) as exc:
             raise RuntimeError(f"the model returned no request list for {name}: {raw[:120]!r}") from exc
+        candidates = []
         for item in items:
             text = str(item).strip()
-            reason = check(text, name, description, seen)
+            reason = check(text, name, description, seen | {" ".join(_words(c)) for c in candidates})
             if reason:
                 dropped.append({"skill": name, "request": text[:300], "reason": reason})
+            else:
+                candidates.append(text)
+        drift = off_purpose(candidates, name, description, judge) if judge else {}
+        for index, text in enumerate(candidates):
+            if index in drift:
+                dropped.append({"skill": name, "request": text[:300], "reason": f"off the skill's purpose ({drift[index]})"})
             elif len(kept) < n:
                 kept.append(text)
                 seen.add(" ".join(_words(text)))

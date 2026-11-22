@@ -162,12 +162,37 @@ POSTGRES_SCHEMA = """
     "registry_events", "registry events are append-only")
 
 
+GATE_SETTINGS_SQLITE = """
+    CREATE TABLE IF NOT EXISTS tenant_gate_settings (
+        tenant_id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS gate_settings_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS gate_settings_events_no_update
+    BEFORE UPDATE ON gate_settings_events BEGIN SELECT RAISE(ABORT, 'gate settings events are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS gate_settings_events_no_delete
+    BEFORE DELETE ON gate_settings_events BEGIN SELECT RAISE(ABORT, 'gate settings events are append-only'); END;
+"""
+GATE_SETTINGS_POSTGRES = GATE_SETTINGS_SQLITE.split("CREATE TRIGGER")[0].replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY") + (
+    tenant_policy("tenant_gate_settings") + tenant_policy("gate_settings_events")
+    + append_only("gate_settings_events", "gate settings events are append-only"))
+
+
 MIGRATIONS = [
     (1, "versions, events, false alarms, tenant policies", SQLITE_SCHEMA, POSTGRES_SCHEMA),
     (2, "assurance report, capability manifest and change per version",
      add_columns("skill_versions", {"assurance_json": "TEXT", "capabilities_json": "TEXT", "change_json": "TEXT"}), "SELECT 1"),
     (3, "who wrote each version (provenance)", add_columns("skill_versions", {"provenance_json": "TEXT"}),
      add_columns("skill_versions", {"provenance_json": "TEXT"})),
+    (4, "per-tenant gate settings (load-rate thresholds) with history", GATE_SETTINGS_SQLITE, GATE_SETTINGS_POSTGRES),
 ]
 
 
@@ -327,6 +352,28 @@ class SkillRegistry:
             db.execute("INSERT INTO policy_events (tenant_id, actor_id, policy_json, occurred_at) VALUES (?, ?, ?, ?)",
                        (tenant_id, actor_id, body, now))
         stored = self.get_policy(tenant_id)
+        assert stored is not None  # written in this call
+        return stored
+
+    def get_gate_settings(self, tenant_id: str) -> dict[str, Any] | None:
+        """The tenant's own gate settings (load-rate thresholds), or None when it uses the server defaults."""
+        with self.db.transaction(tenant_id) as db:
+            row = db.execute("SELECT settings_json, updated_by, updated_at FROM tenant_gate_settings WHERE tenant_id=?", (tenant_id,)).fetchone()
+        return None if row is None else {"settings": json.loads(row["settings_json"]), "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    def set_gate_settings(self, tenant_id: str, settings: dict[str, Any], *, actor_id: str) -> dict[str, Any]:
+        """Store the tenant's gate settings; every change is kept in an append-only history."""
+        tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
+        if not tenant_id or not actor_id:
+            raise RegistryError("tenant_id and actor_id are required")
+        now, body = self._now(), json.dumps(settings, sort_keys=True)
+        with self.db.transaction(tenant_id, write=True) as db:
+            db.execute("INSERT INTO tenant_gate_settings (tenant_id, settings_json, updated_by, updated_at) VALUES (?, ?, ?, ?) "
+                       "ON CONFLICT (tenant_id) DO UPDATE SET settings_json=excluded.settings_json, updated_by=excluded.updated_by, "
+                       "updated_at=excluded.updated_at", (tenant_id, body, actor_id, now))
+            db.execute("INSERT INTO gate_settings_events (tenant_id, actor_id, settings_json, occurred_at) VALUES (?, ?, ?, ?)",
+                       (tenant_id, actor_id, body, now))
+        stored = self.get_gate_settings(tenant_id)
         assert stored is not None  # written in this call
         return stored
 

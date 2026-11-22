@@ -83,13 +83,15 @@ def load_rate_evidence(records: list[dict[str, Any]], cited: list[str]) -> dict[
     return None
 
 
-def apply_load_rate(assurance: dict[str, Any], evidence: dict[str, Any] | None) -> None:
+def apply_load_rate(assurance: dict[str, Any], evidence: dict[str, Any] | None,
+                    thresholds: dict[str, float] | None = None) -> None:
     """The LOAD_RATE gate. A skill agents rarely pick for the requests it is for does little, and one they pick for
     unrelated requests gets in the way: either makes the version not ready. Without a load-rate run the gate says so
     and does not change the decision."""
     from skillproof.config import settings
 
-    floor, ceiling = settings().min_load_rate, settings().max_false_load_rate
+    floor = (thresholds or {}).get("min_load_rate", settings().min_load_rate)
+    ceiling = (thresholds or {}).get("max_false_load_rate", settings().max_false_load_rate)
     gates = assurance.setdefault("gates", [])
     if evidence is None or evidence.get("activation_rate") is None:
         gates.append({"code": "LOAD_RATE", "status": "not_measured",
@@ -176,7 +178,8 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     assurance["evidence"] = provenance
     if observed:
         assurance["observed_behaviour"] = observed
-    apply_load_rate(assurance, load_rate_evidence(records, cited) if cite or cite_all_runs else None)
+    apply_load_rate(assurance, load_rate_evidence(records, cited) if cite or cite_all_runs else None,
+                    governance.gate_settings(principal)["settings"])
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": catalogue_name, "package_fingerprint": report["package_fingerprint"]}
     assurance["authorship"] = {"author_kind": authorship["author_kind"], "review_bar": authorship["review_bar"]}
@@ -207,7 +210,7 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
     observed = observed_behaviour(records, matching) or previous.get("observed_behaviour")
     if observed:
         report["observed_behaviour"] = observed
-    apply_load_rate(report, load_rate_evidence(records, matching))
+    apply_load_rate(report, load_rate_evidence(records, matching), governance.gate_settings(principal)["settings"])
     return governance.reassess_skill(principal, version["version_id"], report)
 
 

@@ -3,7 +3,9 @@
 Skills are increasingly written and rewritten by agents (self-improving agents, an agent asked to "fix the skill",
 skills edited in place on disk). A version's provenance records what SkillProof can establish about its author:
 
-- `human`    a person registered it and attests they wrote it (an upload by a human identity);
+- `human`    a person registered it and attests they wrote it (an upload by a human identity). With OIDC, only from a
+             token whose interactive sign-in (auth_time) is recent: an agent running unattended on a person's token
+             carries an old sign-in, so its "human" attestation is recorded as `unknown`;
 - `agent`    an agent identity registered it, or whoever registered it says an agent wrote it;
 - `unknown`  nobody can attest (an installed folder that changed on disk: the importer saw the files, not the author).
 
@@ -89,6 +91,17 @@ def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, sou
     else:
         kind = claim.get("author_kind", "human")  # type: ignore[assignment]
         basis.append(f"registered by {principal.user_id}, who " + ("attests a person wrote it" if kind == "human" else f"declares it {kind}"))
+        if kind == "human" and principal.identity_source == "oidc":
+            # An agent running unattended on a person's token is indistinguishable by identity; the sign-in time is not.
+            from skillproof.config import settings
+
+            limit = settings().human_attestation_max_age_seconds
+            age = None if principal.signed_in_at is None else int(datetime.now(timezone.utc).timestamp()) - principal.signed_in_at
+            if age is None or age > limit or age < -300:
+                kind = "unknown"
+                basis.append("not accepted as human-written: the token " + ("has no interactive sign-in time (auth_time)"
+                             if age is None else f"was signed in {age // 60} minute(s) ago (limit {limit // 60})")
+                             + ", so an agent using the person's token cannot be ruled out")
     return Provenance(
         author_kind=kind, registered_by=principal.user_id, registered_as=principal.actor_kind,
         on_behalf_of=principal.on_behalf_of, agent=claim.get("agent") or (principal.user_id if principal.actor_kind == "agent" else None),

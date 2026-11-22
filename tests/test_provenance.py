@@ -162,3 +162,27 @@ def test_oidc_tokens_for_agents_become_agent_identities():
     assert person.actor_kind == "human"
     with pytest.raises(Exception, match="act"):
         plain.verify(make_token(act="agent"))
+
+
+# Decision: an attestation that a person wrote a version counts only from a token whose interactive sign-in is recent;
+# a token signed in hours ago, or with no sign-in time, could be an agent running on the person's token, so the
+# version is recorded as unknown and reviewed as a new skill.
+def test_human_attestation_needs_a_recent_interactive_sign_in():
+    import time
+
+    verifier = OIDCAccessTokenVerifier(OIDCSettings(issuer="https://login.example.test/", audience="skillproof-api",
+                                                    jwks_url="https://login.example.test/.well-known/jwks.json", leeway_seconds=0),
+                                       signing_keys=FakeKeys())
+    now = int(time.time())
+    fresh = verifier.verify(make_token(auth_time=now - 60))
+    stale = verifier.verify(make_token(auth_time=now - 3 * 3600))
+    missing = verifier.verify(make_token())
+    assert fresh.identity_source == "oidc" and fresh.signed_in_at == now - 60
+    assert provenance.resolve(fresh)["author_kind"] == "human"
+    stale_record = provenance.resolve(stale)
+    assert stale_record["author_kind"] == "unknown" and stale_record["review_bar"] == "new_skill"
+    assert "180 minute(s) ago" in " ".join(stale_record["basis"])
+    assert provenance.resolve(missing)["author_kind"] == "unknown"
+    assert provenance.resolve(stale, {"author_kind": "agent"})["author_kind"] == "agent"  # raising the bar still works
+    local = Principal(user_id="alice", tenant_id="t", role="evaluator")
+    assert provenance.resolve(local)["author_kind"] == "human"  # development sign-in has no sign-in time to check

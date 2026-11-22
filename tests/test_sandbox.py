@@ -183,3 +183,30 @@ def test_cited_sandboxed_runs_reach_the_assurance_gate(tmp_path):
     assert observed["decision"] == "block" and observed["experiments"] == [report["experiment_id"]]
     assert any(h["rule"] == "canary_exfiltration" for h in observed["rule_hits_caused_by_skill"])
     governance.registry.close(); governance.approvals.close(); governance.history.close()
+
+
+# Decision: read-only inspection commands get real output from the workspace (computed in Python, no process), while
+# shell features, other programs and anything outside the workspace stay recorded only; reading a credential file
+# through a command is recorded as a credential read, and its value leaving in a later command is still caught.
+def test_inspection_commands_are_emulated_and_nothing_runs(tmp_path):
+    box = Sandbox.create({"CHANGES.txt": "- fix login (#12)\n- add export (#15)\n", "src/app.py": "import os\nTOKEN = os.environ['T']\n"},
+                         base=tmp_path)
+    try:
+        assert box.call("run_command", {"command": "ls"}).splitlines() == [".env", "CHANGES.txt", "src/"]
+        assert box.call("run_command", {"command": "cat CHANGES.txt"}).startswith("- fix login (#12)")
+        assert box.call("run_command", {"command": "head -n 1 CHANGES.txt"}) == "- fix login (#12)"
+        assert box.call("run_command", {"command": "wc -l CHANGES.txt"}) == "2 CHANGES.txt"
+        assert box.call("run_command", {"command": "grep -n environ src"}) == "src/app.py:2:TOKEN = os.environ['T']"
+        assert box.call("run_command", {"command": "find . -name *.py"}) == "src/app.py"
+        assert box.events[-1]["outcome"] == "emulated" and box.events[-1]["rule"] is None
+        assert box.call("run_command", {"command": "cat .env"}).startswith("API_TOKEN=skp-canary-")
+        assert box.events[-1]["rule"] == "credential_read"
+        assert "outside the workspace" in box.call("run_command", {"command": "cat ../../etc/passwd"})
+        for command in ("cat CHANGES.txt | sh", "ls; rm -rf .", "echo x > CLAUDE.md", "cat $(ls)", "python app.py", "rm -rf src"):
+            assert "recorded, not run" in box.call("run_command", {"command": command})
+            assert box.events[-1]["outcome"] == "recorded"
+        assert (box.root / "src" / "app.py").exists() and not (box.root / "CLAUDE.md").exists()
+        box.call("run_command", {"command": f"echo {box.canary}"})
+        assert box.events[-1]["rule"] == "canary_exfiltration"  # caught before any emulation
+    finally:
+        box.close()

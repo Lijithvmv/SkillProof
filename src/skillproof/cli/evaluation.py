@@ -65,9 +65,23 @@ def evaluate_skill(args) -> dict[str, Any]:
     claims_path = Path(args.benchmark).with_name("claims.json")
     claims = json.loads(claims_path.read_text(encoding="utf-8")) if claims_path.exists() else extract_claims(text)
     judge = OllamaEvaluator(model=args.grader_model, base_url=args.ollama_url, seed=args.seed) if args.grader_model else None
-    runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, max_output_tokens=args.max_output_tokens)
+    runner: Any
+    skill_manifest = None
+    if args.sandbox:
+        # The agent acts through tools in a sandbox; the skill's own files are in its workspace (skill-enabled runs).
+        from skillproof import package
+        from skillproof.adapters.ollama import OllamaToolRunner
+        from skillproof.engines.capabilities import build_manifest
+
+        folder = Path(args.skill)
+        files, _ = package.read_folder(folder.parent if folder.name == "SKILL.md" else folder)
+        skill_manifest = build_manifest(files)
+        runner = OllamaToolRunner(model=args.model, skill_files=files, base_url=args.ollama_url, seed=args.seed,
+                                  max_output_tokens=args.max_output_tokens, max_steps=args.max_steps, sandbox_base=args.sandbox_dir)
+    else:
+        runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, max_output_tokens=args.max_output_tokens)
     experiment = execute_experiment(tasks=tasks, skill_instructions=text, runner=runner, evaluator=CheckedEvaluator(judge),
-                                    repeats=args.repeats, seed=args.seed)
+                                    repeats=args.repeats, seed=args.seed, skill_manifest=skill_manifest)
     experiment["comparison"]["adherence"] = adherence(experiment, claims)
     experiment["benchmark"] = {"benchmark_id": manifest.get("benchmark_id"), "version": manifest.get("version"),
                                "validation_status": manifest.get("status")}
@@ -94,7 +108,9 @@ def run_evaluate_skill(args) -> Result:
     try:
         result = evaluate_skill(args)
         followed = (result["comparison"].get("adherence") or {}).get("adherence_rate")
-        return result, 1 if sum(result["failure_counts"].values()) or (followed is not None and followed < 0.7) else 0
+        behaviour = (result["comparison"].get("behaviour") or {}).get("decision")
+        return result, 1 if (sum(result["failure_counts"].values()) or (followed is not None and followed < 0.7)
+                             or behaviour in {"block", "ask"}) else 0
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         return {"error": str(exc)}, 4
 
@@ -205,6 +221,9 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--repeats", type=int, default=2)
     evaluate.add_argument("--seed", type=int, default=0)
     evaluate.add_argument("--max-output-tokens", type=int, default=3000)
+    evaluate.add_argument("--sandbox", action="store_true", help="Let the agent act through tools (files, commands, URLs) in a sandbox and record what it does: protected writes, the canary credential, and behaviour the skill's files do not show. Commands are recorded, never run. Exit 1 when the skill causes block- or ask-level behaviour.")
+    evaluate.add_argument("--max-steps", type=int, default=12, help="Tool calls per sandboxed run.")
+    evaluate.add_argument("--sandbox-dir", help="Folder for the temporary workspaces (default: the system temp folder).")
     evaluate.add_argument("--name", help="Catalogue skill name to record under (default: the SKILL.md name).")
     evaluate.add_argument("--data-dir", help="Catalogue storage to record into (as catalogue-import). Omit to only report.")
     evaluate.add_argument("--tenant", default="local")

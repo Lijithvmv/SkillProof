@@ -63,6 +63,7 @@ class AssuranceReport(TypedDict, total=False):
     policy: dict[str, Any]
     evidence: dict[str, Any]
     subject: dict[str, str]
+    observed_behaviour: dict[str, Any]  # what cited sandboxed runs showed the skill makes agents do
     authorship: dict[str, str]  # author kind and review bar (skillproof.provenance), bound into the approval hash
 
 

@@ -46,7 +46,7 @@ Reached (2026-11-22):
 ```
 skillproof/
   engines/     analyzer, semantic, security, capabilities/, triage, confidence, second_opinion, conformance,
-               templates, evaluation, execution, checks, grader_check, activation, compatibility, operations,
+               templates, evaluation, execution, sandbox, trajectory, checks, grader_check, activation, compatibility, operations,
                human_review, update_report, inventory, installed, apm_lock, monitoring, pilot
   storage/     database (pool, migrations, row-level security), registry, approvals, history, jobs, notify, fleet, artifacts (package bytes)
   services/    catalogue, imports, evaluation (jobs worker), alerts, fleet, distribution (sync)
@@ -122,6 +122,7 @@ Every feature below keeps its tests; the suite must stay green through every sta
 | Fleet reporting | fleet | test_notify |
 | Package store and sync (enforcement) | storage/artifacts, services/distribution, cli sync | test_sync |
 | Provenance: agent-written updates reviewed as new skills, no author approves | provenance, registry, authorization, oidc | test_provenance |
+| Sandboxed tool runs: trajectories judged against protected paths and the static manifest | engines/sandbox, engines/trajectory, adapters/ollama OllamaToolRunner | test_sandbox |
 | Installed-skill import, installed-vs-approved check | catalogue_import | test_catalogue_import, test_conformance |
 | Watch installed skills and plugins | installed | test_installed |
 | APM lockfile check | apm_lock | test_apm_lock |

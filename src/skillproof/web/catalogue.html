@@ -248,6 +248,18 @@ async function select(id) {
   } catch (e) { box.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
 }
 
+function observedHtml(o) {
+  // What cited sandboxed runs showed the skill makes agents do (engines/trajectory.py).
+  if (!o) return "";
+  const rows = [
+    ...(o.rule_hits_caused_by_skill || []).map(h => [h.level, `${h.rule.replace(/_/g, " ")}`, `with the skill in ${h.skill_enabled_runs} run(s), without in ${h.baseline_runs}`, (h.examples || []).join("<br>")]),
+    ...(o.undeclared_behaviours || []).map(b => [b.undeclared_level || b.level, `${b.category.replace(/_/g, " ")}: ${b.value}`, `not in the skill's files; with the skill in ${b.skill_enabled_runs} run(s), without in ${b.baseline_runs}`, ""]),
+  ];
+  return `<h3>What the skill made agents do (sandboxed runs) · ${esc(o.decision)}</h3>
+  ${rows.length ? `<div class="scroll"><table><tbody>${rows.map(r => `<tr><td>${badge(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td>${r[3] ? `<code>${r[3].split("<br>").map(esc).join("<br>")}</code>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+    : `<p class="muted">Nothing the agents did with the skill broke a sandbox rule or went beyond the skill's files more often than without it.</p>`}`;
+}
+
 function detailHtml(v, requests) {
   const change = v.capability_change;
   const against = change ? { nothing_active: "nothing active yet, so every capability counts as added",
@@ -288,6 +300,7 @@ function detailHtml(v, requests) {
   <div id="runEvidence"></div>
   <div id="jobs"></div>
   <div class="scroll"><table><tbody>${gates.map(g => `<tr><td>${badge(g.status.replace(/_/g, " "), g.status === "pass" ? "pass" : (g.status === "blocked" || g.status === "fail") ? "block" : "ask")}</td><td>${esc(g.message)}</td></tr>`).join("")}</tbody></table></div>
+  ${observedHtml(v.assurance && v.assurance.observed_behaviour)}
   <h3>Approval</h3>
   ${latest ? `<p>Request <code>${short(latest.request_id)}</code> ${badge(latest.state.replace(/_/g, " "), latest.state === "approved" ? "approved" : "state")} · submitted by ${esc(latest.submitter_id)}</p>` : `<p class="muted">No approval request yet.</p>`}
   <div class="row" id="actions"></div>

@@ -16,6 +16,7 @@ from skillproof.evidence import instructions_fingerprint, measured_evidence
 from skillproof.governance import AssuranceInput, AssurancePolicy, SecurityFinding, assess_version
 from skillproof.models import EvaluationJob, SkillVersion
 from skillproof.engines.second_opinion import add_second_opinions
+from skillproof.engines.triage import LEVELS
 from skillproof.services import alerts
 
 
@@ -43,6 +44,28 @@ def runs_for(governance: GovernanceAccess, principal: Principal, name: str, skil
     records = governance.list_evaluations(principal, skill_key=name, limit=500)
     expected = instructions_fingerprint(skill_md)
     return records, [r["experiment_id"] for r in records if r["instructions_fingerprint"] == expected]
+
+
+def observed_behaviour(records: list[dict[str, Any]], cited: list[str]) -> dict[str, Any] | None:
+    """What the cited sandboxed runs showed the skill makes agents do (trajectory.summarize per experiment), merged:
+    the highest decision, and the rule hits and undeclared behaviours the skill caused. None when no cited experiment
+    was sandboxed."""
+    wanted = set(cited)
+    found: list[tuple[str, dict[str, Any]]] = []
+    for r in records:
+        b = ((r.get("summary") or {}).get("comparison") or {}).get("behaviour")
+        if r["experiment_id"] in wanted and isinstance(b, dict):
+            found.append((r["experiment_id"], b))
+    if not found:
+        return None
+    decision = max((b["decision"] for _, b in found), key=lambda level: LEVELS.get(level, 0))
+    counts = {level: max(b["counts"].get(level, 0) for _, b in found) for level in LEVELS}
+    hits = [{**h, "experiment_id": e} for e, b in found for h in b.get("rule_hits", []) if h.get("caused_by_skill")]
+    undeclared = [{**h, "experiment_id": e} for e, b in found for h in b.get("behaviours", [])
+                  if h.get("caused_by_skill") and h.get("declared") is False]
+    return {"experiments": [e for e, _ in found], "decision": decision, "counts": counts,
+            "rule_hits_caused_by_skill": hits[:20], "undeclared_behaviours": undeclared[:20],
+            "runs": {e: b.get("runs") for e, b in found}}
 
 
 def assess_package(governance: GovernanceAccess, principal: Principal, files: dict[str, bytes], *,
@@ -78,9 +101,11 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
 
     behaviour: dict[str, Any] = {}
     provenance: dict[str, Any] = {"source": "none"}
+    observed = None
     if cite or cite_all_runs:
         records, matching = runs_for(governance, principal, catalogue_name, skill_md)
         cited = list(cite or []) or matching
+        observed = observed_behaviour(records, cited)
         if cited:
             measured = measured_evidence(records, cited, skill_md)
             provenance = measured.pop("provenance")
@@ -90,15 +115,22 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
 
     change = governance.preview_change(principal, catalogue_name, manifest, full_review=authorship_rules.full_review(authorship))
     security = report.get("security") or {}
+    decision, counts = change["decision"], dict(change["counts"])
+    if observed and LEVELS.get(observed["decision"], 0) > LEVELS.get(decision, 0):
+        # What the skill made agents do in sandboxed runs outranks what its files show: the gate sees the higher one.
+        decision = observed["decision"]
+        counts = {level: max(counts.get(level, 0), observed["counts"].get(level, 0)) for level in LEVELS}
     assurance = assess_version(AssuranceInput(
         structural_score=report.get("structural_score"),
         instruction_quality_score=(report.get("instruction_quality") or {}).get("quality_score"),
         security_score=security.get("security_score"),
         security_findings=[SecurityFinding(code=f["code"], severity=f["severity"]) for f in security.get("findings", [])],
-        capability_decision=change["decision"], capability_counts=change["counts"],
+        capability_decision=decision, capability_counts=counts,
         **behaviour,
     ), policy or governance.tenant_policy(principal))
     assurance["evidence"] = provenance
+    if observed:
+        assurance["observed_behaviour"] = observed
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": catalogue_name, "package_fingerprint": report["package_fingerprint"]}
     assurance["authorship"] = {"author_kind": authorship["author_kind"], "review_bar": authorship["review_bar"]}

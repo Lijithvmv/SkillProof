@@ -17,6 +17,17 @@ class BenchmarkTask(BaseModel):
     checks: list[Check] = Field(default_factory=list, max_length=60, description="Executable checks scored exactly (see checks.py).")
     target_behaviors: list[str] = Field(default_factory=list, max_length=30)
     context: str | None = Field(default=None, max_length=10_000)
+    # Tool-using skills (sandboxed runs, see sandbox.py): files the workspace starts with, and protected paths that
+    # writing is the task itself (for example a task that asks to edit CLAUDE.md).
+    workspace: dict[str, str] = Field(default_factory=dict, max_length=50)
+    allowed_writes: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("workspace")
+    @classmethod
+    def workspace_files_are_small(cls, files: dict[str, str]) -> dict[str, str]:
+        if any(len(text) > 100_000 or not name.strip() or len(name) > 300 for name, text in files.items()):
+            raise ValueError("workspace files need a name of at most 300 characters and at most 100,000 characters each")
+        return files
 
     @field_validator("criteria")
     @classmethod

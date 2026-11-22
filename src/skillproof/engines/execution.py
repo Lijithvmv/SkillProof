@@ -29,6 +29,7 @@ class AgentResult:
     output_tokens: int | None = None
     cost_usd: float | None = None
     response_id: str | None = None
+    trajectory: dict[str, Any] | None = None  # sandboxed runs: the actions taken and the files written (sandbox.py)
 
 
 class AgentRunner(Protocol):
@@ -36,6 +37,14 @@ class AgentRunner(Protocol):
 
     def run(self, *, prompt: str, context: str | None, skill_instructions: str | None) -> AgentResult:
         """Run a task; skill_instructions is None for the baseline condition."""
+        ...
+
+
+class ToolAgentRunner(Protocol):
+    """Adapter for an agent that acts through the sandbox's tools; it gets the whole task (workspace files, allowed
+    writes) and returns the trajectory with its result."""
+
+    def run_task(self, *, task: BenchmarkTask, skill_instructions: str | None) -> AgentResult:
         ...
 
 
@@ -65,7 +74,10 @@ def _run_one(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     try:
-        result = runner.run(prompt=task.prompt, context=task.context, skill_instructions=skill_instructions)
+        if hasattr(runner, "run_task"):
+            result = runner.run_task(task=task, skill_instructions=skill_instructions)
+        else:
+            result = runner.run(prompt=task.prompt, context=task.context, skill_instructions=skill_instructions)
     except Exception as exc:  # preserve provider failures as zero-score records
         return {
             "trial_id": trial_id, "task_id": task.task_id, "condition": condition,
@@ -109,6 +121,7 @@ def _run_one(
         "grader_output_tokens": grade.output_tokens if grade is not None else None,
         "grader_response_id": grade.response_id if grade is not None else None,
         "error": grade_error,
+        **({"trajectory": result.trajectory} if result.trajectory is not None else {}),
     }
 
 
@@ -199,12 +212,16 @@ def execute_experiment(
     *, tasks: list[BenchmarkTask], skill_instructions: str, runner: AgentRunner,
     evaluator: OutputEvaluator, repeats: int = 3, pass_threshold: float = 0.7,
     seed: int = 0, calibration_cases: list[Any] | None = None, require_calibration: bool = True,
+    skill_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run paired baseline/enabled trials and summarize all generated records.
 
     When the benchmark has judged criteria, the grader first grades the labelled calibration cases (grader_check); the
     lift is shown only if it passes (calibration_gate). Otherwise the lift is withheld, with the reason, and kept
-    under `withheld_lift_percentage_points` for audit."""
+    under `withheld_lift_percentage_points` for audit.
+
+    With a sandboxed runner, every run's trajectory is kept and `comparison.behaviour` says what the skill made the
+    agent do (trajectory.summarize), compared with `skill_manifest` (the static capability manifest) when given."""
     if not tasks:
         raise ValueError("At least one benchmark task is required.")
     if len({task.task_id for task in tasks}) != len(tasks):
@@ -217,7 +234,9 @@ def execute_experiment(
         raise ValueError("pass_threshold must be between 0 and 1.")
 
     experiment_id = str(uuid.uuid4())
-    task_payload = [task.model_dump(mode="json") for task in tasks]
+    # Sandbox fields are left out when unused, so the fingerprint of a benchmark written before they existed is unchanged.
+    task_payload = [task.model_dump(mode="json", exclude={k for k in ("workspace", "allowed_writes") if not getattr(task, k)})
+                    for task in tasks]
     instructions_fingerprint = hashlib.sha256(skill_instructions.encode("utf-8")).hexdigest()
     benchmark_fingerprint = hashlib.sha256(json.dumps(task_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
     rng = random.Random(seed)
@@ -289,6 +308,11 @@ def execute_experiment(
 
         calibration_report = check_grader(tasks, calibration_cases, evaluator)
     calibration = calibration_gate(calibration_report, judged_criteria=mix["judged_criteria"])
+    from skillproof.engines.trajectory import summarize
+
+    behaviour = summarize(records, skill_manifest)
+    if behaviour is not None:
+        comparison["behaviour"] = behaviour
     comparison["criteria_mix"] = mix
     comparison["calibration"] = calibration
     if require_calibration and calibration["status"] in {"not_run", "failed"} and comparison.get("skill_lift_percentage_points") is not None:

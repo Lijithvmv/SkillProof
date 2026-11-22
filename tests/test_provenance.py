@@ -1,0 +1,164 @@
+"""Machine-authored updates: who wrote a version decides its review bar, and no author approves it.
+Each test names the decision it guards."""
+import pytest
+from fastapi.testclient import TestClient
+
+from skillproof import provenance
+from skillproof.api.main import app
+from skillproof.approvals import SQLiteApprovalStore
+from skillproof.authorization import AuthorizationError, GovernanceAccess, Principal, authorize
+from skillproof.history import EvaluationHistoryStore
+from skillproof.registry import SQLiteSkillRegistry
+
+from test_oidc import OIDCAccessTokenVerifier, OIDCSettings, FakeKeys, make_token
+from test_registry_api import BYPASS, EVIDENCE, SKILL, as_user, zip_of
+
+# A harmless edit: a person who rewrites this line gets a diff against the approved version.
+TWEAK = SKILL.replace("Group the changes", "Group the merged changes")
+AGENT = {"x-skillproof-dev-user": "agent:release-bot", "x-skillproof-dev-role": "evaluator",
+         "x-skillproof-dev-actor": "agent", "x-skillproof-dev-on-behalf-of": "dave"}
+
+
+@pytest.fixture()
+def client(tmp_path):
+    governance = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "registry.db"), approvals=SQLiteApprovalStore(tmp_path / "approvals.db"),
+                                  history=EvaluationHistoryStore(tmp_path / "history.db"))
+    app.state.governance = governance
+    yield TestClient(app)
+    app.state.governance = None
+    governance.registry.close()
+    governance.approvals.close()
+
+
+def upload(client, text, headers, provenance_json=None):
+    data = {"evidence_json": EVIDENCE}
+    if provenance_json:
+        data["provenance_json"] = provenance_json
+    response = client.post("/api/v1/registry/versions", files={"file": ("skill.zip", zip_of(text))}, data=data, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["version"]
+
+
+def request_approval(client, version_id, reviewer):
+    request = client.post(f"/api/v1/registry/versions/{version_id}/approval-requests", headers=as_user("erin", "evaluator"))
+    assert request.status_code == 200, request.text
+    request_id = request.json()["request_id"]
+    decided = client.post(f"/api/v1/approvals/{request_id}/decision", json={"action": "approve"}, headers=as_user(reviewer, "approver"))
+    assert decided.status_code == 200, decided.text
+    return request_id
+
+
+def promote(client, version, request_id, ack=None):
+    body = {"approval_request_id": request_id}
+    if ack:
+        body["capability_ack"] = ack
+    return client.post(f"/api/v1/registry/versions/{version['version_id']}/promote", json=body, headers=as_user("bob", "approver"))
+
+
+def active_skill(client, text=SKILL):
+    first = upload(client, text, as_user("alice", "evaluator"))
+    ack = first["capability_change"]["change_hash"] if first["capability_change"]["decision"] == "block" else None
+    assert promote(client, first, request_approval(client, first["version_id"], "bob"), ack).status_code == 200
+    return first
+
+
+# Decision: declarations only raise the bar. An agent identity cannot declare a version human-written, the importer
+# cannot attest anything about files on disk, and a malformed declaration is refused.
+def test_declarations_never_lower_the_review_bar():
+    agent = Principal(user_id="agent:bot", tenant_id="t", role="evaluator", actor_kind="agent", on_behalf_of="dave")
+    person = Principal(user_id="alice", tenant_id="t", role="evaluator")
+    assert provenance.resolve(agent, {"author_kind": "human"})["author_kind"] == "agent"
+    assert provenance.resolve(person, None, source="installed_import")["author_kind"] == "unknown"
+    assert provenance.resolve(person, {"author_kind": "human"}, source="installed_import")["author_kind"] == "unknown"
+    assert provenance.resolve(person, {"author_kind": "agent", "agent": "claude-code"})["review_bar"] == "new_skill"
+    assert provenance.resolve(person, None)["review_bar"] == "change_over_previous"
+    assert provenance.authors(provenance.resolve(agent), "agent:bot") == {"agent:bot", "dave"}
+    assert not provenance.full_review(None)  # registered before provenance was kept: keeps its comparison
+    for bad in ({"author_kind": "robot"}, {"secret": "x"}, {"note": "x" * 501}, ["agent"]):
+        with pytest.raises(provenance.ProvenanceError):
+            provenance.resolve(person, bad)
+
+
+# Decision: an agent identity never decides, makes a version live, dismisses raised items or changes policy, whatever
+# role it is given; it can still register and ask for review.
+def test_agent_identities_cannot_use_human_only_permissions():
+    agent = Principal(user_id="agent:bot", tenant_id="t", role="tenant_admin", actor_kind="agent")
+    for permission in ("approval.decide", "skill.promote", "policy.manage"):
+        with pytest.raises(AuthorizationError):
+            authorize(agent, "t", permission)
+    authorize(agent, "t", "skill.register")
+    authorize(agent, "t", "approval.submit")
+    with pytest.raises(ValueError):
+        Principal(user_id="alice", tenant_id="t", role="viewer", on_behalf_of="bob")  # only agents act for someone
+
+
+# Decision: the same update is diffed against the approved version when a person attests they wrote it, and reviewed
+# as a new skill when an agent wrote it: a capability already approved (here a permission bypass) is raised again for
+# the agent's rewrite, with the update's own additions kept beside it.
+def test_an_agent_written_update_is_reviewed_as_a_new_skill(client):
+    first = active_skill(client, SKILL + BYPASS)
+    by_person = upload(client, TWEAK + BYPASS, as_user("carol", "evaluator"))
+    assert by_person["capability_change"]["against"] == "active_version"
+    assert by_person["capability_change"]["decision"] == "none" and by_person["provenance"]["author_kind"] == "human"
+
+    by_agent = upload(client, TWEAK + BYPASS + "\n", AGENT)
+    change = by_agent["capability_change"]
+    assert by_agent["provenance"]["author_kind"] == "agent" and by_agent["provenance"]["on_behalf_of"] == "dave"
+    assert change["against"] == "full_review_not_human_written" and change["against_version_id"] == first["version_id"]
+    assert change["update_over_previous"]["against"] == "active_version"
+    assert change["update_over_previous"]["decision"] == "none"  # the rewrite itself adds nothing new...
+    assert change["decision"] == "block"  # ...but the agent's version is judged on everything it can do
+    assert any(i["value"] == "permission bypass" and i["level"] == "block" for i in change["items"])
+    assert by_agent["assurance"]["authorship"] == {"author_kind": "agent", "review_bar": "new_skill"}
+
+    declared = upload(client, TWEAK + BYPASS + "\n\n", as_user("carol", "evaluator"), '{"author_kind": "agent", "agent": "claude-code"}')
+    assert declared["capability_change"]["against"] == "full_review_not_human_written"
+    refused = client.post("/api/v1/registry/versions", files={"file": ("skill.zip", zip_of(TWEAK + "\n\n\n"))},
+                          data={"provenance_json": '{"author_kind": "robot"}'}, headers=as_user("carol", "evaluator"))
+    assert refused.status_code == 422
+
+
+# Decision: no author approves a version: not the person the agent acted for, not whoever registered it, and not an
+# agent at all. Another person's approval promotes it.
+def test_no_author_approves_an_agent_written_update(client):
+    active_skill(client)
+    update = upload(client, SKILL + BYPASS, AGENT)
+    ack = update["capability_change"]["change_hash"]
+
+    for_dave = promote(client, update, request_approval(client, update["version_id"], "dave"), ack)
+    assert for_dave.status_code == 409 and "author of this version" in for_dave.json()["detail"]
+
+    request = client.post(f"/api/v1/registry/versions/{update['version_id']}/approval-requests", headers=as_user("erin", "evaluator")).json()
+    agent_decides = client.post(f"/api/v1/approvals/{request['request_id']}/decision", json={"action": "approve"},
+                                headers={**AGENT, "x-skillproof-dev-role": "approver"})
+    assert agent_decides.status_code == 403
+    agent_promotes = client.post(f"/api/v1/registry/versions/{update['version_id']}/promote", json={"approval_request_id": request["request_id"]},
+                                 headers={**AGENT, "x-skillproof-dev-role": "approver"})
+    assert agent_promotes.status_code == 403
+
+    promoted = promote(client, update, request_approval(client, update["version_id"], "carol"), ack)
+    assert promoted.status_code == 200, promoted.text
+    assert "provenance_recorded" in [e["action"] for e in promoted.json()["events"]]
+
+
+# Decision: whoever registered a version cannot approve it, even when someone else asked for the review.
+def test_the_registrant_cannot_approve_their_own_version(client):
+    version = upload(client, SKILL, as_user("alice", "evaluator"))
+    own = promote(client, version, request_approval(client, version["version_id"], "alice"))
+    assert own.status_code == 409 and "author of this version" in own.json()["detail"]
+
+
+# Decision: a token issued to an agent (delegation `act` claim, or an OAuth client registered as an agent) is an agent
+# identity, and the person it acts for is kept.
+def test_oidc_tokens_for_agents_become_agent_identities():
+    plain = OIDCAccessTokenVerifier(OIDCSettings(issuer="https://login.example.test/", audience="skillproof-api",
+                                                 jwks_url="https://login.example.test/.well-known/jwks.json", leeway_seconds=0,
+                                                 agent_clients=("release-bot-client",)), signing_keys=FakeKeys())
+    delegated = plain.verify(make_token(act={"sub": "agent:release-bot"}))
+    assert (delegated.user_id, delegated.actor_kind, delegated.on_behalf_of) == ("agent:release-bot", "agent", "user-123")
+    client_agent = plain.verify(make_token(client_id="release-bot-client"))
+    assert client_agent.actor_kind == "agent" and client_agent.on_behalf_of is None
+    person = plain.verify(make_token())
+    assert person.actor_kind == "human"
+    with pytest.raises(Exception, match="act"):
+        plain.verify(make_token(act="agent"))

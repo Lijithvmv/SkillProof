@@ -51,6 +51,8 @@ def current_principal(request: Request) -> Principal:
             user_id=request.headers.get("x-skillproof-dev-user", "local-dev"),
             tenant_id="local",
             role=request.headers.get("x-skillproof-dev-role", "tenant_admin"),  # type: ignore[arg-type]
+            actor_kind=request.headers.get("x-skillproof-dev-actor", "human"),  # type: ignore[arg-type]
+            on_behalf_of=request.headers.get("x-skillproof-dev-on-behalf-of") or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

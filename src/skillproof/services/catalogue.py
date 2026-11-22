@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from skillproof import package
+from skillproof import package, provenance as authorship_rules
 from skillproof.ingestion import PackageError
 from skillproof.engines.analyzer import analyze_files
 from skillproof.authorization import GovernanceAccess, Principal
@@ -27,6 +27,7 @@ class Assessment:
     skill_md: str                   # the main SKILL.md text the run evidence is bound to
     files: dict[str, bytes] = field(default_factory=dict)      # the package itself, kept so it can be distributed
     oversize: dict[str, str] = field(default_factory=dict)     # files too large to read (installed folders only)
+    authorship: dict[str, Any] | None = None                    # who wrote it (skillproof.provenance), stored with the version
 
     @property
     def name(self) -> str:
@@ -47,12 +48,19 @@ def runs_for(governance: GovernanceAccess, principal: Principal, name: str, skil
 def assess_package(governance: GovernanceAccess, principal: Principal, files: dict[str, bytes], *,
                    oversize: dict[str, str] | None = None, name: str | None = None, folder: str | None = None,
                    declared: dict[str, Any] | None = None, cite: list[str] | None = None, cite_all_runs: bool = False,
-                   policy: AssurancePolicy | None = None) -> Assessment:
+                   policy: AssurancePolicy | None = None, authored: dict[str, Any] | None = None,
+                   source: authorship_rules.Source = "upload") -> Assessment:
     """Analyse a package and assess it for registration.
 
     Run evidence: `cite` names recorded experiments (each must have run this SKILL.md); `cite_all_runs` cites every
     run recorded for it; `declared` carries numbers typed by the uploader (labelled as declared, never as measured).
-    The policy is the tenant's stored policy unless one is given."""
+    The policy is the tenant's stored policy unless one is given.
+
+    Authorship: `authored` is what the registering identity declares about who wrote the package; together with
+    whether that identity is a person or an agent, and the source, it decides the review bar (skillproof.provenance).
+    A version not attested as human-written is compared with nothing, as a new skill, and the assurance report records
+    the author kind, so an approval is bound to it."""
+    authorship = dict(authorship_rules.resolve(principal, authored, source=source))
     text = package.as_text(files)
     # Authoring rules look at the skill's folder name (it should match the SKILL.md name); the package itself is rooted
     # at that folder, so the name is passed separately.
@@ -80,7 +88,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     elif declared:
         behaviour, provenance = dict(declared), {"source": "declared_by_uploader"}
 
-    change = governance.preview_change(principal, catalogue_name, manifest)
+    change = governance.preview_change(principal, catalogue_name, manifest, full_review=authorship_rules.full_review(authorship))
     security = report.get("security") or {}
     assurance = assess_version(AssuranceInput(
         structural_score=report.get("structural_score"),
@@ -93,7 +101,9 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     assurance["evidence"] = provenance
     # Bind the report to this exact package so an approval of one version can never promote another.
     assurance["subject"] = {"tenant_id": principal.tenant_id, "skill_name": catalogue_name, "package_fingerprint": report["package_fingerprint"]}
-    return Assessment(report=report, manifest=manifest, assurance=assurance, skill_md=skill_md, files=files, oversize=dict(oversize or {}))
+    assurance["authorship"] = {"author_kind": authorship["author_kind"], "review_bar": authorship["review_bar"]}
+    return Assessment(report=report, manifest=manifest, assurance=assurance, skill_md=skill_md, files=files,
+                      oversize=dict(oversize or {}), authorship=authorship)
 
 
 def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version: SkillVersion, skill_md: str,
@@ -114,6 +124,8 @@ def reassess_on_runs(governance: GovernanceAccess, principal: Principal, version
     if not previous:
         return None
     report = reassess_with_runs(dict(previous), measured, provenance, policy or governance.tenant_policy(principal))
+    if "authorship" in previous:  # who wrote it does not change with new runs
+        report["authorship"] = previous["authorship"]
     return governance.reassess_skill(principal, version["version_id"], report)
 
 
@@ -122,7 +134,7 @@ def register(governance: GovernanceAccess, principal: Principal, assessment: Ass
     that cannot be kept (a file over the size limit, or more files than a package may hold) is still registered and
     analysed; it is reported as not distributable."""
     version = governance.register_skill(principal, assessment.report, assessment.assurance, artifact_uri=artifact_uri,
-                                        capability_manifest=assessment.manifest)
+                                        capability_manifest=assessment.manifest, provenance=assessment.authorship)
     if governance.artifacts is not None and assessment.files:
         try:
             governance.store_package(principal, assessment.files, assessment.oversize)

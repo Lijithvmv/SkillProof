@@ -52,7 +52,7 @@ skillproof/
   services/    catalogue, imports, evaluation (jobs worker), alerts, fleet, distribution (sync)
   adapters/    ollama, openai_responses
   api/         main + routers/ + deps          cli/   analysis, catalogue, evaluation, operations
-  config, errors, models, package, ingestion, logs, wiring, service, authorization, oidc
+  config, errors, models, package, provenance (who wrote a version, its review bar), ingestion, logs, wiring, service, authorization, oidc
   governance, evidence   (stay at the top level until another session's edits are committed; then engines/)
 ```
 
@@ -121,6 +121,7 @@ Every feature below keeps its tests; the suite must stay green through every sta
 | Signed webhook alerts | notify | test_notify |
 | Fleet reporting | fleet | test_notify |
 | Package store and sync (enforcement) | storage/artifacts, services/distribution, cli sync | test_sync |
+| Provenance: agent-written updates reviewed as new skills, no author approves | provenance, registry, authorization, oidc | test_provenance |
 | Installed-skill import, installed-vs-approved check | catalogue_import | test_catalogue_import, test_conformance |
 | Watch installed skills and plugins | installed | test_installed |
 | APM lockfile check | apm_lock | test_apm_lock |

@@ -27,7 +27,8 @@ class ChangeItem(TypedDict, total=False):
 
 class CapabilityChange(TypedDict, total=False):
     """What a version adds over the version it is compared with, ranked; change_hash binds an acknowledgement."""
-    against: str  # active_version, active_version_without_manifest, previous_version_not_approved or nothing_active
+    against: str  # active_version, active_version_without_manifest, previous_version_not_approved, nothing_active,
+    #               or full_review_not_human_written (compared with nothing; against_version_id is the version it updates)
     against_version_id: str | None
     status: str
     decision: Decision
@@ -40,6 +41,7 @@ class CapabilityChange(TypedDict, total=False):
     removed: dict[str, list[str]]
     meaning: str
     change_hash: str
+    update_over_previous: dict[str, Any]  # with full review: what the update itself added over the version before
 
 
 class Gate(TypedDict):
@@ -61,6 +63,7 @@ class AssuranceReport(TypedDict, total=False):
     policy: dict[str, Any]
     evidence: dict[str, Any]
     subject: dict[str, str]
+    authorship: dict[str, str]  # author kind and review bar (skillproof.provenance), bound into the approval hash
 
 
 class AuditEvent(TypedDict):
@@ -86,6 +89,7 @@ class SkillVersion(TypedDict, total=False):
     capabilities: dict[str, Any] | None
     capability_change: CapabilityChange | None
     events: list[AuditEvent]
+    provenance: dict[str, Any] | None  # who wrote it and the review bar that follows (skillproof.provenance)
     distributable: bool              # its exact package is stored and can be installed by sync
     not_distributable_reason: str
 

@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
-from skillproof import package
+from skillproof import package, provenance as authorship_rules
 from skillproof.services import catalogue
 from skillproof.ingestion import PackageError
 from skillproof.evidence import EvidenceError
@@ -35,6 +35,10 @@ async def register_version(
     artifact_uri: str | None = Form(default=None),
     experiment_ids: str | None = Form(default=None, description="Comma-separated ids of recorded experiments that ran this SKILL.md."),
     evaluate: bool = Form(default=False, description="Queue a run-evidence job for this version (server runs evaluations)."),
+    provenance_json: str | None = Form(default=None, description=(
+        "Who wrote this package: {\"author_kind\": \"human\"|\"agent\"|\"unknown\", \"agent\", \"model\", \"session\", "
+        "\"derived_from\", \"note\"}. Omitted means the uploader attests a person wrote it. An agent identity is always "
+        "recorded as the author; a declaration can raise the review bar, never lower it.")),
 ) -> dict[str, Any]:
     principal = current_principal(request)
     governance = current_governance(request)
@@ -50,12 +54,17 @@ async def register_version(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"evidence_json is invalid: {exc}") from exc
+    try:
+        authored = json.loads(provenance_json) if provenance_json else None
+        authorship_rules.resolve(principal, authored)  # refuse a malformed declaration before any analysis
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"provenance_json is invalid: {exc}") from exc
     cited = [e.strip() for e in (experiment_ids or "").split(",") if e.strip()]
     if cited and evidence_json:
         raise HTTPException(status_code=422, detail="Cite experiments or declare evidence, not both.")
     try:
         assessment = guarded(lambda: catalogue.assess_package(governance, principal, raw, declared=declared, cite=cited,
-                                                               folder=package.zip_folder(data)))
+                                                               folder=package.zip_folder(data), authored=authored))
     except EvidenceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:  # no SKILL.md name, or a package the engine cannot read

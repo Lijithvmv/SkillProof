@@ -155,7 +155,7 @@ def import_installed(
                                               "state": existing["state"], "experiments": sorted(set(matching) - had)})
             continue
         assessment = catalogue.assess_package(governance, principal, files, oversize=oversize, name=name,
-                                              folder=skill_dir.name, cite_all_runs=True, policy=policy)
+                                              folder=skill_dir.name, cite_all_runs=True, policy=policy, source="installed_import")
         version = catalogue.register(governance, principal, assessment, artifact_uri=skill_dir.as_uri())
         change = version["capability_change"] or {}
         registered.append({

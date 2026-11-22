@@ -42,6 +42,6 @@ ignore = ["B008"]  # FastAPI declares File()/Form() parameters as defaults by de
 # The analysis engines (capabilities, triage, evaluation) are checked by their tests and lint only.
 files = ["src/skillproof/api", "src/skillproof/services", "src/skillproof/storage", "src/skillproof/authorization.py",
          "src/skillproof/wiring.py", "src/skillproof/models.py", "src/skillproof/config.py", "src/skillproof/errors.py",
-         "src/skillproof/package.py"]
+         "src/skillproof/package.py", "src/skillproof/provenance.py"]
 ignore_missing_imports = true
 follow_imports = "silent"

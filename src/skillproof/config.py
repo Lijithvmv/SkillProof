@@ -14,7 +14,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_SCHEMA | schema_mode | `apply` pending migrations at start (default) or `verify` and refuse |
 | SKILLPROOF_LOG_LEVEL | log_level | default `info` |
 | SKILLPROOF_AUTH_MODE | auth_mode | `local` (development identity headers) or `oidc` |
-| SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout |
+| SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated) |
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
 | SKILLPROOF_SECOND_OPINION_MODEL / _URL | second_opinion | local-model second opinion on risk items; off when no model is set |
@@ -63,6 +63,7 @@ class OIDC:
     end_session_url: str = ""
     leeway_seconds: int = 30
     jwks_timeout_seconds: float = 5.0
+    agent_clients: tuple[str, ...] = ()  # OAuth client ids issued to agents: their tokens are agent identities
 
     @property
     def configured(self) -> bool:
@@ -125,7 +126,8 @@ def settings() -> Settings:
             tenant_claim=_get("SKILLPROOF_OIDC_TENANT_CLAIM", "tenant_id") or "tenant_id",
             authorization_url=_get("SKILLPROOF_OIDC_AUTHORIZATION_URL"), token_url=_get("SKILLPROOF_OIDC_TOKEN_URL"),
             end_session_url=_get("SKILLPROOF_OIDC_END_SESSION_URL"),
-            leeway_seconds=_int("SKILLPROOF_OIDC_LEEWAY_SECONDS", 30), jwks_timeout_seconds=_float("SKILLPROOF_OIDC_JWKS_TIMEOUT_SECONDS", 5.0)),
+            leeway_seconds=_int("SKILLPROOF_OIDC_LEEWAY_SECONDS", 30), jwks_timeout_seconds=_float("SKILLPROOF_OIDC_JWKS_TIMEOUT_SECONDS", 5.0),
+            agent_clients=tuple(c.strip() for c in (_get("SKILLPROOF_OIDC_AGENT_CLIENTS") or "").split(",") if c.strip())),
         ollama_url=_get("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434") or "http://127.0.0.1:11434",
         evaluation=Evaluation(model=_get("SKILLPROOF_EVAL_MODEL"), draft_model=_get("SKILLPROOF_EVAL_DRAFT_MODEL"),
                               tasks=_int("SKILLPROOF_EVAL_TASKS", 6), repeats=_int("SKILLPROOF_EVAL_REPEATS", 2)),

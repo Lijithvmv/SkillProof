@@ -33,4 +33,12 @@ put the approved version back, could not stop the unapproved one, and did not ke
 4. **Load rate in the decision.** A skill that is never picked does nothing (Tessl: loaded in 41% of tasks unforced
    vs 98% forced); the catalogue should show and gate on it.
 
-Gap 1 is built: the package store, the approved-set and package API, and `skillproof sync` (plan, verified install, reversible quarantine). It has been tested on fixtures and dry-run on one real machine: 212 installed skills, 1 approved and matching, 211 never approved, 0 changed. Not yet exercised: `--apply` on a real machine, and the server path against a deployed server. Next: gap 2, then 3, then 4.
+Gap 1 is built: the package store, the approved-set and package API, and `skillproof sync` (plan, verified install, reversible quarantine). It has been tested on fixtures and dry-run on one real machine: 212 installed skills, 1 approved and matching, 211 never approved, 0 changed. Not yet exercised: `--apply` on a real machine, and the server path against a deployed server.
+
+Gap 2 is built: provenance on every version (human, agent or unknown; agent identities from the token's delegation
+claim or an agent OAuth client; declarations only raise the bar). Agent-written and unknown updates are reviewed as new
+skills, with the update's own diff kept beside the full review. No author approves its own version, and agent
+identities cannot decide, promote, dismiss or change policy. Tested on fixtures, through the API, and on PostgreSQL.
+Weakest part: an agent that writes skills through a person's own session, with a person's token, is recorded as
+that person. Provenance is only as good as the identities the tenant issues; installed folders stay `unknown`, never
+`human`. Next: gap 3, then 4.

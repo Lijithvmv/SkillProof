@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, cast
 
 from skillproof.engines.capabilities import diff_manifests
+from skillproof.provenance import authors, full_review as needs_full_review
 from skillproof.storage import Database, add_columns, append_only, migrate, tenant_policy
 from skillproof.engines.triage import LEVELS, triage
 
@@ -38,7 +39,7 @@ EMPTY_MANIFEST: dict[str, Any] = {"capabilities": {}, "scopes": {}}
 MAX_CHANGE_ITEMS = 50
 VERSION_COLUMNS = (
     "version_id, tenant_id, skill_name, package_fingerprint, assurance_hash, summary_json, artifact_uri, state, "
-    "registered_by, created_at, updated_at, assurance_json, capabilities_json, change_json"
+    "registered_by, created_at, updated_at, assurance_json, capabilities_json, change_json, provenance_json"
 )
 
 SQLITE_SCHEMA = """
@@ -165,6 +166,8 @@ MIGRATIONS = [
     (1, "versions, events, false alarms, tenant policies", SQLITE_SCHEMA, POSTGRES_SCHEMA),
     (2, "assurance report, capability manifest and change per version",
      add_columns("skill_versions", {"assurance_json": "TEXT", "capabilities_json": "TEXT", "change_json": "TEXT"}), "SELECT 1"),
+    (3, "who wrote each version (provenance)", add_columns("skill_versions", {"provenance_json": "TEXT"}),
+     add_columns("skill_versions", {"provenance_json": "TEXT"})),
 ]
 
 
@@ -186,6 +189,7 @@ class SkillRegistry:
     def register(
         self, tenant_id: str, skill_report: dict[str, Any], assurance_report: dict[str, Any],
         *, actor_id: str, artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> SkillVersion:
         tenant_id, actor_id = tenant_id.strip(), actor_id.strip()
         if not tenant_id or not actor_id:
@@ -224,19 +228,26 @@ class SkillRegistry:
                 return self._decode(existing)
             change = None
             if capability_manifest is not None:
-                change = self._change(tenant_id, name, capability_manifest, fallback_previous=True)
+                change = self._change(tenant_id, name, capability_manifest, fallback_previous=True,
+                                      full_review=needs_full_review(provenance))
                 summary["capability_decision"] = change["decision"]
                 summary["capability_counts"] = change["counts"]
+            if provenance is not None:
+                summary["author_kind"] = provenance.get("author_kind")
             db.execute(
-                f"INSERT INTO skill_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO skill_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (version_id, tenant_id, name, fingerprint, assurance_hash,
                  json.dumps(summary, sort_keys=True, separators=(",", ":")), artifact_uri,
-                 state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change)),
+                 state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change), _dump(provenance)),
             )
             self._event(version_id, tenant_id, actor_id, "registered", state, now)
             if change is not None:
                 self._event(version_id, tenant_id, actor_id, "capabilities_compared",
                             f"{change['decision']} against {change['against']} {change['change_hash'][:12]}", now)
+            if provenance is not None:
+                self._event(version_id, tenant_id, actor_id, "provenance_recorded",
+                            (f"{provenance.get('author_kind')}; review bar {provenance.get('review_bar')}; "
+                             + "; ".join(provenance.get("basis") or []))[:600], now)
         return self.get_version(tenant_id, version_id)
 
     def reassess(self, tenant_id: str, version_id: str, assurance_report: Mapping[str, Any], *, actor_id: str) -> SkillVersion:
@@ -319,11 +330,11 @@ class SkillRegistry:
         assert stored is not None  # written in this call
         return stored
 
-    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any]) -> CapabilityChange:
+    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, full_review: bool = False) -> CapabilityChange:
         """What a manifest would add over the tenant's active version (or the latest one while nothing is approved),
         ranked, without registering anything. Used to put the capability change into the assurance gate."""
         with self.db.transaction(tenant_id):
-            return self._change(tenant_id, skill_name, manifest, fallback_previous=True)
+            return self._change(tenant_id, skill_name, manifest, fallback_previous=True, full_review=full_review)
 
     def promote(
         self, tenant_id: str, version_id: str, assurance_report: Mapping[str, Any],
@@ -343,6 +354,7 @@ class SkillRegistry:
         events = approval_record.get("events") or []
         if not events or events[-1].get("action") != "approve" or events[-1].get("actor_id") == approval_record.get("submitter_id"):
             raise RegistryError("approval record must contain a separate human reviewer's approve event")
+        approver = events[-1].get("actor_id")
         now = self._now()
         with self.db.transaction(tenant_id, write=True) as db:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
@@ -352,9 +364,14 @@ class SkillRegistry:
                 raise RegistryError(f"version cannot be promoted from state '{row['state']}'")
             if row["assurance_hash"] != _canonical_hash(assurance_report):
                 raise RegistryError("assurance report does not match the registered version")
+            provenance = json.loads(row["provenance_json"]) if row["provenance_json"] else None
+            if approver in authors(provenance, row["registered_by"]):
+                raise RegistryError(f"the approval was given by {approver}, an author of this version (who registered it, "
+                                    "the agent that wrote it, or the person it acted for); another person must approve")
             if row["capabilities_json"]:
                 # Compare again: another version may have become active since this one was registered.
-                change = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]))
+                change = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]),
+                                      full_review=needs_full_review(provenance))
                 if change["decision"] == "block" and capability_ack != change["change_hash"]:
                     reasons = "; ".join(f"{i['category']}: {i['value']}" for i in change["items"] if i["level"] == "block")[:500]
                     raise RegistryError(
@@ -374,13 +391,17 @@ class SkillRegistry:
             self._event(version_id, tenant_id, actor_id, "promoted", approval_record.get("request_id", ""), now)
         return self.get_version(tenant_id, version_id)
 
-    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False) -> CapabilityChange:
+    def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False,
+                full_review: bool = False) -> CapabilityChange:
         """What this manifest adds over the tenant's active version of the skill, ranked by triage. Runs inside the
         caller's transaction.
 
         With nothing active, registration (fallback_previous) compares with the latest registered version instead, so
         an update to a skill nobody has approved yet still shows what the update itself added. Promotion never uses
-        the fallback: with nothing approved, everything the version can do is new to the approved set."""
+        the fallback: with nothing approved, everything the version can do is new to the approved set.
+
+        With full_review (a version not attested as human-written, see provenance), the version is compared with
+        nothing: everything it can do is raised, as for a new skill. The version it updates is still named."""
         db = self.db
         active = db.execute(
             "SELECT version_id, capabilities_json FROM skill_versions WHERE tenant_id=? AND skill_name=? AND state='active'",
@@ -401,6 +422,18 @@ class SkillRegistry:
             against, against_id, old = "active_version_without_manifest", active["version_id"], EMPTY_MANIFEST
         else:
             against, against_id, old = "active_version", active["version_id"], json.loads(active["capabilities_json"])
+        update_over: dict[str, Any] | None = None
+        if full_review and against != "nothing_active":
+            # The bar of a new skill: a rewrite can change what an existing capability is used for, and a series of
+            # small agent updates, each diffed only against the last, ratchets capabilities in unseen. What the update
+            # itself added is kept beside it for the reviewer.
+            step = triage(diff_manifests(old, manifest), new_manifest=manifest, tenant_counts=self._confidence_counts(tenant_id))
+            step_items, _ = self._apply_false_alarms(tenant_id, skill_name, step["items"])
+            update_over = {"against": against, "against_version_id": against_id,
+                           "decision": max((i["level"] for i in step_items), key=lambda level: LEVELS[level], default="none"),
+                           "counts": {level: sum(i["level"] == level for i in step_items) for level in LEVELS},
+                           "items": step_items[:MAX_CHANGE_ITEMS]}
+            against, old = "full_review_not_human_written", EMPTY_MANIFEST
         diff = diff_manifests(old, manifest)
         ranked = triage(diff, new_manifest=manifest, tenant_counts=self._confidence_counts(tenant_id))
         items, dismissed = self._apply_false_alarms(tenant_id, skill_name, ranked["items"])
@@ -418,6 +451,8 @@ class SkillRegistry:
             "removed": diff["removed"],
             "meaning": ranked["meaning"],
         }
+        if update_over is not None:
+            change["update_over_previous"] = update_over
         change["change_hash"] = _canonical_hash(change)
         return change
 
@@ -484,8 +519,10 @@ class SkillRegistry:
             row = db.execute("SELECT * FROM skill_versions WHERE tenant_id=? AND version_id=?", (tenant_id, version_id)).fetchone()
             if row is None:
                 raise RegistryNotFound("skill version not found in this tenant")
-            if row["registered_by"] == actor_id:
-                raise RegistryError("the person who registered a version cannot mark its alarms as false")
+            provenance = json.loads(row["provenance_json"]) if row["provenance_json"] else None
+            if actor_id in authors(provenance, row["registered_by"]):
+                raise RegistryError("an author of a version (who registered it, the agent that wrote it, or the person it "
+                                    "acted for) cannot mark its alarms as false")
             change = json.loads(row["change_json"]) if row["change_json"] else None
             item = next((i for i in (change or {}).get("items", []) if i["category"] == category and i["value"] == value), None)
             if item is None:
@@ -501,7 +538,7 @@ class SkillRegistry:
             if row["capabilities_json"] and row["state"] in {"pending_review", "not_eligible"}:
                 against_active = (change or {}).get("against") in {"active_version", "active_version_without_manifest"}
                 fresh = self._change(tenant_id, row["skill_name"], json.loads(row["capabilities_json"]),
-                                     fallback_previous=not against_active)
+                                     fallback_previous=not against_active, full_review=needs_full_review(provenance))
                 summary = json.loads(row["summary_json"])
                 summary["capability_decision"], summary["capability_counts"] = fresh["decision"], fresh["counts"]
                 db.execute("UPDATE skill_versions SET change_json=?, summary_json=? WHERE version_id=?",
@@ -561,7 +598,8 @@ class SkillRegistry:
     def _decode(self, row: Any) -> SkillVersion:
         result = {key: value for key, value in dict(row).items() if key != "seq"}
         result["summary"] = json.loads(result.pop("summary_json"))
-        for column, key in (("assurance_json", "assurance"), ("capabilities_json", "capabilities"), ("change_json", "capability_change")):
+        for column, key in (("assurance_json", "assurance"), ("capabilities_json", "capabilities"), ("change_json", "capability_change"),
+                            ("provenance_json", "provenance")):
             raw = result.pop(column, None)
             result[key] = json.loads(raw) if raw else None
         result["events"] = [dict(event) for event in self.db.execute(

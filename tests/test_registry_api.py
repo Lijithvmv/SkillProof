@@ -117,7 +117,7 @@ def test_block_level_addition_needs_the_change_acknowledged(client):
                            json={"approval_request_id": request_id, "capability_ack": change["change_hash"]}, headers=as_user("bob", "approver"))
     assert promoted.status_code == 200, promoted.text
     actions = [event["action"] for event in promoted.json()["events"]]
-    assert actions == ["registered", "capabilities_compared", "capabilities_acknowledged", "promoted"]
+    assert actions == ["registered", "capabilities_compared", "provenance_recorded", "capabilities_acknowledged", "promoted"]
     assert client.get(f"/api/v1/registry/versions/{first['version_id']}", headers=as_user("carol", "viewer")).json()["state"] == "superseded"
 
 

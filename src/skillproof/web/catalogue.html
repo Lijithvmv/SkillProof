@@ -253,7 +253,12 @@ function detailHtml(v, requests) {
   const against = change ? { nothing_active: "nothing active yet, so every capability counts as added",
     active_version: `the active version ${short(change.against_version_id)}`,
     active_version_without_manifest: "an active version that has no capability manifest",
-    previous_version_not_approved: `the previous version ${short(change.against_version_id)} (nothing approved yet)` }[change.against] : "";
+    previous_version_not_approved: `the previous version ${short(change.against_version_id)} (nothing approved yet)`,
+    full_review_not_human_written: `nothing: no person attests writing this update of ${short(change.against_version_id)}, so it is reviewed as a new skill` +
+      (change.update_over_previous ? ` (the update itself: ${change.update_over_previous.decision}, ${change.update_over_previous.items.length} item(s))` : "")
+  }[change.against] : "";
+  const author = v.provenance ? `${esc(v.provenance.author_kind)}${v.provenance.agent ? " (" + esc(v.provenance.agent) + ")" : ""}` +
+    `${v.provenance.on_behalf_of ? " for " + esc(v.provenance.on_behalf_of) : ""}` : "not recorded";
   const items = change ? change.items : [];
   const markable = v.state === "pending_review" || v.state === "not_eligible";
   const gates = (v.assurance && v.assurance.gates) || [];
@@ -264,6 +269,7 @@ function detailHtml(v, requests) {
   <div class="muted">Package ${esc(String(v.package_fingerprint).slice(0, 16))}… · registered by ${esc(v.registered_by)} · ${esc(v.created_at)}</div>
   <div id="actionMsg"></div>
   <h3>What this version adds</h3>
+  <p class="muted">Written by: ${author}.</p>
   ${change ? `<p class="muted">Compared with ${esc(against)}. ${esc(change.meaning)}</p>
     ${items.length ? `<div class="scroll"><table><thead><tr><th>Level</th><th>Capability</th><th>Why</th><th>Where</th>${markable ? "<th></th>" : ""}</tr></thead><tbody>
       ${items.map((i, n) => `<tr><td>${badge(i.level)}</td><td>${esc(i.category.replace(/_/g, " "))}<br><code>${esc(i.value)}</code>${i.widened ? `<br><span class="muted">reach ${esc(i.widened.before)} → ${esc(i.widened.after)}</span>` : ""}${i.confidence ? `<br><span class="muted" title="Share of flags of this kind that reviewers found real (public labels plus this tenant's decisions)">${esc(i.confidence.block)}: real in ${Number(i.confidence.real)} of ${Number(i.confidence.seen)}</span>` : ""}</td>

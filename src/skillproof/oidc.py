@@ -32,6 +32,7 @@ class OIDCSettings:
     accepted_types: tuple[str, ...] = ("at+jwt", "application/at+jwt")
     leeway_seconds: int = 30
     jwks_timeout_seconds: float = 5
+    agent_clients: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for label, value in (("issuer", self.issuer), ("JWKS URL", self.jwks_url)):
@@ -56,7 +57,8 @@ class OIDCSettings:
         if not all((oidc.issuer, oidc.audience, oidc.jwks_url)):
             raise ValueError("OIDC issuer, audience, and JWKS URL must be configured together")
         return cls(issuer=oidc.issuer, audience=oidc.audience, jwks_url=oidc.jwks_url, role_claim=oidc.role_claim,
-                   tenant_claim=oidc.tenant_claim, leeway_seconds=oidc.leeway_seconds, jwks_timeout_seconds=oidc.jwks_timeout_seconds)
+                   tenant_claim=oidc.tenant_claim, leeway_seconds=oidc.leeway_seconds, jwks_timeout_seconds=oidc.jwks_timeout_seconds,
+                   agent_clients=oidc.agent_clients)
 
 
 class OIDCAccessTokenVerifier:
@@ -100,7 +102,18 @@ class OIDCAccessTokenVerifier:
             raise AuthenticationError("access token has no single recognized SkillProof role")
         if not isinstance(tenant_id, str) or not tenant_id.strip() or not isinstance(subject, str) or not subject.strip():
             raise AuthenticationError("access token lacks a valid subject or tenant claim")
+        # Agent identities. Delegation (RFC 8693 `act` claim): the token was issued to an agent acting for `sub`; the
+        # agent is the identity that acts and the person it acts for is kept, so neither can approve what it wrote. A
+        # token from an OAuth client the tenant issued to an agent (SKILLPROOF_OIDC_AGENT_CLIENTS) is an agent too.
+        actor = claims.get("act")
+        if actor is not None and (not isinstance(actor, dict) or not isinstance(actor.get("sub"), str) or not actor["sub"].strip()):
+            raise AuthenticationError("access token has a malformed act (delegation) claim")
         try:
+            if actor is not None:
+                return Principal(user_id=actor["sub"], tenant_id=tenant_id, role=role_value,  # type: ignore[arg-type]
+                                 actor_kind="agent", on_behalf_of=subject)
+            if claims.get("client_id") in self.settings.agent_clients:
+                return Principal(user_id=subject, tenant_id=tenant_id, role=role_value, actor_kind="agent")  # type: ignore[arg-type]
             return Principal(user_id=subject, tenant_id=tenant_id, role=role_value)  # type: ignore[arg-type]
         except ValueError as exc:
             raise AuthenticationError("access token principal claims are invalid") from exc

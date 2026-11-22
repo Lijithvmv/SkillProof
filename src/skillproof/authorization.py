@@ -37,17 +37,29 @@ class AuthorizationError(PermissionError):
     """Principal is outside the requested tenant or lacks the required role."""
 
 
+ActorKind = Literal["human", "agent"]
+# What only a person may do, whatever role an agent identity is given: decide, make live, dismiss what was raised,
+# change the rules.
+HUMAN_ONLY: frozenset[Permission] = frozenset({"approval.decide", "skill.promote", "policy.manage"})
+
+
 @dataclass(frozen=True)
 class Principal:
     user_id: str
     tenant_id: str
     role: Role
+    actor_kind: ActorKind = "human"   # 'agent' for an agent identity (a token with a delegation `act` claim)
+    on_behalf_of: str | None = None   # the person an agent identity acts for
 
     def __post_init__(self) -> None:
         if not self.user_id.strip() or not self.tenant_id.strip():
             raise ValueError("Principal requires non-empty user_id and tenant_id")
         if self.role not in ROLE_PERMISSIONS:
             raise ValueError(f"Unsupported role: {self.role}")
+        if self.actor_kind not in {"human", "agent"}:
+            raise ValueError(f"Unsupported actor kind: {self.actor_kind}")
+        if self.on_behalf_of is not None and (self.actor_kind != "agent" or not self.on_behalf_of.strip()):
+            raise ValueError("on_behalf_of is only for agent identities and must name a person")
 
 
 def authorize(principal: Principal, tenant_id: str, permission: Permission) -> None:
@@ -55,6 +67,8 @@ def authorize(principal: Principal, tenant_id: str, permission: Permission) -> N
         raise AuthorizationError("principal does not belong to the requested tenant")
     if permission not in ROLE_PERMISSIONS[principal.role]:
         raise AuthorizationError(f"role '{principal.role}' lacks permission '{permission}'")
+    if principal.actor_kind == "agent" and permission in HUMAN_ONLY:
+        raise AuthorizationError(f"an agent identity cannot use '{permission}'; a person must")
 
 
 class GovernanceAccess:
@@ -159,9 +173,10 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "policy.manage")
         return self.registry.set_policy(principal.tenant_id, policy.model_dump(), actor_id=principal.user_id)
 
-    def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any]) -> CapabilityChange:
+    def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any], *,
+                       full_review: bool = False) -> CapabilityChange:
         authorize(principal, principal.tenant_id, "skill.register")
-        return self.registry.preview_change(principal.tenant_id, skill_name, manifest)
+        return self.registry.preview_change(principal.tenant_id, skill_name, manifest, full_review=full_review)
 
     def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> EvaluationJob:
         authorize(principal, principal.tenant_id, "evaluation.run")
@@ -183,10 +198,11 @@ class GovernanceAccess:
     def register_skill(
         self, principal: Principal, skill_report: dict[str, Any], assurance_report: dict[str, Any], *,
         artifact_uri: str | None = None, capability_manifest: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> SkillVersion:
         authorize(principal, principal.tenant_id, "skill.register")
         return self.registry.register(principal.tenant_id, skill_report, assurance_report, actor_id=principal.user_id,
-                                      artifact_uri=artifact_uri, capability_manifest=capability_manifest)
+                                      artifact_uri=artifact_uri, capability_manifest=capability_manifest, provenance=provenance)
 
     def promote_skill(
         self, principal: Principal, version_id: str, assurance_report: dict[str, Any], approval_record: dict[str, Any],

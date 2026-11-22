@@ -58,9 +58,15 @@ def test_import_then_update_is_ranked_against_the_previous_version(tmp_path):
     update = import_installed(governance, principal, [claude, codex])
     assert update["new_versions"] == 1 and update["updates"] == 1 and update["updates_with_block"] == 1
     [row] = update["registered"]
-    assert row["against"] == "previous_version_not_approved" and row["decision"] == "block"
+    # A folder changed on disk has no attested author, so it is reviewed as a new skill; what the update itself added
+    # is kept beside the full review.
+    assert row["against"] == "full_review_not_human_written" and row["decision"] == "block"
     version = governance.registry.get_version("local", row["version_id"])
-    assert [i["value"] for i in version["capability_change"]["items"]] == ["permission bypass", "claude headless"]
+    assert version["provenance"]["author_kind"] == "unknown" and version["provenance"]["review_bar"] == "new_skill"
+    step = version["capability_change"]["update_over_previous"]
+    assert step["against"] == "previous_version_not_approved"
+    assert [i["value"] for i in step["items"]] == ["permission bypass", "claude headless"]
+    assert {"permission bypass", "claude headless"} <= {i["value"] for i in version["capability_change"]["items"]}
     assert version["artifact_uri"].startswith("file:")
     catalogue = {entry["skill_name"]: entry for entry in governance.registry.catalogue("local")}
     assert catalogue["release-notes"]["versions"] == 2 and catalogue["release-notes"]["active"] is None

@@ -252,9 +252,39 @@ class OllamaActivationProbe:
             # object. Accept it only when it is exactly one of the listed names.
             bare = content.strip().strip('"').strip()
             choice = bare if bare in allowed else None
+        if not isinstance(choice, str) or choice not in allowed:
+            # Seen with gemma4: the schema ignored, a fenced list like [{"tool": "create-pr"}]. Accept only when
+            # exactly one listed name appears as a JSON value; anything ambiguous stays a failure.
+            named = _listed_values(content, set(allowed))
+            choice = named.pop() if len(named) == 1 else None
         if not isinstance(choice, str):
             raise RuntimeError(f"Ollama returned no usable skill choice: {content[:120]!r}")
         return choice
+
+
+def _listed_values(content: str, allowed: set[str]) -> set[str]:
+    """Every string value in the JSON found in `content` that is one of `allowed`."""
+    decoder, found, index = json.JSONDecoder(), set(), 0
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str) and value in allowed:
+            found.add(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    while (start := min((i for i in (content.find("{", index), content.find("[", index)) if i != -1), default=-1)) != -1:
+        try:
+            value, end = decoder.raw_decode(content, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        walk(value)
+        index = end
+    return found
 
 
 def text_tool_calls(content: str, names: set[str]) -> list[dict[str, Any]]:

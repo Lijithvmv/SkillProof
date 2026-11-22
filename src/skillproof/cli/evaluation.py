@@ -125,7 +125,8 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
     result = measure_activation(target=target, distractors=cards, relevant_requests=relevant,
                                 unrelated_requests=read_requests(args.unrelated_tasks) if args.unrelated_tasks else [],
                                 probe=probe, repeats=args.load_repeats, seed=args.seed, forced_lift_percentage_points=forced_lift)
-    result.pop("records", None)  # by_request keeps the per-request picture; single choices are not needed later
+    records = result.pop("records", None) or []  # by_request keeps the per-request picture; single choices are not needed later
+    result["failure_reasons"] = sorted({r["error"] for r in records if r.get("error")})[:10]  # why a choice could not be made
     result["competitors"] = {
         "source": "installed skills" + (" and --distractor-skills" if listed else ""),
         "installed_available": len(pool), "selection": f"the {len(ranked)} installed skills with the most similar descriptions",
@@ -133,6 +134,21 @@ def measure_load_rate(args, relevant: list[str], forced_lift: float | None) -> d
     }
     result["model"] = args.model
     return result
+
+
+def load_rate_failed(load: dict[str, Any]) -> bool:
+    from skillproof.config import settings
+
+    rate, false_rate = (load.get("relevant") or {}).get("activation_rate"), (load.get("unrelated") or {}).get("false_activation_rate")
+    return (rate is not None and rate < settings().min_load_rate) or (false_rate is not None and false_rate > settings().max_false_load_rate)
+
+
+def run_load_rate(args) -> Result:
+    try:
+        result = measure_load_rate(args, read_requests(args.requests), None)
+        return result, 1 if load_rate_failed(result) or result["failures"] else 0
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        return {"error": str(exc)}, 4
 
 
 def run_benchmark_draft(args) -> Result:
@@ -147,12 +163,8 @@ def run_evaluate_skill(args) -> Result:
         result = evaluate_skill(args)
         followed = (result["comparison"].get("adherence") or {}).get("adherence_rate")
         behaviour = (result["comparison"].get("behaviour") or {}).get("decision")
-        from skillproof.config import settings
-
         load = result["comparison"].get("load_rate") or {}
-        rate, false_rate = (load.get("relevant") or {}).get("activation_rate"), (load.get("unrelated") or {}).get("false_activation_rate")
-        if load and ((rate is not None and rate < settings().min_load_rate)
-                     or (false_rate is not None and false_rate > settings().max_false_load_rate)):
+        if load and load_rate_failed(load):
             behaviour = behaviour or "load_rate"
         return result, 1 if (sum(result["failure_counts"].values()) or (followed is not None and followed < 0.7)
                              or behaviour in {"block", "ask", "load_rate"}) else 0
@@ -280,6 +292,20 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--tenant", default="local")
     evaluate.add_argument("--output", default="-")
     evaluate.set_defaults(run=run_evaluate_skill)
+
+    load = commands.add_parser("load-rate", help="How often a local model picks this skill from its description, among the installed skills whose descriptions are closest to it, for requests it is for (--requests) and for unrelated ones. A quick check of a description; to put it in the catalogue's decision use evaluate-skill --load-rate. Exit 1 below SKILLPROOF_MIN_LOAD_RATE or above SKILLPROOF_MAX_FALSE_LOAD_RATE.")
+    load.add_argument("skill", help="Skill folder (holding SKILL.md).")
+    load.add_argument("--requests", required=True, help="JSONL of prompts the skill is for ({\"prompt\": ...}).")
+    load.add_argument("--unrelated-tasks", help="JSONL of prompts the skill should NOT be picked for.")
+    load.add_argument("--model", required=True, help="Local Ollama model that chooses.")
+    load.add_argument("--ollama-url", default=conf.ollama_url)
+    load.add_argument("--competitors", type=int, default=15)
+    load.add_argument("--competitors-root", action="append", default=[])
+    load.add_argument("--distractor-skills")
+    load.add_argument("--load-repeats", type=int, default=3)
+    load.add_argument("--seed", type=int, default=0)
+    load.add_argument("--output", default="-")
+    load.set_defaults(run=run_load_rate)
 
     monitor = commands.add_parser("monitor", help="Check persisted evaluation history for regressions and stale results.")
     monitor.add_argument("--history-db", required=True, help="SQLite evaluation history database path.")

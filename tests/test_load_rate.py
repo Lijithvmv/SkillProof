@@ -60,7 +60,7 @@ def test_competitors_are_the_most_similar_installed_skills(tmp_path, monkeypatch
     result = cli_evaluation.measure_load_rate(args, ["Write the release notes for v2."], 20.0)
     assert seen["names"] == ["changelog-writer", "pdf", "release-notes"]  # its own installed copy is not a competitor
     assert result["competitors"]["installed_available"] == 3 and result["relevant"]["activation_rate"] == 1.0
-    assert result["expected_lift_percentage_points"] == 20.0 and "records" not in result
+    assert result["expected_lift_percentage_points"] == 20.0 and "records" not in result and result["failure_reasons"] == []
 
 
 def assurance(decision="eligible_for_human_approval"):
@@ -130,3 +130,57 @@ def test_a_cited_load_rate_reaches_the_decision(tmp_path):
     gates = [g for g in reassessed["assurance"]["gates"] if g["code"] == "LOAD_RATE"]
     assert len(gates) == 1 and gates[0]["status"] == "fail" and reassessed["state"] == "not_eligible"
     governance.registry.close(); governance.approvals.close(); governance.history.close()
+
+
+# Decision: the standalone load-rate check fails (exit 1) when a close competitor takes the skill's requests, and
+# passes when the skill is picked for its own requests and not for its sibling's.
+def test_load_rate_command_fails_a_description_that_loses_to_its_competitor(tmp_path, monkeypatch):
+    import json
+
+    root = tmp_path / "skills"
+    card(root / "create-draft-pr", "create-draft-pr", "Create a draft pull request. Use when the user wants a draft PR.")
+    skill = tmp_path / "create-pr"
+    card(skill, "create-pr", "Create a pull request. Use when the user wants to open a PR.")
+    requests, unrelated = tmp_path / "r.jsonl", tmp_path / "u.jsonl"
+    requests.write_text(json.dumps({"prompt": "Open a PR."}) + "\n", encoding="utf-8")
+    unrelated.write_text(json.dumps({"prompt": "Open a draft PR."}) + "\n", encoding="utf-8")
+
+    def probe_choosing(rule):
+        class Probe:
+            def __init__(self, **kwargs):
+                pass
+
+            def choose(self, *, request, cards):
+                return rule(request)
+        return Probe
+
+    args = SimpleNamespace(skill=str(skill), requests=str(requests), unrelated_tasks=str(unrelated), competitors_root=[str(root)],
+                           competitors=5, distractor_skills=None, model="m", ollama_url="http://127.0.0.1:11434", seed=0, load_repeats=2)
+    monkeypatch.setattr(cli_evaluation, "OllamaActivationProbe", probe_choosing(lambda r: "create-draft-pr"))
+    result, code = cli_evaluation.run_load_rate(args)
+    assert code == 1 and result["relevant"]["activation_rate"] == 0.0 and result["relevant"]["picked_other_skill"] == 2
+    monkeypatch.setattr(cli_evaluation, "OllamaActivationProbe", probe_choosing(lambda r: "create-draft-pr" if "draft" in r else "create-pr"))
+    result, code = cli_evaluation.run_load_rate(args)
+    assert code == 0 and result["relevant"]["activation_rate"] == 1.0 and result["unrelated"]["false_activation_rate"] == 0.0
+
+
+# Decision: a choice the model wrote outside the schema is read only when exactly one listed name appears; an answer
+# naming two listed skills, or none, stays a failure.
+def test_probe_reads_an_off_schema_choice_only_when_unambiguous():
+    import pytest
+
+    from skillproof.adapters.ollama import OllamaActivationProbe
+
+    class Client:
+        def __init__(self, content):
+            self.content = content
+
+        def chat(self, payload):
+            return {"model": "m", "message": {"content": self.content}}
+
+    cards = [SkillCard("create-pr", "PR"), SkillCard("create-draft-pr", "draft PR")]
+    fenced = '```json\n[\n  {"tool": "create-pr"}\n]\n```'
+    assert OllamaActivationProbe(model="m", client=Client(fenced)).choose(request="r", cards=cards) == "create-pr"
+    for content in ('[{"tool": "create-pr"}, {"tool": "create-draft-pr"}]', '{"tool": "something-else"}', "no idea"):
+        with pytest.raises(RuntimeError):
+            OllamaActivationProbe(model="m", client=Client(content)).choose(request="r", cards=cards)

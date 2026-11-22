@@ -62,10 +62,19 @@ Gap 4 is built: `evaluate-skill --load-rate` measures how often the model picks 
 with the closest descriptions, records it with the experiment, and a citing version gets a LOAD_RATE gate (below
 SKILLPROOF_MIN_LOAD_RATE or above SKILLPROOF_MAX_FALSE_LOAD_RATE: not ready). First real run (gemma4-e4b, this
 machine, 170 installed skills, the 15 closest as competitors): picked for 6 of 6 relevant requests, 0 of 12 unrelated.
-Weakest part: the closest installed competitor had similarity 0.055, so this machine had no real rival for release
-notes and the run is the easy case; the probe is a model choosing from a list, not any agent's loader; thresholds are
+That release-notes run was the easy case: its closest installed competitor had similarity 0.055. Then real rivals
+installed on this machine (`skillproof load-rate`, gemma4-e4b, 15 closest competitors, 2 choices per request, requests
+written by hand):
+- create-pr (rival create-draft-pr, similarity 0.817): 8 of 8 own requests, 0 of 20 sibling or unrelated ones;
+- create-draft-pr: 8 of 8, 0 of 20;
+- review-security: 3 of 8 (38%), fail. It lost 5 of 8 to claude-security, another installed security skill that the word
+  overlap ranked far below the lexically closest rival `review` (0.758). Word overlap misses competitors that say the same thing
+  in other words; drawing 15 competitors, not one, is what caught it.
+One choice failed because the model answered outside the schema (a fenced `[{"tool": "create-pr"}]`). Such
+answers are now read when exactly one listed name appears, and the reasons for any failed choice are kept.
+Weakest part: the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
 All four gaps have a first build. Open: sync against a deployed server with OIDC tokens; agents acting under a
-person's token; commands that need their output in the sandbox; load rate against a real close competitor and
+person's token; commands that need their output in the sandbox; load rate on semantic (not only lexical) competitors and
 tenant-level thresholds.

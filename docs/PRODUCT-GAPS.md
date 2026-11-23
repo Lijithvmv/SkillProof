@@ -126,6 +126,11 @@ Closing the weak points (latest round):
 - Load rate: every rate has a 95% interval, the worst request and the rivals that won requests. The two
   review-security runs (3 of 8, 9 of 12) have intervals 14-69% and 47-91%: their disagreement on the gate was noise.
   The gate now passes or fails only when the interval is clear of the threshold, and otherwise asks for more choices.
+  Running more choices (review-security, hand-written requests, 5 choices each): 11 of 20 (55%, interval 34-74%),
+  still insufficient evidence at a 50% floor; unrelated 0 of 30 (interval 0-11%), clear of the 20% ceiling. The
+  breakdown located the problem: "Do a security audit of the current changes" went to claude-security 5 of 5 times
+  (its description says "audit"), while the other three requests were picked 3 to 4 times of 5. The useful finding is
+  which request type the skill loses, not the average.
 
 Open: a production identity provider (needs a download approved by the owner); a person's fresh, strong token used by
 an agent; programs other than read-only inspection are recorded, not run.

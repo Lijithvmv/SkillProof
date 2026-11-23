@@ -125,3 +125,20 @@ def test_off_purpose_requests_are_identified():
     requests = ["Audit this diff for injection.", "Review my profile function.", "Check auth in this change."]
     assert off_purpose(requests, "review-security", "Review code changes with Security Review subagent.", ask) == {
         1: "general code review", 2: "no verdict"}
+
+
+# Decision: a written request is dropped as off purpose only when a majority of independent judgements say so; one
+# judgement alone (which on real data wrongly dropped a fair request) is not enough.
+def test_off_purpose_needs_a_majority():
+    from skillproof.engines.requests import off_purpose_by_majority
+
+    def judge(off):
+        def ask(prompt, schema):
+            return json.dumps({"verdicts": [{"index": i, "fits": i not in off, "reason": f"judge says {i}"} for i in (1, 2, 3)]})
+        return ask
+
+    requests = ["Review my profile function.", "Check the login change for security problems.", "Audit this diff."]
+    # Judgement 1 flags everything (a noisy sample); judgements 2 and 3 flag only the generic request.
+    dropped = off_purpose_by_majority(requests, "review-security", "Review code changes with Security Review subagent.",
+                                      [judge({1, 2, 3}), judge({1}), judge({1})])
+    assert list(dropped) == [0] and dropped[0].startswith("3 of 3 judgements")

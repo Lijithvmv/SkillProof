@@ -186,3 +186,23 @@ def test_human_attestation_needs_a_recent_interactive_sign_in():
     assert provenance.resolve(stale, {"author_kind": "agent"})["author_kind"] == "agent"  # raising the bar still works
     local = Principal(user_id="alice", tenant_id="t", role="evaluator")
     assert provenance.resolve(local)["author_kind"] == "human"  # development sign-in has no sign-in time to check
+
+
+# Decision: a server can require a strong sign-in method (amr, e.g. mfa) for a "human-written" attestation; a recent
+# password-only sign-in then counts as unknown, and one with the required method counts as human.
+def test_human_attestation_can_require_a_strong_sign_in_method(monkeypatch):
+    import time
+
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_AMR", "mfa,hwk")
+    verifier = OIDCAccessTokenVerifier(OIDCSettings(issuer="https://login.example.test/", audience="skillproof-api",
+                                                    jwks_url="https://login.example.test/.well-known/jwks.json", leeway_seconds=0),
+                                       signing_keys=FakeKeys())
+    now = int(time.time())
+    password = verifier.verify(make_token(auth_time=now - 60, amr=["pwd"]))
+    strong = verifier.verify(make_token(auth_time=now - 60, amr=["pwd", "mfa"]))
+    assert password.sign_in_methods == ("pwd",)
+    record = provenance.resolve(password)
+    assert record["author_kind"] == "unknown" and "requires one of ['mfa', 'hwk']" in " ".join(record["basis"])
+    assert provenance.resolve(strong)["author_kind"] == "human"
+    monkeypatch.delenv("SKILLPROOF_HUMAN_ATTESTATION_AMR")
+    assert provenance.resolve(password)["author_kind"] == "human"  # not required by default

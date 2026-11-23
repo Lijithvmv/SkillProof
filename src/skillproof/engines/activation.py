@@ -87,6 +87,17 @@ def _rate(hits: int, total: int) -> float | None:
     return round(hits / total, 4) if total else None
 
 
+def wilson(hits: int, total: int, z: float = 1.96) -> list[float] | None:
+    """95% Wilson score interval for a rate. Choices on the same request are not fully independent, so read it as a
+    lower bound on the real uncertainty."""
+    if not total:
+        return None
+    p = hits / total
+    centre = (p + z * z / (2 * total)) / (1 + z * z / total)
+    half = z * ((p * (1 - p) / total + z * z / (4 * total * total)) ** 0.5) / (1 + z * z / total)
+    return [round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)]
+
+
 def measure_activation(
     *, target: SkillCard, distractors: list[SkillCard], relevant_requests: list[str],
     unrelated_requests: list[str], probe: ActivationProbe, repeats: int = 1, seed: int = 0,
@@ -139,6 +150,12 @@ def measure_activation(
                 "kind": kind, "request_index": index, "request": request[:160], "trials": len(rows),
                 "target_rate": _rate(sum(r["chosen"] == target.name for r in rows), len(rows)), "choices": choices,
             })
+    relevant_rows = [r for r in by_request if r["kind"] == "relevant" and r["trials"]]
+    lost_to: dict[str, list[int]] = {}
+    for row in relevant_rows:
+        winner, votes = max(row["choices"].items(), key=lambda item: item[1]) if row["choices"] else (None, 0)
+        if winner not in (None, target.name) and votes * 2 > row["trials"]:
+            lost_to.setdefault(winner, []).append(row["request_index"])
     return {
         "method": "model_routing_proxy",
         "target_skill": target.name,
@@ -149,10 +166,16 @@ def measure_activation(
             "activation_rate": activation_rate,
             "picked_other_skill": wrong,
             "picked_none": sum(r["chosen"] == NONE for r in relevant),
+            "interval_95": wilson(picked, len(relevant)),
+            # An average can hide a request type the skill always loses: the lowest per-request rate, and which rival
+            # won which requests (by majority of that request's choices).
+            "worst_request_rate": min((row["target_rate"] for row in relevant_rows), default=None),
+            "requests_lost_to": {name: sorted(indexes) for name, indexes in sorted(lost_to.items())},
         },
         "unrelated": {
             "trials": len(unrelated),
             "false_activation_rate": _rate(sum(r["chosen"] == target.name for r in unrelated), len(unrelated)),
+            "interval_95": wilson(sum(r["chosen"] == target.name for r in unrelated), len(unrelated)),
         },
         "failures": sum(r["error"] is not None for r in records),
         # An average can hide a task where the skill is never picked; read this before the overall rate.

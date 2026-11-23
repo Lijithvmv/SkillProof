@@ -78,6 +78,9 @@ def load_rate_evidence(records: list[dict[str, Any]], cited: list[str]) -> dict[
             return {"experiment_id": r["experiment_id"], "activation_rate": relevant.get("activation_rate"),
                     "relevant_trials": relevant.get("trials"), "false_activation_rate": unrelated.get("false_activation_rate"),
                     "unrelated_trials": unrelated.get("trials"), "candidate_skills": load.get("candidate_skills"),
+                    "interval_95": relevant.get("interval_95"), "worst_request_rate": relevant.get("worst_request_rate"),
+                    "false_interval_95": unrelated.get("interval_95"),
+                    "requests_lost_to": relevant.get("requests_lost_to"),
                     "expected_lift_percentage_points": load.get("expected_lift_percentage_points"), "model": load.get("model"),
                     "competitors": (load.get("competitors") or {}).get("selection")}
     return None
@@ -87,7 +90,12 @@ def apply_load_rate(assurance: dict[str, Any], evidence: dict[str, Any] | None,
                     thresholds: dict[str, float] | None = None) -> None:
     """The LOAD_RATE gate. A skill agents rarely pick for the requests it is for does little, and one they pick for
     unrelated requests gets in the way: either makes the version not ready. Without a load-rate run the gate says so
-    and does not change the decision."""
+    and does not change the decision.
+
+    With a 95% interval (recorded runs have one), the gate decides only what the data can show: fail when the whole
+    interval is below the floor (or, for unrelated requests, above the ceiling), pass when it is clear of it, and
+    insufficient evidence when the threshold lies inside the interval. On real data two runs of one skill gave 3 of 8
+    and 9 of 12, on either side of the 50% floor, with intervals 14-69% and 47-91%: a hard verdict there is noise."""
     from skillproof.config import settings
 
     floor = (thresholds or {}).get("min_load_rate", settings().min_load_rate)
@@ -100,15 +108,34 @@ def apply_load_rate(assurance: dict[str, Any], evidence: dict[str, Any] | None,
     assurance["load_rate"] = evidence
     rate, false_rate = evidence["activation_rate"], evidence.get("false_activation_rate")
     among = f"among {evidence.get('candidate_skills')} competing skills"
-    problems = []
-    if rate < floor:
+    interval = evidence.get("interval_95")
+    if interval:
+        among += f" (95% interval {interval[0]:.0%} to {interval[1]:.0%} over {evidence.get('relevant_trials')} choices)"
+    lost = evidence.get("requests_lost_to") or {}
+    if lost:
+        among += "; lost requests to " + ", ".join(f"{name} ({len(indexes)})" for name, indexes in lost.items())
+    low, high = interval if interval else (rate, rate)
+    false_interval = evidence.get("false_interval_95")
+    false_low = false_interval[0] if false_interval else false_rate
+    problems, unsure = [], []
+    if high < floor:
         problems.append(f"picked for {rate:.0%} of the requests it is for {among} (minimum {floor:.0%})")
-    if false_rate is not None and false_rate > ceiling:
+    elif low < floor:
+        unsure.append(f"picked for {rate:.0%} of the requests it is for {among}: the minimum {floor:.0%} lies inside the "
+                      "interval, so run more choices before deciding")
+    if false_rate is not None and false_low is not None and false_low > ceiling:
         problems.append(f"picked for {false_rate:.0%} of unrelated requests (maximum {ceiling:.0%})")
+    elif false_rate is not None and false_rate > ceiling:
+        unsure.append(f"picked for {false_rate:.0%} of unrelated requests, above the maximum {ceiling:.0%} but within the "
+                      "uncertainty of the run")
     if problems:
-        gates.append({"code": "LOAD_RATE", "status": "fail", "message": "Agents " + " and ".join(problems) + "."})
+        gates.append({"code": "LOAD_RATE", "status": "fail", "message": "Agents " + " and ".join(problems + unsure) + "."})
         if assurance.get("decision") != "blocked":
             assurance["decision"] = "not_ready"
+    elif unsure:
+        gates.append({"code": "LOAD_RATE", "status": "insufficient_evidence", "message": "Agents " + " and ".join(unsure) + "."})
+        if assurance.get("decision") in {"eligible_for_human_approval", "human_review_required"}:
+            assurance["decision"] = "insufficient_evidence"
     else:
         unrelated = "not measured" if false_rate is None else f"{false_rate:.0%}"
         gates.append({"code": "LOAD_RATE", "status": "pass",

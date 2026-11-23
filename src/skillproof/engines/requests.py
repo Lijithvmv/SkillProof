@@ -115,6 +115,19 @@ def off_purpose(requests: list[str], name: str, description: str, ask: Callable[
             for i in range(1, len(requests) + 1) if not fits.get(i, (False, ""))[0]}
 
 
+def off_purpose_by_majority(requests: list[str], name: str, description: str,
+                            judges: list[Callable[[str, dict], str]]) -> dict[int, str]:
+    """Requests a majority of independent judgements (sampled judges) find off the skill's purpose. One judgement
+    wrongly dropped a fair security request on real data (and one sample flagged every request); three samples with a
+    majority kept every fair request and still dropped the off-purpose one."""
+    votes: dict[int, list[str]] = {}
+    for judge in judges:
+        for index, reason in off_purpose(requests, name, description, judge).items():
+            votes.setdefault(index, []).append(reason)
+    needed = len(judges) // 2 + 1
+    return {index: f"{len(reasons)} of {len(judges)} judgements: {reasons[0]}" for index, reasons in votes.items() if len(reasons) >= needed}
+
+
 FEEDBACK = """
 
 These earlier messages were rejected; write different ones that avoid the same problem:
@@ -122,7 +135,8 @@ These earlier messages were rejected; write different ones that avoid the same p
 
 
 def write_requests(name: str, description: str, ask: Callable[[str, dict], str], n: int,
-                   rounds: int = 3, judge: Callable[[str, dict], str] | None = None) -> tuple[list[str], list[dict[str, str]]]:
+                   rounds: int = 3, judge: Callable[[str, dict], str] | list[Callable[[str, dict], str]] | None = None,
+                   ) -> tuple[list[str], list[dict[str, str]]]:
     """Up to n usable requests for one skill, and the dropped ones with reasons. With `judge`, each round's candidates
     are also checked for the skill's specific purpose (off_purpose). Rejected requests are shown back to the model with
     their reasons, for up to `rounds` rounds."""
@@ -147,7 +161,12 @@ def write_requests(name: str, description: str, ask: Callable[[str, dict], str],
                 dropped.append({"skill": name, "request": text[:300], "reason": reason})
             else:
                 candidates.append(text)
-        drift = off_purpose(candidates, name, description, judge) if judge else {}
+        if not judge:
+            drift: dict[int, str] = {}
+        elif isinstance(judge, list):
+            drift = off_purpose_by_majority(candidates, name, description, judge)
+        else:
+            drift = off_purpose(candidates, name, description, judge)
         for index, text in enumerate(candidates):
             if index in drift:
                 dropped.append({"skill": name, "request": text[:300], "reason": f"off the skill's purpose ({drift[index]})"})

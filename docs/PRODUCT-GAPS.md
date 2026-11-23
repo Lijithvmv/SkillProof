@@ -110,7 +110,22 @@ fair, so the rate depends on the mix of requests: the per-request breakdown show
 Weakest part: the probe is a model choosing from a list, not any agent's loader; thresholds are
 starting points in config, not yet in the tenant policy (governance.py is being edited elsewhere).
 
-All four gaps have a first build. Open: a production identity provider for sync; an agent acting within minutes of
-a person's sign-in on their token; commands with pipes or that change files are still only recorded; the purpose check
-can wrongly drop a fair request (in the review-security run it dropped 1 of 8 candidates that asked for a security check); load rate depends on the request mix, so hand-written requests
-stay the reference.
+Closing the weak points (latest round):
+- Machines now get their own tokens: `sync` and `fleet-report` use the OAuth client credentials grant (token endpoint
+  by OpenID discovery, secret from the environment). The OIDC end-to-end check passed 31 of 31 with sync signing in
+  as a registered machine client. A production identity provider is still untested here: none can run on this machine
+  without downloading one (Docker and Java are absent), which needs the owner's approval.
+- A "human-written" attestation can also require a strong sign-in method (`amr`, e.g. mfa or hwk). Bearer tokens
+  remain the limit: an agent holding a fresh, strong token of a person still passes as that person.
+- Sandbox: pipelines of read-only commands are emulated, and `>`/`>>` redirects go through the write rules, so
+  `echo ... >> CLAUDE.md` is refused and recorded like write_file. Other programs, chaining and substitution are
+  still recorded only.
+- Purpose check: a second, differently worded judgement was tried and rejected (it accepted the off-purpose request
+  too). Three sampled judgements with a majority dropped the off-purpose request (3 of 3) and kept every fair one,
+  including the one a single judgement had dropped (1 of 3).
+- Load rate: every rate has a 95% interval, the worst request and the rivals that won requests. The two
+  review-security runs (3 of 8, 9 of 12) have intervals 14-69% and 47-91%: their disagreement on the gate was noise.
+  The gate now passes or fails only when the interval is clear of the threshold, and otherwise asks for more choices.
+
+Open: a production identity provider (needs a download approved by the owner); a person's fresh, strong token used by
+an agent; programs other than read-only inspection are recorded, not run.

@@ -125,7 +125,9 @@ def measure_load_rate(args, relevant: list[str] | None, forced_lift: float | Non
         # The purpose check: every written request must ask for what its skill is specifically for (own description only).
         judge_model = getattr(args, "judge_model", None)
         judge_model = args.model if judge_model is None else judge_model
-        judge = ollama_json_asker(judge_model, args.ollama_url, temperature=0.0, seed=args.seed, max_output_tokens=2000) if judge_model else None
+        # Three sampled judgements, dropped on a majority: a single judgement dropped a fair request on real data.
+        judge = [ollama_json_asker(judge_model, args.ollama_url, temperature=0.7, seed=args.seed + k, max_output_tokens=2000)
+                 for k in (1, 2, 3)] if judge_model else None
     if relevant is None:
         from skillproof.engines.requests import write_requests
 

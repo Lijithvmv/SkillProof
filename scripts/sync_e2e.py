@@ -31,6 +31,8 @@ parser.add_argument("--server", default="http://127.0.0.1:8796")
 parser.add_argument("--oidc", help="Issuer of a development OIDC provider (scripts/dev_oidc_provider.py). Every call then uses "
                                    "a bearer token from a real code + PKCE sign-in, and sync uses a reporter token.")
 parser.add_argument("--redirect", default="http://127.0.0.1:8796/catalogue", help="Redirect URI the provider accepts.")
+parser.add_argument("--machine-client", help="With --oidc: sync gets its own token as this machine client (client credentials, "
+                                             "secret in SKILLPROOF_CLIENT_SECRET) instead of a person-style reporter sign-in.")
 cli = parser.parse_args()
 BASE = Path(cli.work)
 SERVER = cli.server
@@ -130,9 +132,12 @@ def sync(*extra):
 
     out = BASE / "sync.json"
     env = dict(os.environ)
-    if cli.oidc:
+    auth: list[str] = []
+    if cli.oidc and cli.machine_client:
+        auth = ["--client-id", cli.machine_client, "--issuer", cli.oidc]
+    elif cli.oidc:
         env["SKILLPROOF_TOKEN"] = token_for("sync@test-machine", "reporter")
-    code = subprocess.run([SKILLPROOF, "sync", "--server", SERVER, "--root", str(BASE / "machine"), "--output", str(out), *extra],
+    code = subprocess.run([SKILLPROOF, "sync", "--server", SERVER, "--root", str(BASE / "machine"), "--output", str(out), *auth, *extra],
                           capture_output=True, text=True, env=env).returncode
     return code, json.loads(out.read_text(encoding="utf-8"))
 

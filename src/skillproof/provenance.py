@@ -96,12 +96,17 @@ def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, sou
             from skillproof.config import settings
 
             limit = settings().human_attestation_max_age_seconds
+            required = settings().human_attestation_methods
             age = None if principal.signed_in_at is None else int(datetime.now(timezone.utc).timestamp()) - principal.signed_in_at
             if age is None or age > limit or age < -300:
                 kind = "unknown"
                 basis.append("not accepted as human-written: the token " + ("has no interactive sign-in time (auth_time)"
                              if age is None else f"was signed in {age // 60} minute(s) ago (limit {limit // 60})")
                              + ", so an agent using the person's token cannot be ruled out")
+            elif required and not set(required) & set(principal.sign_in_methods):
+                kind = "unknown"
+                basis.append(f"not accepted as human-written: the sign-in used {list(principal.sign_in_methods) or 'no stated method'}, "
+                             f"and this server requires one of {list(required)} (amr)")
     return Provenance(
         author_kind=kind, registered_by=principal.user_id, registered_as=principal.actor_kind,
         on_behalf_of=principal.on_behalf_of, agent=claim.get("agent") or (principal.user_id if principal.actor_kind == "agent" else None),

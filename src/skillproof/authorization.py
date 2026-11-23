@@ -52,6 +52,7 @@ class Principal:
     on_behalf_of: str | None = None   # the person an agent identity acts for
     identity_source: str = "local"    # 'oidc' for a verified access token, 'local' for development sign-in
     signed_in_at: int | None = None   # the token's auth_time: when the person last signed in interactively (epoch s)
+    sign_in_methods: tuple[str, ...] = ()  # the token's amr: how that sign-in was done (pwd, mfa, hwk, otp, ...)
 
     def __post_init__(self) -> None:
         if not self.user_id.strip() or not self.tenant_id.strip():

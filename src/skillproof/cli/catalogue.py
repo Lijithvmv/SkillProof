@@ -18,6 +18,69 @@ from skillproof.cli.common import DEFAULT_CATALOGUE, catalogue_at, checker, impo
 Result = tuple[dict[str, Any], int]
 
 
+def _https_or_loopback(url: str, label: str) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
+        raise ValueError(f"the {label} must be an https URL (plain http only to this machine)")
+
+
+def client_credentials_token(*, client_id: str, secret: str, token_url: str = "", issuer: str = "", scope: str = "",
+                             post=None) -> str:
+    """An access token for this machine from the identity provider (OAuth 2.0 client credentials grant). The token
+    endpoint is `token_url`, or found through the issuer's OpenID discovery document. Never uses a person's sign-in."""
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlencode
+
+    if not client_id or not secret:
+        raise ValueError("a machine client id and secret are needed for the client credentials grant")
+    if not token_url:
+        if not issuer:
+            raise ValueError("pass --token-url or --issuer to find the token endpoint")
+        _https_or_loopback(issuer, "issuer")
+        with urllib.request.urlopen(issuer.rstrip("/") + "/.well-known/openid-configuration", timeout=30) as response:
+            token_url = json.loads(response.read()).get("token_endpoint") or ""
+        if not token_url:
+            raise RuntimeError("the issuer's discovery document has no token_endpoint")
+    _https_or_loopback(token_url, "token endpoint")
+    form = {"grant_type": "client_credentials", "client_id": client_id, "client_secret": secret}
+    if scope:
+        form["scope"] = scope
+    body = urlencode(form).encode()
+    if post is not None:
+        return post(token_url, body)
+    request = urllib.request.Request(token_url, data=body, method="POST",
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            token = json.loads(response.read()).get("access_token")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"the token endpoint answered HTTP {exc.code}: {exc.read()[:200].decode('utf-8', 'replace')}") from exc
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("the token endpoint returned no access_token")
+    return token
+
+
+def machine_token(args) -> str:
+    """The bearer token a machine command uses: from the client credentials grant when a client id is given, else
+    from the environment variable named by --token-env (empty for a local development server)."""
+    if getattr(args, "client_id", None):
+        return client_credentials_token(client_id=args.client_id, secret=os.environ.get(args.client_secret_env, "").strip(),
+                                        token_url=args.token_url or "", issuer=args.issuer or "", scope=args.scope or "")
+    return os.environ.get(args.token_env, "").strip()
+
+
+def _machine_auth(parser) -> None:
+    parser.add_argument("--token-env", default="SKILLPROOF_TOKEN", help="Environment variable holding a bearer access token (a reporter-role token).")
+    parser.add_argument("--client-id", help="Machine client id: get a token from the identity provider (client credentials) instead of --token-env.")
+    parser.add_argument("--client-secret-env", default="SKILLPROOF_CLIENT_SECRET", help="Environment variable holding the machine client's secret (never passed on the command line).")
+    parser.add_argument("--issuer", help="Identity provider issuer; its token endpoint is found by OpenID discovery.")
+    parser.add_argument("--token-url", help="Token endpoint, when not using --issuer.")
+    parser.add_argument("--scope", help="Scope to request with the client credentials grant, if the provider needs one.")
+
+
 def _roots(args) -> list[Path]:
     roots = [Path(r) for r in args.root] or default_roots()
     if not roots:
@@ -102,7 +165,7 @@ def send_fleet_report(server: str, token: str, host: str | None, roots: list[Pat
 
 def run_fleet_report(args) -> Result:
     try:
-        result = send_fleet_report(args.server, os.environ.get(args.token_env, "").strip(), args.host, _roots(args))
+        result = send_fleet_report(args.server, machine_token(args), args.host, _roots(args))
         return result, 1 if result.get("counts", {}).get("running_unapproved") else 0
     except (OSError, ValueError, RuntimeError) as exc:
         return {"error": str(exc)}, 4
@@ -161,7 +224,7 @@ def run_sync(args) -> Result:
         roots = _roots(args)
         governance = None
         if args.server:
-            source = ServerApproved(args.server, os.environ.get(args.token_env, "").strip())
+            source = ServerApproved(args.server, machine_token(args))
         else:
             governance = catalogue_at(Path(args.data_dir))
             source = LocalApproved(governance, checker(args.tenant))
@@ -185,7 +248,7 @@ def run_sync(args) -> Result:
 def add(commands, conf) -> None:
     sync = commands.add_parser("sync", help="Make this machine run what the catalogue approved: replace installed skills that are not the approved version (the old folder is moved to quarantine, never deleted), report unapproved ones (quarantine them with --strict). Shows the plan unless --apply. Exit 1 when something is (or, without --apply, would be) changed or cannot be fixed.")
     sync.add_argument("--server", help="SkillProof server URL; omit to use the local catalogue in --data-dir.")
-    sync.add_argument("--token-env", default="SKILLPROOF_TOKEN", help="Environment variable holding the bearer access token.")
+    _machine_auth(sync)
     sync.add_argument("--data-dir", default=conf.data_dir or str(DEFAULT_CATALOGUE), help="Local catalogue storage, when no --server is given.")
     sync.add_argument("--tenant", default="local")
     sync.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
@@ -226,7 +289,7 @@ def add(commands, conf) -> None:
 
     report = commands.add_parser("fleet-report", help="Send this machine's installed skills (names and package fingerprints, never contents) to a SkillProof server, which compares them with the approved versions. Exit 1 when a skill runs unapproved.")
     report.add_argument("--server", required=True, help="Server base URL, e.g. https://skillproof.example.org")
-    report.add_argument("--token-env", default="SKILLPROOF_TOKEN", help="Environment variable holding the bearer access token (a reporter-role token).")
+    _machine_auth(report)
     report.add_argument("--host", default=None, help="Machine name to report as (default: this computer's name).")
     report.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
     report.add_argument("--output", default="-")

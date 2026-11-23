@@ -112,7 +112,7 @@ def test_a_cited_load_rate_reaches_the_decision(tmp_path):
     report = execute_experiment(tasks=tasks, skill_instructions=SKILL, runner=Echo(), evaluator=CheckedEvaluator(None), repeats=2)
     load = measure_activation(target=SkillCard("release-notes", "Write release notes."),
                               distractors=[SkillCard("changelog-writer", "Write a changelog.")],
-                              relevant_requests=[t.prompt for t in tasks], unrelated_requests=[], probe=RarelyPicked(), repeats=2)
+                              relevant_requests=[t.prompt for t in tasks], unrelated_requests=[], probe=RarelyPicked(), repeats=10)
     load.pop("records")
     report["comparison"]["load_rate"] = load
     governance.record_evaluation(evaluator, report, skill_key="release-notes")
@@ -276,3 +276,28 @@ def test_tenant_load_rate_thresholds(tmp_path):
             raise AssertionError("history must be append-only")
         except sqlite3.DatabaseError as exc:
             assert "append-only" in str(exc)
+
+
+# Decision: with an interval, the gate decides only what the data shows. The two real review-security runs (3 of 8,
+# 9 of 12) sit on either side of the 50% floor, but the floor lies inside both intervals, so neither may pass or fail
+# the version: both are insufficient evidence. A run whose whole interval is clear of the floor passes or fails.
+def test_the_gate_respects_the_uncertainty_of_the_run():
+    from skillproof.engines.activation import wilson
+
+    for hits, total in ((3, 8), (9, 12)):
+        gated = assurance()
+        catalogue.apply_load_rate(gated, {"activation_rate": hits / total, "interval_95": wilson(hits, total),
+                                          "relevant_trials": total, "candidate_skills": 24,
+                                          "requests_lost_to": {"claude-security": [0, 3]}})
+        gate = gated["gates"][-1]
+        assert gate["status"] == "insufficient_evidence" and gated["decision"] == "insufficient_evidence"
+        assert "run more choices" in gate["message"] and "claude-security (2)" in gate["message"]
+    clear_fail, clear_pass = assurance(), assurance()
+    catalogue.apply_load_rate(clear_fail, {"activation_rate": 0.2, "interval_95": wilson(6, 30), "relevant_trials": 30, "candidate_skills": 9})
+    catalogue.apply_load_rate(clear_pass, {"activation_rate": 1.0, "interval_95": wilson(16, 16), "relevant_trials": 16, "candidate_skills": 9,
+                                           "false_activation_rate": 0.0, "false_interval_95": wilson(0, 20)})
+    assert clear_fail["decision"] == "not_ready" and clear_pass["gates"][-1]["status"] == "pass"
+    noisy = assurance()
+    catalogue.apply_load_rate(noisy, {"activation_rate": 1.0, "interval_95": wilson(16, 16), "relevant_trials": 16, "candidate_skills": 9,
+                                      "false_activation_rate": 0.25, "false_interval_95": wilson(2, 8)})
+    assert noisy["gates"][-1]["status"] == "insufficient_evidence"  # 25% unrelated, but 2 of 8 cannot show it is over 20%

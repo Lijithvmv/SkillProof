@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -232,3 +233,46 @@ def test_import_stores_the_package_of_a_version_registered_before_packages_were_
     assert governance.approved_set(VIEWER)[0]["distributable"] is True
     assert import_installed(governance, IMPORTER, [root])["packages_stored_for_existing_versions"] == []
     close(governance)
+
+
+# Decision: a machine gets its own token from the identity provider (client credentials, token endpoint found by
+# OpenID discovery), never a person's: the token carries the machine's role and no interactive sign-in time, and a
+# wrong secret gets no token.
+def test_machines_get_their_own_token_with_client_credentials(monkeypatch):
+    import importlib.util
+    import sys
+
+    import jwt as pyjwt
+
+    from skillproof.cli.catalogue import client_credentials_token, machine_token
+
+    spec = importlib.util.spec_from_file_location("dev_oidc_provider", Path(__file__).parents[1] / "scripts" / "dev_oidc_provider.py")
+    provider = importlib.util.module_from_spec(spec)
+    sys.modules["dev_oidc_provider"] = provider
+    spec.loader.exec_module(provider)
+    idp = TestClient(provider.create_app("http://127.0.0.1:8099", ["http://127.0.0.1:8098/catalogue"],
+                                         machines={"sync-host-1": {"secret": "s" * 20, "role": "reporter", "tenant": "local"}}))
+
+    def post(url, body):
+        assert url == "http://127.0.0.1:8099/token"
+        response = idp.post("/token", content=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}")
+        return response.json()["access_token"]
+
+    token = client_credentials_token(client_id="sync-host-1", secret="s" * 20, token_url="http://127.0.0.1:8099/token", post=post)
+    claims = pyjwt.decode(token, options={"verify_signature": False})
+    assert claims["sub"] == "sync-host-1" and claims["skillproof_role"] == "reporter" and "auth_time" not in claims
+    with pytest.raises(RuntimeError, match="401"):
+        client_credentials_token(client_id="sync-host-1", secret="wrong" * 4, token_url="http://127.0.0.1:8099/token", post=post)
+    with pytest.raises(ValueError, match="https"):
+        client_credentials_token(client_id="sync-host-1", secret="s" * 20, token_url="http://idp.example.com/token", post=post)
+
+    import skillproof.cli.catalogue as cli_catalogue
+
+    discovered = {}
+    monkeypatch.setenv("SKILLPROOF_CLIENT_SECRET", "s" * 20)
+    monkeypatch.setattr(cli_catalogue, "client_credentials_token", lambda **kw: discovered.update(kw) or "tok")
+    args = SimpleNamespace(client_id="sync-host-1", client_secret_env="SKILLPROOF_CLIENT_SECRET", token_url=None,
+                           issuer="http://127.0.0.1:8099", scope=None, token_env="SKILLPROOF_TOKEN")
+    assert machine_token(args) == "tok" and discovered["secret"] == "s" * 20 and discovered["issuer"] == "http://127.0.0.1:8099"

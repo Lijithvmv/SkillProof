@@ -17,6 +17,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated) |
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
 | SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE | human_attestation_max_age_seconds | seconds since the token's interactive sign-in (auth_time) within which a "human-written" attestation counts (900) |
+| SKILLPROOF_HUMAN_ATTESTATION_AMR | human_attestation_methods | comma-separated sign-in methods (amr), at least one of which a "human-written" attestation's token must show, e.g. mfa,hwk (empty: not required) |
 | SKILLPROOF_MIN_LOAD_RATE / SKILLPROOF_MAX_FALSE_LOAD_RATE | min_load_rate, max_false_load_rate | load-rate gate: least share of relevant requests that pick the skill (0.5), most share of unrelated ones (0.2) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
 | SKILLPROOF_SECOND_OPINION_MODEL / _URL | second_opinion | local-model second opinion on risk items; off when no model is set |
@@ -106,6 +107,9 @@ class Settings:
     # A person's attestation that they wrote a version counts only from a token whose interactive sign-in (auth_time)
     # is this recent; an unattended agent using a person's token carries an old one.
     human_attestation_max_age_seconds: int = 900
+    # Sign-in methods (amr) of which at least one must appear for a "human-written" attestation, e.g. ("mfa", "hwk").
+    # Empty: not required.
+    human_attestation_methods: tuple[str, ...] = ()
     min_load_rate: float = 0.5
     max_false_load_rate: float = 0.2
 
@@ -146,6 +150,7 @@ def settings() -> Settings:
         pilot_model=_get("SKILLPROOF_MODEL") or _get("SKILLPROOF_OPENAI_MODEL"),
         pilot_grader_model=_get("SKILLPROOF_GRADER_MODEL") or _get("SKILLPROOF_OPENAI_GRADER_MODEL"),
         human_attestation_max_age_seconds=_int("SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE", 900),
+        human_attestation_methods=tuple(m.strip() for m in (_get("SKILLPROOF_HUMAN_ATTESTATION_AMR") or "").split(",") if m.strip()),
         min_load_rate=_float("SKILLPROOF_MIN_LOAD_RATE", 0.5),
         max_false_load_rate=_float("SKILLPROOF_MAX_FALSE_LOAD_RATE", 0.2),
     )

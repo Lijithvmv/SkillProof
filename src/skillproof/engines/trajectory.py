@@ -65,6 +65,7 @@ def summarize(records: list[dict[str, Any]], static_manifest: dict[str, Any] | N
     if not runs["skill_enabled"] and not runs["baseline"]:
         return None
     judged = {c: [judge_run(r["trajectory"]) for r in runs[c]] for c in CONDITIONS}
+    ran = any(e.get("outcome") == "ran" for c in CONDITIONS for r in runs[c] for e in r["trajectory"].get("events") or [])
     total = {c: len(judged[c]) for c in CONDITIONS}
 
     def share(count: int, condition: str) -> float:
@@ -120,6 +121,10 @@ def summarize(records: list[dict[str, Any]], static_manifest: dict[str, Any] | N
         "behaviours": sorted(behaviour_rows.values(), key=order),
         "static_manifest_compared": static_manifest is not None,
         "meaning": meaning,
-        "limitations": "Commands were recorded, not run, and URLs were not fetched, so what an agent would have done "
-                       "with their output is not observed. A behaviour no run showed is not proven absent.",
+        "programs_ran": ran,
+        "limitations": ("Commands other than read-only inspection ran isolated (bubblewrap: no network, only the workspace "
+                        "writable), and the files they changed were judged; what a program read is not observed, and URLs "
+                        "were not fetched." if ran else
+                        "Commands were recorded, not run, and URLs were not fetched, so what an agent would have done "
+                        "with their output is not observed.") + " A behaviour no run showed is not proven absent.",
     }

@@ -318,6 +318,7 @@ class OllamaToolRunner:
         self, *, model: str, skill_files: dict[str, bytes], base_url: str = DEFAULT_OLLAMA_URL, timeout: float = 600,
         max_output_tokens: int = 2048, temperature: float = 0.7, seed: int | None = 0, max_steps: int = 12,
         sandbox_base: str | None = None, allow_remote: bool = False, client: Any | None = None,
+        program_runner: Any | None = None,
     ):
         if not model.strip():
             raise ValueError("model must be explicitly configured")
@@ -325,7 +326,7 @@ class OllamaToolRunner:
             raise ValueError("max_steps must be from 1 to 50")
         self.model, self.skill_files, self.max_steps = model, dict(skill_files), max_steps
         self.temperature, self.max_output_tokens, self.seed, self.calls = temperature, max_output_tokens, seed, 0
-        self.sandbox_base = sandbox_base
+        self.sandbox_base, self.program_runner = sandbox_base, program_runner  # program_runner: commands really run, isolated
         self.client = client or _OllamaClient(base_url=base_url, timeout=timeout, allow_remote=allow_remote)
 
     def run(self, *, prompt: str, context: str | None, skill_instructions: str | None) -> AgentResult:
@@ -339,7 +340,7 @@ class OllamaToolRunner:
 
         enabled = skill_instructions is not None
         sandbox = Sandbox.create(task.workspace, self.skill_files if enabled else None, allowed_writes=task.allowed_writes,
-                                 base=self.sandbox_base)
+                                 base=self.sandbox_base, runner=self.program_runner)
         system = BASELINE_POLICY + "\n\n" + SANDBOX_NOTE
         if enabled:
             system += "\n\nSkill instructions (the skill's files are in skill/):\n" + str(skill_instructions)

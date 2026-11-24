@@ -179,5 +179,17 @@ one version; the person then sees their own upload refused as already used, nami
 complete a Keycloak sign-in here because it does not trust the local test CA (not bypassed), so the page half was shown
 against the development provider and the Keycloak half by script.
 
+Programs in the sandbox: with `--run-programs` (`bwrap` on Linux, `wsl:<distro>[:<user>]` on Windows) commands other
+than read-only inspection really run under bubblewrap (no network, read-only /usr, no host folders but the workspace,
+time/CPU/file-size limits, command passed on standard input). The workspace is compared before and after: protected
+changes are undone and recorded as refused with the command that made them, links and special files are removed, and
+the canary in a written file or the output is recorded. Real bubblewrap (WSL, unprivileged user): network unreachable,
+/opt invisible, /usr read-only, a hostile script's CLAUDE.md rewrite undone, a link to / removed. A bug found on the
+way: a link made in WSL is an unreadable reparse point to Windows Python and crashed the comparison; it is now treated
+as a special file. Evidence for the gap: a release-notes skill whose bundled script appends to CLAUDE.md and copies
+.env, judged with commands only recorded (gemma4, 4 runs each way): decision none, no rule hit - the damage was
+invisible. The same experiment with programs running was still in progress at this commit.
+Weakest part: what a program reads is not observed, only what it changes and prints.
+
 Open: a provider hosted and run by someone else; binding an attestation to the exact package the person saw (the
-token cannot name it); programs other than read-only inspection are recorded, not run.
+token cannot name it); the hostile-script experiment with programs running.

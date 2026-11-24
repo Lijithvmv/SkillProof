@@ -3,6 +3,7 @@ pilot with blind human review, grader checks and agreement, and monitoring of re
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +77,21 @@ def evaluate_skill(args) -> dict[str, Any]:
         folder = Path(args.skill)
         files, _ = package.read_folder(folder.parent if folder.name == "SKILL.md" else folder)
         skill_manifest = build_manifest(files)
+        programs = None
+        if args.run_programs:
+            import tempfile
+
+            from skillproof.engines.sandbox import BubblewrapRunner
+
+            programs = BubblewrapRunner.from_spec(args.run_programs, seconds=args.program_seconds)
+            probe = Path(tempfile.mkdtemp(prefix="skillproof-probe-", dir=args.sandbox_dir))
+            problem = programs.check(probe)
+            shutil.rmtree(probe, ignore_errors=True)
+            if problem:
+                raise SystemExit(f"--run-programs {args.run_programs}: bubblewrap does not run here ({problem})")
         runner = OllamaToolRunner(model=args.model, skill_files=files, base_url=args.ollama_url, seed=args.seed,
-                                  max_output_tokens=args.max_output_tokens, max_steps=args.max_steps, sandbox_base=args.sandbox_dir)
+                                  max_output_tokens=args.max_output_tokens, max_steps=args.max_steps, sandbox_base=args.sandbox_dir,
+                                  program_runner=programs)
     else:
         runner = OllamaRunner(model=args.model, base_url=args.ollama_url, seed=args.seed, max_output_tokens=args.max_output_tokens)
     experiment = execute_experiment(tasks=tasks, skill_instructions=text, runner=runner, evaluator=CheckedEvaluator(judge),
@@ -346,9 +360,14 @@ def add(commands, conf) -> None:
     evaluate.add_argument("--repeats", type=int, default=2)
     evaluate.add_argument("--seed", type=int, default=0)
     evaluate.add_argument("--max-output-tokens", type=int, default=3000)
-    evaluate.add_argument("--sandbox", action="store_true", help="Let the agent act through tools (files, commands, URLs) in a sandbox and record what it does: protected writes, the canary credential, and behaviour the skill's files do not show. Commands are recorded, never run. Exit 1 when the skill causes block- or ask-level behaviour.")
+    evaluate.add_argument("--sandbox", action="store_true", help="Let the agent act through tools (files, commands, URLs) in a sandbox and record what it does: protected writes, the canary credential, and behaviour the skill's files do not show. Commands are recorded, never run, unless --run-programs. Exit 1 when the skill causes block- or ask-level behaviour.")
     evaluate.add_argument("--max-steps", type=int, default=12, help="Tool calls per sandboxed run.")
     evaluate.add_argument("--sandbox-dir", help="Folder for the temporary workspaces (default: the system temp folder).")
+    evaluate.add_argument("--run-programs", metavar="RUNNER", help="With --sandbox: really run commands other than read-only "
+                          "inspection, isolated by bubblewrap (no network, only the workspace writable): 'bwrap' on Linux, "
+                          "'wsl:<distro>[:<user>]' on Windows. Files a program changes go through the sandbox's write rules; "
+                          "protected changes are undone and recorded. Without it, such commands are recorded, not run.")
+    evaluate.add_argument("--program-seconds", type=int, default=20, help="Time limit per command with --run-programs.")
     evaluate.add_argument("--load-rate", action="store_true", help="Also measure how often the model picks this skill from its description among the installed skills it competes with (the most similar descriptions). Exit 1 when it is picked for fewer relevant requests than SKILLPROOF_MIN_LOAD_RATE or for more unrelated ones than SKILLPROOF_MAX_FALSE_LOAD_RATE.")
     evaluate.add_argument("--embed-model", default="nomic-embed-text", help="Local Ollama embedding model used to add rivals by meaning: the installed skills that best match the skill's own requests. Pass '' to use word overlap only.")
     evaluate.add_argument("--competitors", type=int, default=15, help="How many of the most similar installed skills compete with it.")

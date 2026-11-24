@@ -134,8 +134,12 @@ def test_an_attestation_is_bound_to_the_exact_package(tmp_path, monkeypatch):
         location = provider.post("/authorize", data=form, follow_redirects=False).headers["location"]
         return exchange(provider, parse_qs(urlparse(location).query)["code"][0], verifier_text).json()
 
-    def pkg(n):  # distinct bytes per case: re-uploading identical bytes returns the version already registered
-        return zip_of(SKILL + f"\nVariant {n}.\n")
+    built: dict = {}
+
+    def pkg(n):  # distinct bytes per case, built once: a zip records the time, so building it twice can change the bytes
+        if n not in built:
+            built[n] = zip_of(SKILL + f"\nVariant {n}.\n")
+        return built[n]
 
     tokens = sign_in_for(package_nonce(pkg("A"), salt))
     governance = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "registry.db"), approvals=SQLiteApprovalStore(tmp_path / "approvals.db"),

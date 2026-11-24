@@ -367,7 +367,8 @@ def add(commands, conf) -> None:
                           "inspection, isolated by bubblewrap (no network, only the workspace writable): 'bwrap' on Linux, "
                           "'wsl:<distro>[:<user>]' on Windows. Files a program changes go through the sandbox's write rules; "
                           "protected changes are undone and recorded. Without it, such commands are recorded, not run.")
-    evaluate.add_argument("--program-seconds", type=int, default=20, help="Time limit per command with --run-programs.")
+    evaluate.add_argument("--program-seconds", type=int, default=60, help="Time limit per command with --run-programs; a command "
+                          "stopped at the limit is recorded as program_not_observed (ask), never as clean.")
     evaluate.add_argument("--load-rate", action="store_true", help="Also measure how often the model picks this skill from its description among the installed skills it competes with (the most similar descriptions). Exit 1 when it is picked for fewer relevant requests than SKILLPROOF_MIN_LOAD_RATE or for more unrelated ones than SKILLPROOF_MAX_FALSE_LOAD_RATE.")
     evaluate.add_argument("--embed-model", default="nomic-embed-text", help="Local Ollama embedding model used to add rivals by meaning: the installed skills that best match the skill's own requests. Pass '' to use word overlap only.")
     evaluate.add_argument("--competitors", type=int, default=15, help="How many of the most similar installed skills compete with it.")

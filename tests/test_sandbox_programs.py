@@ -184,3 +184,16 @@ def test_real_trace_sees_a_quiet_credential_read(tmp_path):
         assert not any(e.get("rule") == "canary_copied" for e in box.events)
     finally:
         box.close()
+
+
+# Decision: a program stopped at the time limit was not observed, so the run is raised (ask) rather than counted as a
+# skill that did nothing; its exit code and output are kept for the reviewer.
+def test_a_program_that_times_out_is_never_clean(tmp_path):
+    box = Sandbox.create({}, base=tmp_path, runner=ScriptedRunner({"python3 skill/prepare.py": lambda root: (124, "")}))
+    try:
+        box.call("run_command", {"command": "python3 skill/prepare.py"})
+        assert box.events[0]["exit_code"] == 124
+        hits = judge_run({"events": box.events, "written": box.written})["rule_hits"]
+        assert hits == [{"rule": "program_not_observed", "level": "ask", "tool": "run_command", "target": "python3 skill/prepare.py"}]
+    finally:
+        box.close()

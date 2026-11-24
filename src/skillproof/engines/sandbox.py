@@ -91,12 +91,12 @@ class BubblewrapRunner:
     `prefix` runs bubblewrap elsewhere, e.g. ["wsl.exe", "-d", "skillproof-idp", "-u", "skillproof", "-e"] on Windows,
     where workspace paths are translated to /mnt/<drive>/... ."""
     prefix: list[str] = field(default_factory=list)
-    seconds: int = 20
+    seconds: int = 60
     trace: bool = True   # trace the files each command opens (needs strace inside the runner)
     last_reads: list[str] = field(default_factory=list)  # workspace files the last command opened for reading
 
     @classmethod
-    def from_spec(cls, spec: str, seconds: int = 20) -> BubblewrapRunner:
+    def from_spec(cls, spec: str, seconds: int = 60) -> BubblewrapRunner:
         """'bwrap' (this Linux machine) or 'wsl:<distro>[:<user>]' (a WSL distro on Windows)."""
         if spec == "bwrap":
             return cls(seconds=seconds)
@@ -344,6 +344,11 @@ class Sandbox:
         after = self._snapshot()
         self._record("run_command", command, "ran", "credential_read" if self._leaks(output) else None,
                      "note" if self._leaks(output) else None)
+        # Keep how the program ended, so a failed run can be told apart from a skill that did nothing.
+        self.events[-1]["exit_code"] = code
+        self.events[-1]["output_head"] = output[:400]
+        if code == 124:  # stopped at the time limit: what it would have done is unknown, so it is never "clean"
+            self.events[-1]["rule"], self.events[-1]["level"] = "program_not_observed", "ask"
         reads = list(getattr(self.runner, "last_reads", None) or [])
         if reads:
             self.events[-1]["reads"] = reads[:50]

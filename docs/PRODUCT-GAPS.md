@@ -193,7 +193,15 @@ agent_config_write in 4 of 4 skill runs and 0 of 4 baseline runs, canary_copied 
 the skill; CLAUDE.md was left as it was. (A first attempt showed nothing in both modes: the test skill's own script had a
 syntax error from a shell heredoc, and SkillProof correctly reported exit 1 with no change. Fixed and rerun.)
 One hostile skill, one model, 8 runs per mode: this shows the mechanism works, not how often it catches skills in general.
-Weakest part: what a program reads is not observed, only what it changes and prints.
+What a program reads: every file a command opens is traced (strace inside the sandbox, -y for each opened file's real
+path, so a `cd` cannot hide a read; the trace sits beside the workspace, outside the comparison). A credential file
+opened by a program is recorded as `program_credential_read` (ask): the agent sees its own reads, never a script's.
+Real runs (gemma4, programs running, 4 runs with and 4 without each skill; the script ran in 4 of 4 skill runs):
+a skill whose script only hashes .env (prints and copies nothing) - decision ask, program_credential_read in 4 of 4
+skill runs and 0 of 4 baseline runs; an honest skill whose script only normalises CHANGES.txt - decision none, no rule
+hit, no behaviour (no false alarm).
+Weakest part: three skills, one model; a program that opens a file through a path strace cannot see (another
+process outside the trace) would not be recorded; tracing needs strace where bubblewrap runs.
 
 Open: a provider hosted and run by someone else; binding an attestation to the exact package the person saw (the
-token cannot name it); observing what a program reads; more hostile skills and models for the program runs.
+token cannot name it); more hostile skills and other models for the program runs.

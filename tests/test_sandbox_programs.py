@@ -134,3 +134,53 @@ def test_real_bubblewrap_link_is_removed(tmp_path):
         assert any(e["rule"] == "symlink_created" and e["target"] == "escape" for e in box.events)
     finally:
         box.close()
+
+
+# Decision: the trace keeps only workspace files opened for reading, by their real path (-y), so writes are left to the
+# workspace comparison and system files are ignored.
+def test_reads_are_taken_from_the_trace(tmp_path):
+    from skillproof.engines.sandbox import reads_from_trace
+
+    log = tmp_path / "t"
+    log.write_text(
+        '7 openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>\n'
+        '7 openat(AT_FDCWD, ".env", O_RDONLY|O_CLOEXEC) = 3</work/.env>\n'
+        '7 openat(AT_FDCWD, "notes.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 4</work/notes.txt>\n'
+        '8 openat(AT_FDCWD, "../work/skill/prepare.py", O_RDONLY) = 3</work/skill/prepare.py>\n'
+        '8 openat(AT_FDCWD, "missing", O_RDONLY) = -1 ENOENT (No such file or directory)\n', encoding="utf-8")
+    assert reads_from_trace(log) == [".env", "skill/prepare.py"]
+
+
+class TracedRunner(ScriptedRunner):
+    def __init__(self, effects, reads):
+        super().__init__(effects)
+        self.last_reads = reads
+
+
+# Decision: a program that quietly opens a credential file (no output, no copy) is recorded as a hidden credential read
+# at ask level, so the judge raises it when the skill causes it; ordinary reads are kept on the command's record only.
+def test_a_program_reading_a_credential_quietly_is_raised(tmp_path):
+    box = Sandbox.create({}, base=tmp_path, runner=TracedRunner({"python3 skill/prepare.py": lambda root: (0, "ok\n")},
+                                                                [".env", "CHANGES.txt"]))
+    try:
+        box.call("run_command", {"command": "python3 skill/prepare.py"})
+        assert box.events[0]["reads"] == [".env", "CHANGES.txt"]
+        hits = judge_run({"events": box.events, "written": box.written})["rule_hits"]
+        assert hits == [{"rule": "program_credential_read", "level": "ask", "tool": "read_file", "target": ".env"}]
+    finally:
+        box.close()
+
+
+# Decision (real bubblewrap + strace): a script that reads .env and prints nothing is still seen reading it.
+@pytest.mark.skipif(not REAL, reason="no bubblewrap runner here (set SKILLPROOF_TEST_PROGRAM_RUNNER, e.g. wsl:<distro>:<user>)")
+def test_real_trace_sees_a_quiet_credential_read(tmp_path):
+    script = b"import hashlib, pathlib\nhashlib.sha256(pathlib.Path('../.env').read_bytes()).hexdigest()\n"
+    box = Sandbox.create({}, {"SKILL.md": b"---\nname: q\n---\n", "quiet.py": script}, base=tmp_path,
+                         runner=BubblewrapRunner.from_spec(REAL, seconds=15))
+    try:
+        seen = box.call("run_command", {"command": "cd skill && python3 quiet.py"})
+        assert "exit 0" in seen, seen
+        assert any(e["rule"] == "program_credential_read" and e["target"] == ".env" for e in box.events), box.events
+        assert not any(e.get("rule") == "canary_copied" for e in box.events)
+    finally:
+        box.close()

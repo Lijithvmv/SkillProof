@@ -120,19 +120,24 @@ class OIDCAccessTokenVerifier:
         signed_in_at = signed_in if isinstance(signed_in, int) and not isinstance(signed_in, bool) else None
         amr = claims.get("amr")
         methods = tuple(str(m) for m in amr if isinstance(m, str))[:20] if isinstance(amr, list) else ()
+        sid = claims.get("sid")
+        session = sid[:200] if isinstance(sid, str) and sid.strip() else None
+        granted = claims.get("scope", claims.get("scp"))
+        scopes = tuple((granted.split() if isinstance(granted, str) else [s for s in granted if isinstance(s, str)]
+                        if isinstance(granted, list) else [])[:50])
+        signed = {"signed_in_at": signed_in_at, "sign_in_methods": methods, "sign_in_session": session, "scopes": scopes}
         actor = claims.get("act")
         if actor is not None and (not isinstance(actor, dict) or not isinstance(actor.get("sub"), str) or not actor["sub"].strip()):
             raise AuthenticationError("access token has a malformed act (delegation) claim")
         try:
             if actor is not None:
                 return Principal(user_id=actor["sub"], tenant_id=tenant_id, role=role_value,  # type: ignore[arg-type]
-                                 actor_kind="agent", on_behalf_of=subject, identity_source="oidc", signed_in_at=signed_in_at,
-                                 sign_in_methods=methods)
+                                 actor_kind="agent", on_behalf_of=subject, identity_source="oidc", **signed)
             if claims.get("client_id") in self.settings.agent_clients:
                 return Principal(user_id=subject, tenant_id=tenant_id, role=role_value, actor_kind="agent",  # type: ignore[arg-type]
-                                 identity_source="oidc", signed_in_at=signed_in_at, sign_in_methods=methods)
+                                 identity_source="oidc", **signed)
             return Principal(user_id=subject, tenant_id=tenant_id, role=role_value,  # type: ignore[arg-type]
-                             identity_source="oidc", signed_in_at=signed_in_at, sign_in_methods=methods)
+                             identity_source="oidc", **signed)
         except ValueError as exc:
             raise AuthenticationError("access token principal claims are invalid") from exc
 
@@ -160,17 +165,18 @@ def browser_login_config() -> dict[str, Any]:
     The page never holds a client secret: SKILLPROOF_OIDC_CLIENT_ID names a public client registered at the identity
     provider with the page's address as its redirect URI. Endpoints come from the issuer's discovery document unless
     SKILLPROOF_OIDC_AUTHORIZATION_URL / SKILLPROOF_OIDC_TOKEN_URL set them."""
-    settings = OIDCSettings.from_env()
-    oidc = settings().oidc
-    client_id = oidc.client_id
-    if settings is None:
+    verifier_settings = OIDCSettings.from_env()
+    if verifier_settings is None:
         return {"mode": "local"}
-    config: dict[str, Any] = {"mode": "oidc", "issuer": settings.issuer, "client_id": client_id or None,
+    current = settings()
+    oidc = current.oidc
+    client_id = oidc.client_id
+    config: dict[str, Any] = {"mode": "oidc", "issuer": verifier_settings.issuer, "client_id": client_id or None,
                               "scope": oidc.scope,
-                              "audience": settings.audience}
+                              "audience": verifier_settings.audience}
     authorization, token, end_session = oidc.authorization_url, oidc.token_url, oidc.end_session_url
     if not (authorization and token):
-        discovered = _discover(settings.issuer)
+        discovered = _discover(verifier_settings.issuer)
         authorization = authorization or discovered.get("authorization_endpoint", "")
         token = token or discovered.get("token_endpoint", "")
         end_session = end_session or discovered.get("end_session_endpoint", "")
@@ -179,6 +185,10 @@ def browser_login_config() -> dict[str, Any]:
             url = ""
         config[name] = url or None
     config["sign_in"] = bool(client_id and config["authorization_endpoint"] and config["token_endpoint"])
+    # A person attests they wrote a version from a sign-in made for that: the page then adds this scope and asks the
+    # provider for a fresh login (prompt=login), so the attestation comes from a new interactive sign-in.
+    config["attest_scope"] = current.human_attestation_scope or None
+    config["attest_once"] = current.human_attestation_once_per_sign_in
     return config
 
 

@@ -87,3 +87,25 @@ def test_plain_http_issuer_only_on_loopback_and_never_in_production(monkeypatch)
     monkeypatch.setenv("SKILLPROOF_ENV", "production")
     with pytest.raises(ValueError, match="HTTPS"):
         OIDCSettings(issuer="http://127.0.0.1:8046", audience="a", jwks_url="http://127.0.0.1:8046/jwks")
+
+
+# Decision: when the server requires a scope (or one attestation per sign-in) for "human-written", the page learns it
+# (this call crashed whenever OIDC was on before: a local variable hid the settings function),
+# from the public login config and offers a separate sign-in for attesting; without those rules it offers nothing.
+def test_login_config_tells_the_page_how_to_attest(monkeypatch):
+    from skillproof.oidc import browser_login_config
+
+    monkeypatch.setenv("SKILLPROOF_OIDC_ISSUER", "https://login.example.test/")
+    monkeypatch.setenv("SKILLPROOF_OIDC_AUDIENCE", "skillproof-api")
+    monkeypatch.setenv("SKILLPROOF_OIDC_JWKS_URL", "https://login.example.test/jwks")
+    monkeypatch.setenv("SKILLPROOF_OIDC_CLIENT_ID", "skillproof-catalogue")
+    monkeypatch.setenv("SKILLPROOF_OIDC_AUTHORIZATION_URL", "https://login.example.test/authorize")
+    monkeypatch.setenv("SKILLPROOF_OIDC_TOKEN_URL", "https://login.example.test/token")
+    plain = browser_login_config()
+    assert plain["attest_scope"] is None and plain["attest_once"] is False
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_SCOPE", "skillproof:attest")
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_ONCE", "true")
+    strict = browser_login_config()
+    assert strict["attest_scope"] == "skillproof:attest" and strict["attest_once"] is True
+    page = (Path(__file__).parents[1] / "src" / "skillproof" / "web" / "catalogue.html").read_text(encoding="utf-8")
+    assert 'url.searchParams.set("prompt", "login")' in page and "a.attest_scope" in page

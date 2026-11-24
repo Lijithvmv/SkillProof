@@ -156,5 +156,28 @@ claim `otp`. A trap found on the way: a method reference without a max age is dr
 now sets `default.reference.maxAge`. Python needs a proper CA (basic constraints and key usage) to trust the server.
 Weakest part: still one machine, a test CA and test users; not a hosted provider run by someone else.
 
-Open: a provider hosted and run by someone else; a person's fresh, strong token used by an agent; programs other than
-read-only inspection are recorded, not run.
+An agent holding a person's fresh, strong token: bearer tokens cannot say who presents them, so two opt-in rules make
+such a token far less useful for attesting. (1) One attestation per sign-in (`SKILLPROOF_HUMAN_ATTESTATION_ONCE`): each
+interactive sign-in (sid + auth_time, hashed) attests at most one version, recorded in an append-only table and
+enforced inside the registration transaction. A token reused after the person attested is recorded as `unknown`,
+naming the version that used the sign-in; an agent that uses it first makes the person's own upload say which version
+took their sign-in, so the misuse is visible. (2) A scope only a person's sign-in for attesting requests
+(`SKILLPROOF_HUMAN_ATTESTATION_SCOPE`, e.g. skillproof:attest, optional on the people's client, absent from machine
+clients): ordinary tokens, CLI tokens and tokens refreshed without it cannot attest. The catalogue page signs in without
+the scope; when an upload is not accepted as human-written it shows why and offers "Sign in to attest", which asks for
+the scope and a fresh login (prompt=login). Against production Keycloak (otp required, both rules on) the end-to-end
+check passed 36 of 36: password-only -> unknown; code but no attestation scope -> unknown ("lacks the scope"); the sign-in
+for attesting -> human; the same token reused -> unknown, naming the first version; a new sign-in for attesting ->
+human. In a browser, against the development provider: the page's ordinary sign-in asked for `openid profile`, the upload
+was recorded as not human-written with the reason shown, and "Sign in to attest" asked for
+`openid profile skillproof:attest` with prompt=login.
+A bug found on the way: the page's login config (`/api/v1/auth/config`) crashed whenever OIDC was on (a local variable
+hid the settings function), so the page could not sign anyone in with a real provider. The end-to-end checks sign in by
+script and never called it; a test now covers OIDC mode.
+Weakest part: an agent that takes the person's sign-in-for-attesting token before the person uses it can still attest
+one version; the person then sees their own upload refused as already used, naming that version. The browser could not
+complete a Keycloak sign-in here because it does not trust the local test CA (not bypassed), so the page half was shown
+against the development provider and the Keycloak half by script.
+
+Open: a provider hosted and run by someone else; binding an attestation to the exact package the person saw (the
+token cannot name it); programs other than read-only inspection are recorded, not run.

@@ -40,6 +40,9 @@ parser.add_argument("--strong-user", help="With --login keycloak: a person whose
                                           "that the server accepts a human-written attestation only from the stronger sign-in; "
                                           "the server must require that method (SKILLPROOF_HUMAN_ATTESTATION_AMR).")
 parser.add_argument("--strong-method", default="otp", help="The amr value the stronger sign-in adds (default otp).")
+parser.add_argument("--attest-scope", help="With --strong-user: the scope a person's sign-in for attesting requests. Checks that the "
+                                           "server (SKILLPROOF_HUMAN_ATTESTATION_SCOPE and SKILLPROOF_HUMAN_ATTESTATION_ONCE=true) "
+                                           "accepts an attestation only with that scope, and only once per sign-in.")
 parser.add_argument("--machine-client", help="With --oidc: sync gets its own token as this machine client (client credentials, "
                                              "secret in SKILLPROOF_CLIENT_SECRET) instead of a person-style reporter sign-in.")
 cli = parser.parse_args()
@@ -78,7 +81,7 @@ class _LoopbackIsSecure(__import__("http.cookiejar").cookiejar.DefaultCookiePoli
         return urlparse(request.get_full_url()).hostname in {"127.0.0.1", "localhost"} or super().return_ok_secure(cookie, request)
 
 
-def keycloak_login(user):
+def keycloak_login(user, scope="openid"):
     """Sign in through the provider's real login page (authorization code + PKCE), as a person in a browser does."""
     import base64
     import hashlib
@@ -94,7 +97,7 @@ def keycloak_login(user):
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    query = urlencode({"client_id": "skillproof-catalogue", "response_type": "code", "scope": "openid", "redirect_uri": cli.redirect,
+    query = urlencode({"client_id": "skillproof-catalogue", "response_type": "code", "scope": scope, "redirect_uri": cli.redirect,
                        "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"})
     page = opener.open(discovery["authorization_endpoint"] + "?" + query, timeout=30).read().decode()
     fields = {"username": user, "password": os.environ["SKILLPROOF_E2E_PASSWORD"], "credentialId": ""}
@@ -344,14 +347,36 @@ if cli.strong_user:
     strong = claims_of(token_for(cli.strong_user, "evaluator")).get("amr") or []
     check("amr: a password sign-in reports the password method only", "pwd" in weak and cli.strong_method not in weak, str(weak))
     check(f"amr: {cli.strong_user}'s sign-in reports password and {cli.strong_method}", "pwd" in strong and cli.strong_method in strong, str(strong))
-    for user, expect in (("alice", "unknown"), (cli.strong_user, "human")):
-        update = BASE / f"update-{user.replace('@', '_')}" / APPROVE[0]
+
+    def attest(label, user, expect, reason="", token=None):
+        """Upload an update attesting a person wrote it; check the author kind the server records (and its reason)."""
+        update = BASE / f"update-{len(results)}" / APPROVE[0]
         shutil.copytree(REAL[APPROVE[0]], update)
-        (update / "SKILL.md").write_text((update / "SKILL.md").read_text(encoding="utf-8") + f"\n\nUpdated by {user}.\n", encoding="utf-8")
+        (update / "SKILL.md").write_text((update / "SKILL.md").read_text(encoding="utf-8") + f"\n\n{label}\n", encoding="utf-8")
         status, body = call("POST", "/api/v1/registry/versions", user, "evaluator", {"evidence_json": EVIDENCE},
-                            {"file": (f"{APPROVE[0]}.zip", zipped(update))})
+                            {"file": (f"{APPROVE[0]}.zip", zipped(update))}, token=token)
         authored = ((body.get("version") or {}).get("provenance") or {})
-        check(f"attestation: {user}'s update is recorded as {expect}-written", status == 200 and authored.get("author_kind") == expect,
-              f"HTTP {status} {authored.get('author_kind')} {' / '.join(authored.get('basis') or [])}"[:240])
+        why = " / ".join(authored.get("basis") or [])
+        check(f"attestation: {label} -> {expect}", status == 200 and authored.get("author_kind") == expect and reason in why,
+              f"HTTP {status} {authored.get('author_kind')} {why}"[:260])
+        return (body.get("version") or {}).get("version_id")
+
+    if cli.attest_scope:
+        attest("alice, password only", "alice", "unknown", "requires one of")
+        plain = keycloak_login(cli.strong_user)  # with the code, without the attestation scope
+        check(f"scope: {cli.strong_user}'s ordinary sign-in has amr {cli.strong_method} but not the attestation scope",
+              cli.strong_method in (claims_of(plain).get("amr") or []) and cli.attest_scope not in claims_of(plain).get("scope", "").split())
+        attest(f"{cli.strong_user}, code but no attestation scope", cli.strong_user, "unknown", "lacks the scope", token=plain)
+        dedicated = keycloak_login(cli.strong_user, "openid " + cli.attest_scope)
+        check("scope: the sign-in for attesting carries the scope and a session id",
+              cli.attest_scope in claims_of(dedicated).get("scope", "").split() and bool(claims_of(dedicated).get("sid")))
+        first = attest(f"{cli.strong_user}, sign-in for attesting", cli.strong_user, "human", token=dedicated)
+        attest(f"{cli.strong_user}'s same token reused (as an agent holding it would)", cli.strong_user, "unknown",
+               f"already attested version {first}", token=dedicated)
+        attest(f"{cli.strong_user}, a new sign-in for attesting", cli.strong_user, "human",
+               token=keycloak_login(cli.strong_user, "openid " + cli.attest_scope))
+    else:
+        attest("alice, password only", "alice", "unknown", "requires one of")
+        attest(f"{cli.strong_user}, with the code", cli.strong_user, "human")
 print(json.dumps({"passed": sum(ok for _, ok in results), "failed": sum(not ok for _, ok in results)}))
 sys.exit(sum(not ok for _, ok in results))

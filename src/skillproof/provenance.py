@@ -5,7 +5,9 @@ skills edited in place on disk). A version's provenance records what SkillProof 
 
 - `human`    a person registered it and attests they wrote it (an upload by a human identity). With OIDC, only from a
              token whose interactive sign-in (auth_time) is recent: an agent running unattended on a person's token
-             carries an old sign-in, so its "human" attestation is recorded as `unknown`;
+             carries an old sign-in, so its "human" attestation is recorded as `unknown`. A server can also require a
+             strong sign-in method (amr), a scope only a person's own sign-in requests, and one attestation per
+             sign-in, so a token reused after the person attested cannot attest again;
 - `agent`    an agent identity registered it, or whoever registered it says an agent wrote it;
 - `unknown`  nobody can attest (an installed folder that changed on disk: the importer saw the files, not the author).
 
@@ -51,6 +53,7 @@ class Provenance(TypedDict, total=False):
     basis: list[str]            # how the author kind was established, in words
     review_bar: Literal["change_over_previous", "new_skill"]
     recorded_at: str
+    attested_sign_in: str       # with one attestation per sign-in: the (hashed) sign-in this attestation used
 
 
 def _declared(declared: dict[str, Any] | None) -> dict[str, str]:
@@ -73,10 +76,26 @@ def _declared(declared: dict[str, Any] | None) -> dict[str, str]:
     return out
 
 
-def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, source: Source = "upload") -> Provenance:
-    """The provenance of a version registered by this principal, with this declaration, from this source."""
+def sign_in_key(principal: Principal) -> str | None:
+    """Which interactive sign-in a token comes from (tenant, subject, session id, sign-in time), hashed; None for a
+    token with no sign-in time or a development sign-in."""
+    if principal.identity_source != "oidc" or principal.signed_in_at is None:
+        return None
+    import hashlib
+
+    raw = "|".join([principal.tenant_id, principal.on_behalf_of or principal.user_id, principal.sign_in_session or "",
+                    str(principal.signed_in_at)])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, source: Source = "upload",
+            sign_in_used_by: str | None = None) -> Provenance:
+    """The provenance of a version registered by this principal, with this declaration, from this source.
+    `sign_in_used_by` names the version this token's sign-in already attested, when the server allows one attestation
+    per sign-in (the caller looks it up with sign_in_key)."""
     claim = _declared(declared)
     basis: list[str] = []
+    attested: str | None = None
     if principal.actor_kind == "agent":
         kind: AuthorKind = "agent"
         basis.append(f"registered by agent identity {principal.user_id}"
@@ -107,13 +126,26 @@ def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, sou
                 kind = "unknown"
                 basis.append(f"not accepted as human-written: the sign-in used {list(principal.sign_in_methods) or 'no stated method'}, "
                              f"and this server requires one of {list(required)} (amr)")
-    return Provenance(
+            elif settings().human_attestation_scope and settings().human_attestation_scope not in principal.scopes:
+                kind = "unknown"
+                basis.append(f"not accepted as human-written: the token lacks the scope {settings().human_attestation_scope!r}, "
+                             "which only a person's own sign-in for attesting requests")
+            elif settings().human_attestation_once_per_sign_in and sign_in_used_by:
+                kind = "unknown"
+                basis.append(f"not accepted as human-written: this sign-in already attested version {sign_in_used_by}; each "
+                             "sign-in attests one version, so a reused token cannot attest again (sign in again to attest)")
+            elif settings().human_attestation_once_per_sign_in:
+                attested = sign_in_key(principal)
+    record = Provenance(
         author_kind=kind, registered_by=principal.user_id, registered_as=principal.actor_kind,
         on_behalf_of=principal.on_behalf_of, agent=claim.get("agent") or (principal.user_id if principal.actor_kind == "agent" else None),
         model=claim.get("model"), session=claim.get("session"), derived_from=claim.get("derived_from"), note=claim.get("note"),
         source=source, basis=basis, review_bar="change_over_previous" if kind == "human" else "new_skill",
         recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
+    if attested:
+        record["attested_sign_in"] = attested
+    return record
 
 
 def full_review(provenance: Provenance | dict[str, Any] | None) -> bool:

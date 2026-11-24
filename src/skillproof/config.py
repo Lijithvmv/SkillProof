@@ -18,6 +18,8 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
 | SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE | human_attestation_max_age_seconds | seconds since the token's interactive sign-in (auth_time) within which a "human-written" attestation counts (900) |
 | SKILLPROOF_HUMAN_ATTESTATION_AMR | human_attestation_methods | comma-separated sign-in methods (amr), at least one of which a "human-written" attestation's token must show, e.g. mfa,hwk (empty: not required) |
+| SKILLPROOF_HUMAN_ATTESTATION_ONCE | human_attestation_once_per_sign_in | true: each interactive sign-in (sid + auth_time) attests at most one version; a later attestation from the same sign-in is recorded as unknown and names the version that used it (default false) |
+| SKILLPROOF_HUMAN_ATTESTATION_SCOPE | human_attestation_scope | an OAuth scope a "human-written" attestation's token must carry, e.g. skillproof:attest, requested only by a person's own sign-in (empty: not required) |
 | SKILLPROOF_MIN_LOAD_RATE / SKILLPROOF_MAX_FALSE_LOAD_RATE | min_load_rate, max_false_load_rate | load-rate gate: least share of relevant requests that pick the skill (0.5), most share of unrelated ones (0.2) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
 | SKILLPROOF_SECOND_OPINION_MODEL / _URL | second_opinion | local-model second opinion on risk items; off when no model is set |
@@ -113,6 +115,11 @@ class Settings:
     # Sign-in methods (amr) of which at least one must appear for a "human-written" attestation, e.g. ("mfa", "hwk").
     # Empty: not required.
     human_attestation_methods: tuple[str, ...] = ()
+    # Each interactive sign-in attests at most one version: an agent reusing a person's token after the person attested
+    # is recorded as unknown, and an agent using it first makes the person's own attestation name the version it took.
+    human_attestation_once_per_sign_in: bool = False
+    # A scope only a person's own sign-in requests; tokens obtained otherwise (CLI, refreshed without it) cannot attest.
+    human_attestation_scope: str = ""
     min_load_rate: float = 0.5
     max_false_load_rate: float = 0.2
 
@@ -155,6 +162,8 @@ def settings() -> Settings:
         pilot_grader_model=_get("SKILLPROOF_GRADER_MODEL") or _get("SKILLPROOF_OPENAI_GRADER_MODEL"),
         human_attestation_max_age_seconds=_int("SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE", 900),
         human_attestation_methods=tuple(m.strip() for m in (_get("SKILLPROOF_HUMAN_ATTESTATION_AMR") or "").split(",") if m.strip()),
+        human_attestation_once_per_sign_in=_get("SKILLPROOF_HUMAN_ATTESTATION_ONCE").lower() in {"1", "true", "yes", "on"},
+        human_attestation_scope=_get("SKILLPROOF_HUMAN_ATTESTATION_SCOPE"),
         min_load_rate=_float("SKILLPROOF_MIN_LOAD_RATE", 0.5),
         max_false_load_rate=_float("SKILLPROOF_MAX_FALSE_LOAD_RATE", 0.2),
     )

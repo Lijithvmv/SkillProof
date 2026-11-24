@@ -186,6 +186,24 @@ GATE_SETTINGS_POSTGRES = GATE_SETTINGS_SQLITE.split("CREATE TRIGGER")[0].replace
     + append_only("gate_settings_events", "gate settings events are append-only"))
 
 
+ATTESTATIONS_SQLITE = """
+    CREATE TABLE IF NOT EXISTS attestation_sign_ins (
+        tenant_id TEXT NOT NULL,
+        sign_in_key TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        used_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, sign_in_key)
+    );
+    CREATE TRIGGER IF NOT EXISTS attestation_sign_ins_no_update
+    BEFORE UPDATE ON attestation_sign_ins BEGIN SELECT RAISE(ABORT, 'attestation sign-ins are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS attestation_sign_ins_no_delete
+    BEFORE DELETE ON attestation_sign_ins BEGIN SELECT RAISE(ABORT, 'attestation sign-ins are append-only'); END;
+"""
+ATTESTATIONS_POSTGRES = ATTESTATIONS_SQLITE.split("CREATE TRIGGER")[0] + (
+    tenant_policy("attestation_sign_ins") + append_only("attestation_sign_ins", "attestation sign-ins are append-only"))
+
+
 MIGRATIONS = [
     (1, "versions, events, false alarms, tenant policies", SQLITE_SCHEMA, POSTGRES_SCHEMA),
     (2, "assurance report, capability manifest and change per version",
@@ -193,6 +211,7 @@ MIGRATIONS = [
     (3, "who wrote each version (provenance)", add_columns("skill_versions", {"provenance_json": "TEXT"}),
      add_columns("skill_versions", {"provenance_json": "TEXT"})),
     (4, "per-tenant gate settings (load-rate thresholds) with history", GATE_SETTINGS_SQLITE, GATE_SETTINGS_POSTGRES),
+    (5, "each interactive sign-in attests at most one version", ATTESTATIONS_SQLITE, ATTESTATIONS_POSTGRES),
 ]
 
 
@@ -259,6 +278,12 @@ class SkillRegistry:
                 summary["capability_counts"] = change["counts"]
             if provenance is not None:
                 summary["author_kind"] = provenance.get("author_kind")
+            key = (provenance or {}).get("attested_sign_in") if (provenance or {}).get("author_kind") == "human" else None
+            if key:
+                used = db.execute("SELECT version_id FROM attestation_sign_ins WHERE tenant_id=? AND sign_in_key=?",
+                                  (tenant_id, key)).fetchone()
+                if used is not None:  # two uploads raced on one sign-in: the loser registers nothing
+                    raise RegistryError(f"this sign-in already attested version {used['version_id']}; sign in again to attest")
             db.execute(
                 f"INSERT INTO skill_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (version_id, tenant_id, name, fingerprint, assurance_hash,
@@ -266,6 +291,9 @@ class SkillRegistry:
                  state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change), _dump(provenance)),
             )
             self._event(version_id, tenant_id, actor_id, "registered", state, now)
+            if key:
+                db.execute("INSERT INTO attestation_sign_ins (tenant_id, sign_in_key, version_id, actor_id, used_at) "
+                           "VALUES (?, ?, ?, ?, ?)", (tenant_id, key, version_id, actor_id, now))
             if change is not None:
                 self._event(version_id, tenant_id, actor_id, "capabilities_compared",
                             f"{change['decision']} against {change['against']} {change['change_hash'][:12]}", now)
@@ -376,6 +404,13 @@ class SkillRegistry:
         stored = self.get_gate_settings(tenant_id)
         assert stored is not None  # written in this call
         return stored
+
+    def attestation_of(self, tenant_id: str, sign_in_key: str) -> str | None:
+        """The version a sign-in already attested as human-written, if any."""
+        with self.db.transaction(tenant_id) as db:
+            row = db.execute("SELECT version_id FROM attestation_sign_ins WHERE tenant_id=? AND sign_in_key=?",
+                             (tenant_id, sign_in_key)).fetchone()
+        return None if row is None else str(row["version_id"])
 
     def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, full_review: bool = False) -> CapabilityChange:
         """What a manifest would add over the tenant's active version (or the latest one while nothing is approved),

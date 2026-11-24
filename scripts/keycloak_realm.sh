@@ -85,6 +85,12 @@ for pair in auth-username-password-form:pwd auth-otp-form:otp; do
   echo "sign-in step $provider reports amr $ref"
 done
 $K update realms/skillproof -s browserFlow=skillproof-browser >/dev/null
+# A scope only a person's own sign-in for attesting asks for (SKILLPROOF_HUMAN_ATTESTATION_SCOPE): optional on the
+# people's client, absent from the machine client, so other tokens cannot attest that a person wrote a version.
+ATTEST=$($K create client-scopes -r skillproof -s name=skillproof:attest -s protocol=openid-connect \
+  -s 'attributes."include.in.token.scope"=true' -s 'attributes."display.on.consent.screen"=false' -i)
+$K update clients/$CAT/optional-client-scopes/$ATTEST -r skillproof >/dev/null
+echo "optional scope skillproof:attest on skillproof-catalogue"
 ERIN=$($K get users -r skillproof -q username=erin -q exact=true --fields id --format csv --noquotes)
 $K update users/$ERIN -r skillproof -s 'requiredActions=["CONFIGURE_TOTP"]' >/dev/null
 echo "erin sets up a one-time code at her first sign-in"

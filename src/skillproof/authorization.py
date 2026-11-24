@@ -53,6 +53,8 @@ class Principal:
     identity_source: str = "local"    # 'oidc' for a verified access token, 'local' for development sign-in
     signed_in_at: int | None = None   # the token's auth_time: when the person last signed in interactively (epoch s)
     sign_in_methods: tuple[str, ...] = ()  # the token's amr: how that sign-in was done (pwd, mfa, hwk, otp, ...)
+    sign_in_session: str | None = None   # the token's sid: which sign-in session issued it
+    scopes: tuple[str, ...] = ()         # the token's scope (or scp) values
 
     def __post_init__(self) -> None:
         if not self.user_id.strip() or not self.tenant_id.strip():
@@ -191,6 +193,11 @@ class GovernanceAccess:
         authorize(principal, principal.tenant_id, "policy.manage")
         self.registry.set_gate_settings(principal.tenant_id, values, actor_id=principal.user_id)
         return self.gate_settings(principal)
+
+    def attestation_of(self, principal: Principal, sign_in_key: str) -> str | None:
+        """The version this principal's sign-in already attested, if any (one attestation per sign-in)."""
+        authorize(principal, principal.tenant_id, "skill.register")
+        return self.registry.attestation_of(principal.tenant_id, sign_in_key)
 
     def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any], *,
                        full_review: bool = False) -> CapabilityChange:

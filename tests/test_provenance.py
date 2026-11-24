@@ -206,3 +206,83 @@ def test_human_attestation_can_require_a_strong_sign_in_method(monkeypatch):
     assert provenance.resolve(strong)["author_kind"] == "human"
     monkeypatch.delenv("SKILLPROOF_HUMAN_ATTESTATION_AMR")
     assert provenance.resolve(password)["author_kind"] == "human"  # not required by default
+
+
+def _oidc_person(session="sid-1", signed_in_ago=60, scopes=(), user="alice"):
+    import time
+
+    return Principal(user_id=user, tenant_id="local", role="evaluator", identity_source="oidc",
+                     signed_in_at=int(time.time()) - signed_in_ago, sign_in_session=session, scopes=tuple(scopes))
+
+
+# Decision: with one attestation per sign-in, a token that already attested a version (an agent reusing the person's
+# fresh token afterwards) cannot attest a second one: that version is recorded as unknown, names the version that used
+# the sign-in, and is reviewed as a new skill. A new sign-in attests again.
+def test_each_sign_in_attests_one_version(tmp_path, monkeypatch):
+    import json
+
+    from skillproof.services import catalogue
+
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_ONCE", "true")
+    governance = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "registry.db"), approvals=SQLiteApprovalStore(tmp_path / "approvals.db"),
+                                  history=EvaluationHistoryStore(tmp_path / "history.db"))
+    try:
+        def put(principal, text):
+            assessment = catalogue.assess_package(governance, principal, {"SKILL.md": text.encode()}, declared=json.loads(EVIDENCE))
+            return catalogue.register(governance, principal, assessment)
+
+        first = put(_oidc_person(), SKILL)
+        assert first["provenance"]["author_kind"] == "human" and first["provenance"]["attested_sign_in"]
+        reused = put(_oidc_person(), TWEAK)  # same sign-in (sid and auth_time) as the first upload
+        assert reused["provenance"]["author_kind"] == "unknown"
+        assert reused["provenance"]["review_bar"] == "new_skill"
+        assert f"already attested version {first['version_id']}" in " ".join(reused["provenance"]["basis"])
+        again = put(_oidc_person(session="sid-2"), TWEAK.replace("merged", "squashed"))  # signed in again
+        assert again["provenance"]["author_kind"] == "human"
+        monkeypatch.delenv("SKILLPROOF_HUMAN_ATTESTATION_ONCE")
+        free = put(_oidc_person(), TWEAK.replace("merged", "rebased"))
+        assert free["provenance"]["author_kind"] == "human"  # off by default
+    finally:
+        governance.registry.close()
+        governance.approvals.close()
+
+
+# Decision: two uploads racing on one sign-in cannot both be recorded as human-written: the registry refuses the
+# second inside its transaction, so nothing is registered for it.
+def test_a_sign_in_cannot_attest_twice_even_in_a_race(tmp_path):
+    from skillproof.storage.registry import RegistryError
+
+    registry = SQLiteSkillRegistry(tmp_path / "registry.db")
+    try:
+        record = provenance.resolve(Principal(user_id="alice", tenant_id="t", role="evaluator"))
+        record["attested_sign_in"] = "k" * 40
+        report = {"package_fingerprint": "a" * 64, "metadata": {"name": "x"}}
+        registry.register("t", report, {"decision": "not_eligible"}, actor_id="alice", provenance=dict(record))
+        with pytest.raises(RegistryError, match="already attested"):
+            registry.register("t", {**report, "package_fingerprint": "b" * 64}, {"decision": "not_eligible"},
+                              actor_id="alice", provenance=dict(record))
+        assert registry.attestation_of("t", "k" * 40) is not None
+    finally:
+        registry.close()
+
+
+# Decision: a server can require a scope that only a person's own sign-in for attesting requests; a token without it
+# (a CLI token, one refreshed without the scope) is recorded as unknown, one with it as human.
+def test_human_attestation_can_require_a_dedicated_scope(monkeypatch):
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_SCOPE", "skillproof:attest")
+    without = provenance.resolve(_oidc_person(scopes=["openid", "profile"]))
+    assert without["author_kind"] == "unknown" and "lacks the scope 'skillproof:attest'" in " ".join(without["basis"])
+    assert provenance.resolve(_oidc_person(scopes=["openid", "skillproof:attest"]))["author_kind"] == "human"
+
+
+# Decision: the verifier carries the sign-in session (sid) and the granted scopes, which the two rules above use.
+def test_tokens_carry_sign_in_session_and_scopes():
+    import time
+
+    verifier = OIDCAccessTokenVerifier(OIDCSettings(issuer="https://login.example.test/", audience="skillproof-api",
+                                                    jwks_url="https://login.example.test/.well-known/jwks.json", leeway_seconds=0),
+                                       signing_keys=FakeKeys())
+    person = verifier.verify(make_token(auth_time=int(time.time()) - 30, sid="abc", scope="openid skillproof:attest"))
+    assert person.sign_in_session == "abc" and person.scopes == ("openid", "skillproof:attest")
+    listed = verifier.verify(make_token(scp=["a", "b"]))
+    assert listed.scopes == ("a", "b") and listed.sign_in_session is None

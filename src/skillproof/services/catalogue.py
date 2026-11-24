@@ -157,7 +157,11 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     whether that identity is a person or an agent, and the source, it decides the review bar (skillproof.provenance).
     A version not attested as human-written is compared with nothing, as a new skill, and the assurance report records
     the author kind, so an approval is bound to it."""
-    authorship = dict(authorship_rules.resolve(principal, authored, source=source))
+    from skillproof.config import settings
+
+    key = authorship_rules.sign_in_key(principal) if settings().human_attestation_once_per_sign_in else None
+    used_by = governance.attestation_of(principal, key) if key and source != "installed_import" else None
+    authorship = dict(authorship_rules.resolve(principal, authored, source=source, sign_in_used_by=used_by))
     text = package.as_text(files)
     # Authoring rules look at the skill's folder name (it should match the SKILL.md name); the package itself is rooted
     # at that folder, so the name is passed separately.

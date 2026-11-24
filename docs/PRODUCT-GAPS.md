@@ -203,5 +203,23 @@ hit, no behaviour (no false alarm).
 Weakest part: three skills, one model; a program that opens a file through a path strace cannot see (another
 process outside the trace) would not be recorded; tracing needs strace where bubblewrap runs.
 
-Open: a provider hosted and run by someone else; binding an attestation to the exact package the person saw (the
-token cannot name it); more hostile skills and other models for the program runs.
+An attestation bound to the exact package: with `SKILLPROOF_HUMAN_ATTESTATION_BOUND`, a human-written attestation
+needs the ID token of a sign-in made for that package. The page sets the sign-in's OIDC nonce to
+skp1.<sha256(salt + "." + the zip's bytes)> before the person signs in; the server checks the ID token's signature,
+audience (the page's client), nonce, subject and that it comes from the same sign-in as the access token (sid or
+auth_time). A token taken from that sign-in can attest only those bytes. A version already registered as unknown and
+not yet approved is upgraded in place when its exact bytes are attested (same version, re-compared as a person's
+change, `attested` event; an approval request on the old report no longer matches); the package's own earlier
+registration is never its previous version in the comparison. Against production Keycloak (all three rules on) the
+end-to-end check passed 37 of 37: Keycloak's ID token carried the nonce, sid and auth_time; a sign-in for attesting not
+made for the package -> unknown; the package-bound sign-in used for other bytes -> unknown ("different package");
+the same sign-in for exactly its bytes -> human. In a browser against the development provider (which now issues a
+standard ID token): the page hashed the zip into the nonce, kept the zip across the redirect, uploaded it on return,
+and the same version became human-written with "signed in for exactly these bytes".
+A product gap found on the way: re-uploading the same bytes to attest them was refused ("already registered with a
+different assurance report"), so the earlier "sign in to attest and upload again" flow could never have worked for
+the same package. The earlier browser check stopped at the redirect and missed it; the in-place upgrade fixes it.
+Weakest part: the page keeps the zip in the tab's session storage across the redirect (3 MB limit; larger packages
+go through the CLI); a person who is tricked into signing in for an agent's package still attests it.
+
+Open: a provider hosted and run by someone else; more hostile skills and other models for the program runs.

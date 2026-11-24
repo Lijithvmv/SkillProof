@@ -200,9 +200,10 @@ class GovernanceAccess:
         return self.registry.attestation_of(principal.tenant_id, sign_in_key)
 
     def preview_change(self, principal: Principal, skill_name: str, manifest: dict[str, Any], *,
-                       full_review: bool = False) -> CapabilityChange:
+                       full_review: bool = False, exclude_fingerprint: str | None = None) -> CapabilityChange:
         authorize(principal, principal.tenant_id, "skill.register")
-        return self.registry.preview_change(principal.tenant_id, skill_name, manifest, full_review=full_review)
+        return self.registry.preview_change(principal.tenant_id, skill_name, manifest, full_review=full_review,
+                                            exclude_fingerprint=exclude_fingerprint)
 
     def enqueue_evaluation(self, principal: Principal, version_id: str, payload: dict[str, Any]) -> EvaluationJob:
         authorize(principal, principal.tenant_id, "evaluation.run")

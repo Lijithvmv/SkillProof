@@ -43,6 +43,8 @@ parser.add_argument("--strong-method", default="otp", help="The amr value the st
 parser.add_argument("--attest-scope", help="With --strong-user: the scope a person's sign-in for attesting requests. Checks that the "
                                            "server (SKILLPROOF_HUMAN_ATTESTATION_SCOPE and SKILLPROOF_HUMAN_ATTESTATION_ONCE=true) "
                                            "accepts an attestation only with that scope, and only once per sign-in.")
+parser.add_argument("--bind", action="store_true", help="With --attest-scope: the server also requires the attestation to be "
+                    "bound to the package (SKILLPROOF_HUMAN_ATTESTATION_BOUND=true): the sign-in's nonce names the zip's bytes.")
 parser.add_argument("--machine-client", help="With --oidc: sync gets its own token as this machine client (client credentials, "
                                              "secret in SKILLPROOF_CLIENT_SECRET) instead of a person-style reporter sign-in.")
 cli = parser.parse_args()
@@ -81,7 +83,10 @@ class _LoopbackIsSecure(__import__("http.cookiejar").cookiejar.DefaultCookiePoli
         return urlparse(request.get_full_url()).hostname in {"127.0.0.1", "localhost"} or super().return_ok_secure(cookie, request)
 
 
-def keycloak_login(user, scope="openid"):
+ID_TOKENS: dict = {}
+
+
+def keycloak_login(user, scope="openid", nonce=None):
     """Sign in through the provider's real login page (authorization code + PKCE), as a person in a browser does."""
     import base64
     import hashlib
@@ -98,7 +103,8 @@ def keycloak_login(user, scope="openid"):
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     query = urlencode({"client_id": "skillproof-catalogue", "response_type": "code", "scope": scope, "redirect_uri": cli.redirect,
-                       "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"})
+                       "state": "s", "code_challenge": challenge, "code_challenge_method": "S256",
+                       **({"nonce": nonce} if nonce else {})})
     page = opener.open(discovery["authorization_endpoint"] + "?" + query, timeout=30).read().decode()
     fields = {"username": user, "password": os.environ["SKILLPROOF_E2E_PASSWORD"], "credentialId": ""}
     no_follow = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), _NoRedirect)
@@ -135,7 +141,9 @@ def keycloak_login(user, scope="openid"):
     exchange = urlencode({"grant_type": "authorization_code", "code": code, "redirect_uri": cli.redirect,
                           "client_id": "skillproof-catalogue", "code_verifier": verifier}).encode()
     with urllib.request.urlopen(urllib.request.Request(discovery["token_endpoint"], data=exchange, method="POST"), timeout=30) as response:
-        return json.loads(response.read())["access_token"]
+        tokens = json.loads(response.read())
+    ID_TOKENS[tokens["access_token"]] = tokens.get("id_token")
+    return tokens["access_token"]
 
 
 TOTP: dict = {}
@@ -348,13 +356,17 @@ if cli.strong_user:
     check("amr: a password sign-in reports the password method only", "pwd" in weak and cli.strong_method not in weak, str(weak))
     check(f"amr: {cli.strong_user}'s sign-in reports password and {cli.strong_method}", "pwd" in strong and cli.strong_method in strong, str(strong))
 
-    def attest(label, user, expect, reason="", token=None):
-        """Upload an update attesting a person wrote it; check the author kind the server records (and its reason)."""
-        update = BASE / f"update-{len(results)}" / APPROVE[0]
+    def update_bytes(label):
+        """An update of the first approved skill, as zip bytes."""
+        update = BASE / f"update-{len(results)}-{abs(hash(label)) % 10000}" / APPROVE[0]
         shutil.copytree(REAL[APPROVE[0]], update)
         (update / "SKILL.md").write_text((update / "SKILL.md").read_text(encoding="utf-8") + f"\n\n{label}\n", encoding="utf-8")
-        status, body = call("POST", "/api/v1/registry/versions", user, "evaluator", {"evidence_json": EVIDENCE},
-                            {"file": (f"{APPROVE[0]}.zip", zipped(update))}, token=token)
+        return zipped(update)
+
+    def attest(label, user, expect, reason="", token=None, data=None, fields=None):
+        """Upload an update attesting a person wrote it; check the author kind the server records (and its reason)."""
+        status, body = call("POST", "/api/v1/registry/versions", user, "evaluator", {"evidence_json": EVIDENCE, **(fields or {})},
+                            {"file": (f"{APPROVE[0]}.zip", data if data is not None else update_bytes(label))}, token=token)
         authored = ((body.get("version") or {}).get("provenance") or {})
         why = " / ".join(authored.get("basis") or [])
         check(f"attestation: {label} -> {expect}", status == 200 and authored.get("author_kind") == expect and reason in why,
@@ -370,11 +382,27 @@ if cli.strong_user:
         dedicated = keycloak_login(cli.strong_user, "openid " + cli.attest_scope)
         check("scope: the sign-in for attesting carries the scope and a session id",
               cli.attest_scope in claims_of(dedicated).get("scope", "").split() and bool(claims_of(dedicated).get("sid")))
-        first = attest(f"{cli.strong_user}, sign-in for attesting", cli.strong_user, "human", token=dedicated)
-        attest(f"{cli.strong_user}'s same token reused (as an agent holding it would)", cli.strong_user, "unknown",
-               f"already attested version {first}", token=dedicated)
-        attest(f"{cli.strong_user}, a new sign-in for attesting", cli.strong_user, "human",
-               token=keycloak_login(cli.strong_user, "openid " + cli.attest_scope))
+        if cli.bind:
+            from skillproof.provenance import package_nonce
+
+            attest(f"{cli.strong_user}, sign-in for attesting but not for this package", cli.strong_user, "unknown",
+                   "not bound to a sign-in made for this package", token=dedicated)
+            chosen, other, salt = update_bytes("chosen by the person"), update_bytes("swapped in by an agent"), "e2e-salt-1"
+            bound = keycloak_login(cli.strong_user, "openid " + cli.attest_scope, nonce=package_nonce(chosen, salt))
+            id_claims = claims_of(ID_TOKENS[bound] or "x.e30.x")
+            check("bind: the provider's ID token carries the package nonce, the session and the sign-in time",
+                  id_claims.get("nonce") == package_nonce(chosen, salt) and bool(id_claims.get("sid")) and bool(id_claims.get("auth_time")),
+                  str({k: id_claims.get(k) for k in ("typ", "aud", "sid", "auth_time")})[:200])
+            attest(f"{cli.strong_user}'s package-bound sign-in used for different bytes", cli.strong_user, "unknown",
+                   "different package", token=bound, data=other, fields={"attestation_id_token": ID_TOKENS[bound], "attestation_salt": salt})
+            attest(f"{cli.strong_user}, sign-in bound to exactly this package", cli.strong_user, "human", "exactly these bytes",
+                   token=bound, data=chosen, fields={"attestation_id_token": ID_TOKENS[bound], "attestation_salt": salt})
+        else:
+            first = attest(f"{cli.strong_user}, sign-in for attesting", cli.strong_user, "human", token=dedicated)
+            attest(f"{cli.strong_user}'s same token reused (as an agent holding it would)", cli.strong_user, "unknown",
+                   f"already attested version {first}", token=dedicated)
+            attest(f"{cli.strong_user}, a new sign-in for attesting", cli.strong_user, "human",
+                   token=keycloak_login(cli.strong_user, "openid " + cli.attest_scope))
     else:
         attest("alice, password only", "alice", "unknown", "requires one of")
         attest(f"{cli.strong_user}, with the code", cli.strong_user, "human")

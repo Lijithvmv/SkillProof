@@ -112,10 +112,11 @@ function b64url(bytes) { return btoa(String.fromCharCode(...new Uint8Array(bytes
 function randomText(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
 function redirectUri() { return location.origin + location.pathname; }
 
-async function startSignIn(attest = false) {
+async function startSignIn(attest = false, boundNonce = null) {
   // Authorization code flow with PKCE (public client): only the code verifier's hash leaves the browser.
   // attest: a sign-in made to attest a version is human-written: the attestation scope plus a fresh login.
-  const verifier = randomText(48), stateValue = randomText(24), nonce = randomText(24);
+  // boundNonce: a sign-in made to attest one package carries that package's hash as its nonce (see attestPackage).
+  const verifier = randomText(48), stateValue = randomText(24), nonce = boundNonce || randomText(24);
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   once.set("sp-pkce", JSON.stringify({ verifier, state: stateValue }));
   const a = state.auth;
@@ -141,6 +142,32 @@ async function finishSignIn() {
   const tokens = await response.json().catch(() => ({}));
   if (!response.ok || !tokens.access_token) throw new Error("Sign-in failed: " + (tokens.error_description || tokens.error || response.statusText));
   accessToken = tokens.access_token;
+  idToken = tokens.id_token || null;
+}
+let idToken = null;  // the ID token of the last sign-in, in memory only: sent once, to bind an attestation to its package
+
+const hex = buffer => Array.from(new Uint8Array(buffer), b => b.toString(16).padStart(2, "0")).join("");
+
+async function attestPackage(file, evidence) {
+  // Sign in for this exact package: the nonce is skp1.<sha256(salt + "." + the zip's bytes)>, so the resulting sign-in
+  // can attest only these bytes. The zip waits in this tab's session storage while the provider's page is open.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length > 3_000_000) throw new Error("This package is too large to attest from the page (3 MB); upload it with the CLI.");
+  const salt = randomText(24);
+  const message = await new Blob([new TextEncoder().encode(salt + "."), bytes]).arrayBuffer();
+  const nonce = "skp1." + hex(await crypto.subtle.digest("SHA-256", message));
+  let binary = ""; bytes.forEach(b => { binary += String.fromCharCode(b); });
+  once.set("sp-attest", JSON.stringify({ name: file.name, zip: btoa(binary), salt, evidence }));
+  await startSignIn(true, nonce);
+}
+
+async function resumeAttestation() {
+  const saved = JSON.parse(once.take("sp-attest") || "null");
+  if (!saved || !accessToken) return;
+  const bytes = Uint8Array.from(atob(saved.zip), c => c.charCodeAt(0));
+  const extra = idToken ? { attestation_id_token: idToken, attestation_salt: saved.salt } : {};
+  idToken = null;
+  await uploadPackage(new File([bytes], saved.name, { type: "application/zip" }), saved.evidence, extra);
 }
 
 function esc(value) {
@@ -399,32 +426,38 @@ function wireDetail(v, requests) {
 
 document.getElementById("upload").onsubmit = async event => {
   event.preventDefault();
-  const out = document.getElementById("uploadMsg");
   const file = document.getElementById("zip").files[0];
   if (!file) return;
   const evidence = {};
   [["lift", "behavioral_lift_pp", parseFloat], ["runs", "paired_runs", v => parseInt(v, 10)], ["models", "measured_models", v => parseInt(v, 10)], ["cost", "cost_overhead_percent", parseFloat]]
     .forEach(([id, key, parse]) => { const raw = document.getElementById(id).value.trim(); if (raw) evidence[key] = parse(raw); });
+  await uploadPackage(file, evidence, {});
+};
+
+async function uploadPackage(file, evidence, extra) {
+  const out = document.getElementById("uploadMsg");
   const form = new FormData();
   form.append("file", file);
   if (Object.keys(evidence).length) form.append("evidence_json", JSON.stringify(evidence));
+  Object.entries(extra).forEach(([k, v]) => form.append(k, v));
   out.innerHTML = `<div class="muted">Analysing…</div>`;
   try {
     const result = await api("/api/v1/registry/versions", { method: "POST", body: form });
     out.innerHTML = `<div class="msg ok">Registered ${esc(result.version.skill_name)} ${short(result.version.version_id)}.</div>`;
     const made = result.version.provenance || {};
-    if (state.auth.mode === "oidc" && state.auth.sign_in && made.author_kind === "unknown" && (state.auth.attest_scope || state.auth.attest_once)) {
+    if (state.auth.mode === "oidc" && state.auth.sign_in && made.author_kind === "unknown"
+        && (state.auth.attest_scope || state.auth.attest_once || state.auth.attest_bound)) {
       // Not accepted as human-written (wrong sign-in for attesting, or this sign-in already attested a version): it is
       // reviewed as a new skill. A person who wrote it can sign in again for attesting and upload it again.
       const why = (made.basis || []).filter(b => b.startsWith("not accepted")).join(" ");
       out.innerHTML += `<div class="msg err">Recorded as not human-written, so it is reviewed as a new skill. ${esc(why)}
         <button id="attestSignIn" class="secondary">Sign in to attest</button></div>`;
-      document.getElementById("attestSignIn").onclick = () => startSignIn(true).catch(e => { out.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
+      document.getElementById("attestSignIn").onclick = () => attestPackage(file, evidence).catch(e => { out.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
     }
     await renderSkills();
     select(result.version.version_id);
   } catch (e) { out.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
-};
+}
 
 document.getElementById("filter").oninput = () => renderSkills();
 document.getElementById("level").onchange = () => renderSkills();
@@ -452,7 +485,8 @@ async function renderFleet() {
 (async () => {
   try { state.auth = await (await fetch("/api/v1/auth/config")).json(); } catch (e) { state.auth = { mode: "local" }; }
   try { await finishSignIn(); } catch (e) { document.getElementById("who").innerHTML = `<span class="msg err">${esc(e.message)}</span>`; }
-  refresh();
+  await refresh();
+  await resumeAttestation().catch(e => { document.getElementById("uploadMsg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
 })();
 try { localStorage.removeItem("sp-token"); } catch (e) {}  // a token stored by an earlier version of this page
 </script>

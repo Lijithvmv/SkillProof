@@ -1,6 +1,7 @@
 """OIDC JWT access-token verification and RBAC principal mapping."""
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -33,6 +34,7 @@ class OIDCSettings:
     leeway_seconds: int = 30
     jwks_timeout_seconds: float = 5
     agent_clients: tuple[str, ...] = ()
+    client_id: str = ""   # the page's client: the audience of its ID tokens (attestation binding)
 
     def __post_init__(self) -> None:
         for label, value in (("issuer", self.issuer), ("JWKS URL", self.jwks_url)):
@@ -59,7 +61,7 @@ class OIDCSettings:
         return cls(issuer=oidc.issuer, audience=oidc.audience, jwks_url=oidc.jwks_url, role_claim=oidc.role_claim,
                    accepted_types=oidc.accepted_types,
                    tenant_claim=oidc.tenant_claim, leeway_seconds=oidc.leeway_seconds, jwks_timeout_seconds=oidc.jwks_timeout_seconds,
-                   agent_clients=oidc.agent_clients)
+                   agent_clients=oidc.agent_clients, client_id=oidc.client_id)
 
 
 class OIDCAccessTokenVerifier:
@@ -142,6 +144,39 @@ class OIDCAccessTokenVerifier:
             raise AuthenticationError("access token principal claims are invalid") from exc
 
 
+def verify_binding(verifier: OIDCAccessTokenVerifier, id_token: str, *, principal: Principal, nonce: str) -> None:
+    """Check that an ID token comes from a sign-in made for this package by this person: signed by the provider,
+    issued to the page's client, its nonce equal to the package's, its subject the access token's, and from the same
+    sign-in (session id and sign-in time). Raises AuthenticationError with the reason otherwise."""
+    settings_ = verifier.settings
+    if not settings_.client_id:
+        raise AuthenticationError("binding needs the page's client id (SKILLPROOF_OIDC_CLIENT_ID)")
+    try:
+        header = jwt.get_unverified_header(id_token)
+        if header.get("alg") not in settings_.algorithms or not isinstance(header.get("kid"), str):
+            raise AuthenticationError("ID token signing algorithm or key identifier is not accepted")
+        key = verifier.signing_keys.get_signing_key_from_jwt(id_token).key
+        claims = jwt.decode(id_token, key=key, algorithms=list(settings_.algorithms), audience=settings_.client_id,
+                            issuer=settings_.issuer, leeway=settings_.leeway_seconds,
+                            options={"require": ["iss", "aud", "exp", "iat", "sub", "nonce"]})
+    except AuthenticationError:
+        raise
+    except (PyJWTError, PyJWKClientError, TypeError, ValueError) as exc:
+        raise AuthenticationError("ID token validation failed") from exc
+    if claims.get("typ") is not None and str(claims["typ"]).lower() != "id":
+        raise AuthenticationError("the binding token is not an ID token")
+    if principal.actor_kind != "human" or claims.get("sub") != principal.user_id:
+        raise AuthenticationError("the ID token is for a different person than the access token")
+    if not isinstance(claims.get("nonce"), str) or not hmac.compare_digest(claims["nonce"], nonce):
+        raise AuthenticationError("the sign-in was made for a different package (nonce does not match these bytes)")
+    sid, auth_time = claims.get("sid"), claims.get("auth_time")
+    same_session = sid is not None and principal.sign_in_session is not None and sid == principal.sign_in_session
+    same_time = auth_time is not None and principal.signed_in_at is not None and auth_time == principal.signed_in_at
+    if not (same_session or same_time) or (sid is not None and principal.sign_in_session not in {None, sid}) or (
+            auth_time is not None and principal.signed_in_at not in {None, auth_time}):
+        raise AuthenticationError("the ID token and the access token come from different sign-ins")
+
+
 def verifier_from_environment() -> OIDCAccessTokenVerifier | None:
     oidc_settings = OIDCSettings.from_env()
     current = settings()
@@ -189,6 +224,7 @@ def browser_login_config() -> dict[str, Any]:
     # provider for a fresh login (prompt=login), so the attestation comes from a new interactive sign-in.
     config["attest_scope"] = current.human_attestation_scope or None
     config["attest_once"] = current.human_attestation_once_per_sign_in
+    config["attest_bound"] = current.human_attestation_bound
     return config
 
 

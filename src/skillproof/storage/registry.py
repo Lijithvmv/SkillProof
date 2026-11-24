@@ -266,14 +266,23 @@ class SkillRegistry:
                 "SELECT * FROM skill_versions WHERE tenant_id=? AND skill_name=? AND package_fingerprint=?",
                 (tenant_id, name, fingerprint),
             ).fetchone()
+            attesting = False
             if existing:
-                if existing["assurance_hash"] != assurance_hash:
+                if existing["assurance_hash"] == assurance_hash:
+                    return self._decode(existing)
+                earlier = json.loads(existing["provenance_json"]) if existing["provenance_json"] else {}
+                # A person attests an exact package that is already registered but not yet approved and not yet attested:
+                # the same version is re-compared as a human-written change and its report replaced. Anything else with a
+                # different report is refused, as before.
+                attesting = ((provenance or {}).get("author_kind") == "human" and earlier.get("author_kind") != "human"
+                             and existing["state"] in {"pending_review", "not_eligible"})
+                if not attesting:
                     raise RegistryError("this package fingerprint is already registered with a different assurance report")
-                return self._decode(existing)
+                version_id = existing["version_id"]
             change = None
             if capability_manifest is not None:
                 change = self._change(tenant_id, name, capability_manifest, fallback_previous=True,
-                                      full_review=needs_full_review(provenance))
+                                      full_review=needs_full_review(provenance), exclude_fingerprint=fingerprint)
                 summary["capability_decision"] = change["decision"]
                 summary["capability_counts"] = change["counts"]
             if provenance is not None:
@@ -284,13 +293,21 @@ class SkillRegistry:
                                   (tenant_id, key)).fetchone()
                 if used is not None:  # two uploads raced on one sign-in: the loser registers nothing
                     raise RegistryError(f"this sign-in already attested version {used['version_id']}; sign in again to attest")
-            db.execute(
-                f"INSERT INTO skill_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (version_id, tenant_id, name, fingerprint, assurance_hash,
-                 json.dumps(summary, sort_keys=True, separators=(",", ":")), artifact_uri,
-                 state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change), _dump(provenance)),
-            )
-            self._event(version_id, tenant_id, actor_id, "registered", state, now)
+            if attesting:
+                db.execute(
+                    "UPDATE skill_versions SET assurance_hash=?, summary_json=?, state=?, updated_at=?, assurance_json=?, "
+                    "capabilities_json=?, change_json=?, provenance_json=? WHERE tenant_id=? AND version_id=?",
+                    (assurance_hash, json.dumps(summary, sort_keys=True, separators=(",", ":")), state, now,
+                     _dump(assurance_report), _dump(capability_manifest), _dump(change), _dump(provenance), tenant_id, version_id))
+                self._event(version_id, tenant_id, actor_id, "attested", f"{state}; earlier report replaced", now)
+            else:
+                db.execute(
+                    f"INSERT INTO skill_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (version_id, tenant_id, name, fingerprint, assurance_hash,
+                     json.dumps(summary, sort_keys=True, separators=(",", ":")), artifact_uri,
+                     state, actor_id, now, now, _dump(assurance_report), _dump(capability_manifest), _dump(change), _dump(provenance)),
+                )
+                self._event(version_id, tenant_id, actor_id, "registered", state, now)
             if key:
                 db.execute("INSERT INTO attestation_sign_ins (tenant_id, sign_in_key, version_id, actor_id, used_at) "
                            "VALUES (?, ?, ?, ?, ?)", (tenant_id, key, version_id, actor_id, now))
@@ -412,11 +429,14 @@ class SkillRegistry:
                              (tenant_id, sign_in_key)).fetchone()
         return None if row is None else str(row["version_id"])
 
-    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, full_review: bool = False) -> CapabilityChange:
+    def preview_change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, full_review: bool = False,
+                       exclude_fingerprint: str | None = None) -> CapabilityChange:
         """What a manifest would add over the tenant's active version (or the latest one while nothing is approved),
-        ranked, without registering anything. Used to put the capability change into the assurance gate."""
+        ranked, without registering anything. Used to put the capability change into the assurance gate. The package's
+        own earlier registration is never its own previous version."""
         with self.db.transaction(tenant_id):
-            return self._change(tenant_id, skill_name, manifest, fallback_previous=True, full_review=full_review)
+            return self._change(tenant_id, skill_name, manifest, fallback_previous=True, full_review=full_review,
+                                exclude_fingerprint=exclude_fingerprint)
 
     def promote(
         self, tenant_id: str, version_id: str, assurance_report: Mapping[str, Any],
@@ -474,7 +494,7 @@ class SkillRegistry:
         return self.get_version(tenant_id, version_id)
 
     def _change(self, tenant_id: str, skill_name: str, manifest: dict[str, Any], *, fallback_previous: bool = False,
-                full_review: bool = False) -> CapabilityChange:
+                full_review: bool = False, exclude_fingerprint: str | None = None) -> CapabilityChange:
         """What this manifest adds over the tenant's active version of the skill, ranked by triage. Runs inside the
         caller's transaction.
 
@@ -493,8 +513,9 @@ class SkillRegistry:
         if active is None and fallback_previous:
             previous = db.execute(
                 "SELECT version_id, capabilities_json FROM skill_versions WHERE tenant_id=? AND skill_name=? "
-                f"AND capabilities_json IS NOT NULL ORDER BY created_at DESC, {db.insertion_order} DESC LIMIT 1",
-                (tenant_id, skill_name),
+                "AND capabilities_json IS NOT NULL AND package_fingerprint <> ? "
+                f"ORDER BY created_at DESC, {db.insertion_order} DESC LIMIT 1",
+                (tenant_id, skill_name, exclude_fingerprint or ""),
             ).fetchone()
         if previous is not None:
             against, against_id, old = "previous_version_not_approved", previous["version_id"], json.loads(previous["capabilities_json"])

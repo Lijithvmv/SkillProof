@@ -39,6 +39,9 @@ async def register_version(
         "Who wrote this package: {\"author_kind\": \"human\"|\"agent\"|\"unknown\", \"agent\", \"model\", \"session\", "
         "\"derived_from\", \"note\"}. Omitted means the uploader attests a person wrote it. An agent identity is always "
         "recorded as the author; a declaration can raise the review bar, never lower it.")),
+    attestation_id_token: str | None = Form(default=None, description=(
+        "The ID token of a sign-in made to attest this package: its nonce is skp1.<sha256(salt + '.' + the zip's bytes)>.")),
+    attestation_salt: str | None = Form(default=None, max_length=200),
 ) -> dict[str, Any]:
     principal = current_principal(request)
     governance = current_governance(request)
@@ -59,12 +62,27 @@ async def register_version(
         authorship_rules.resolve(principal, authored)  # refuse a malformed declaration before any analysis
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"provenance_json is invalid: {exc}") from exc
+    binding = None
+    if attestation_id_token:
+        from skillproof.oidc import AuthenticationError, verify_binding
+
+        verifier = getattr(request.app.state, "oidc_verifier", None)
+        if verifier is None or not attestation_salt:
+            binding = (False, "the binding needs OIDC sign-in and the salt the nonce was made with")
+        else:
+            try:
+                verify_binding(verifier, attestation_id_token[:20000], principal=principal,
+                               nonce=authorship_rules.package_nonce(data, attestation_salt))
+                binding = (True, "bound to this package: signed in for exactly these bytes (ID token nonce)")
+            except AuthenticationError as exc:
+                binding = (False, f"binding refused: {exc}")
     cited = [e.strip() for e in (experiment_ids or "").split(",") if e.strip()]
     if cited and evidence_json:
         raise HTTPException(status_code=422, detail="Cite experiments or declare evidence, not both.")
     try:
         assessment = guarded(lambda: catalogue.assess_package(governance, principal, raw, declared=declared, cite=cited,
-                                                               folder=package.zip_folder(data), authored=authored))
+                                                               folder=package.zip_folder(data), authored=authored,
+                                                               binding=binding))
     except EvidenceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:  # no SKILL.md name, or a package the engine cannot read

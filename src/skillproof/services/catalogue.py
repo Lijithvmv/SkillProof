@@ -146,7 +146,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
                    oversize: dict[str, str] | None = None, name: str | None = None, folder: str | None = None,
                    declared: dict[str, Any] | None = None, cite: list[str] | None = None, cite_all_runs: bool = False,
                    policy: AssurancePolicy | None = None, authored: dict[str, Any] | None = None,
-                   source: authorship_rules.Source = "upload") -> Assessment:
+                   source: authorship_rules.Source = "upload", binding: tuple[bool, str] | None = None) -> Assessment:
     """Analyse a package and assess it for registration.
 
     Run evidence: `cite` names recorded experiments (each must have run this SKILL.md); `cite_all_runs` cites every
@@ -161,7 +161,7 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
 
     key = authorship_rules.sign_in_key(principal) if settings().human_attestation_once_per_sign_in else None
     used_by = governance.attestation_of(principal, key) if key and source != "installed_import" else None
-    authorship = dict(authorship_rules.resolve(principal, authored, source=source, sign_in_used_by=used_by))
+    authorship = dict(authorship_rules.resolve(principal, authored, source=source, sign_in_used_by=used_by, binding=binding))
     text = package.as_text(files)
     # Authoring rules look at the skill's folder name (it should match the SKILL.md name); the package itself is rooted
     # at that folder, so the name is passed separately.
@@ -191,7 +191,8 @@ def assess_package(governance: GovernanceAccess, principal: Principal, files: di
     elif declared:
         behaviour, provenance = dict(declared), {"source": "declared_by_uploader"}
 
-    change = governance.preview_change(principal, catalogue_name, manifest, full_review=authorship_rules.full_review(authorship))
+    change = governance.preview_change(principal, catalogue_name, manifest, full_review=authorship_rules.full_review(authorship),
+                                       exclude_fingerprint=report["package_fingerprint"])
     security = report.get("security") or {}
     decision, counts = change["decision"], dict(change["counts"])
     if observed and LEVELS.get(observed["decision"], 0) > LEVELS.get(decision, 0):

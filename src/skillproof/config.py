@@ -19,6 +19,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE | human_attestation_max_age_seconds | seconds since the token's interactive sign-in (auth_time) within which a "human-written" attestation counts (900) |
 | SKILLPROOF_HUMAN_ATTESTATION_AMR | human_attestation_methods | comma-separated sign-in methods (amr), at least one of which a "human-written" attestation's token must show, e.g. mfa,hwk (empty: not required) |
 | SKILLPROOF_HUMAN_ATTESTATION_ONCE | human_attestation_once_per_sign_in | true: each interactive sign-in (sid + auth_time) attests at most one version; a later attestation from the same sign-in is recorded as unknown and names the version that used it (default false) |
+| SKILLPROOF_HUMAN_ATTESTATION_BOUND | human_attestation_bound | true: a "human-written" attestation must come with the ID token of a sign-in made for this exact package (its nonce names the package's bytes), from the same sign-in as the access token (default false) |
 | SKILLPROOF_HUMAN_ATTESTATION_SCOPE | human_attestation_scope | an OAuth scope a "human-written" attestation's token must carry, e.g. skillproof:attest, requested only by a person's own sign-in (empty: not required) |
 | SKILLPROOF_MIN_LOAD_RATE / SKILLPROOF_MAX_FALSE_LOAD_RATE | min_load_rate, max_false_load_rate | load-rate gate: least share of relevant requests that pick the skill (0.5), most share of unrelated ones (0.2) |
 | SKILLPROOF_EVAL_MODEL / _DRAFT_MODEL / _TASKS / _REPEATS | evaluation | evaluation jobs; off when no model is set |
@@ -120,6 +121,9 @@ class Settings:
     human_attestation_once_per_sign_in: bool = False
     # A scope only a person's own sign-in requests; tokens obtained otherwise (CLI, refreshed without it) cannot attest.
     human_attestation_scope: str = ""
+    # The person signs in for one package: the ID token's nonce is a hash of the package's bytes, so a token taken from
+    # that sign-in can attest only the package the person chose.
+    human_attestation_bound: bool = False
     min_load_rate: float = 0.5
     max_false_load_rate: float = 0.2
 
@@ -164,6 +168,7 @@ def settings() -> Settings:
         human_attestation_methods=tuple(m.strip() for m in (_get("SKILLPROOF_HUMAN_ATTESTATION_AMR") or "").split(",") if m.strip()),
         human_attestation_once_per_sign_in=_get("SKILLPROOF_HUMAN_ATTESTATION_ONCE").lower() in {"1", "true", "yes", "on"},
         human_attestation_scope=_get("SKILLPROOF_HUMAN_ATTESTATION_SCOPE"),
+        human_attestation_bound=_get("SKILLPROOF_HUMAN_ATTESTATION_BOUND").lower() in {"1", "true", "yes", "on"},
         min_load_rate=_float("SKILLPROOF_MIN_LOAD_RATE", 0.5),
         max_false_load_rate=_float("SKILLPROOF_MAX_FALSE_LOAD_RATE", 0.2),
     )

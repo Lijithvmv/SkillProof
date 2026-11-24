@@ -75,7 +75,7 @@ def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof
     @app.post("/authorize")
     def authorize(client_id_: str = Form(alias="client_id"), redirect_uri: str = Form(), state: str = Form(""),
                   code_challenge: str = Form(), user: str = Form(), role: str = Form(), tenant: str = Form(),
-                  nonce: str = Form(""), agent: str = Form(""), amr: str = Form("pwd")) -> RedirectResponse:
+                  nonce: str = Form(""), agent: str = Form(""), amr: str = Form("pwd"), scope: str = Form("openid")) -> RedirectResponse:
         check_request(client_id_, redirect_uri)
         if role not in ROLES or not user.strip() or not tenant.strip():
             raise HTTPException(400, "user, role and tenant are required")
@@ -83,7 +83,7 @@ def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof
         codes[code] = {"client_id": client_id_, "redirect_uri": redirect_uri, "challenge": code_challenge, "sub": user.strip(),
                        "role": role, "tenant": tenant.strip(), "nonce": nonce, "expires": time.time() + 60,
                        "auth_time": int(time.time()), "agent": agent.strip(),  # the interactive sign-in happens here
-                       "amr": [m.strip() for m in amr.split(",") if m.strip()]}
+                       "amr": [m.strip() for m in amr.split(",") if m.strip()], "sid": secrets.token_hex(8), "scope": scope}
         return RedirectResponse(redirect_uri + "?" + urlencode({"code": code, "state": state}), status_code=303)
 
     @app.post("/token")
@@ -114,11 +114,15 @@ def create_app(issuer: str, redirects: list[str], *, audience: str = "skillproof
         now = int(time.time())
         claims = {"iss": issuer, "aud": audience, "sub": grant["sub"], "iat": now, "exp": now + 900, "jti": str(uuid.uuid4()),
                   "client_id": client_id_, "skillproof_role": grant["role"], "tenant_id": grant["tenant"],
-                  "auth_time": grant["auth_time"], "amr": grant["amr"]}
+                  "auth_time": grant["auth_time"], "amr": grant["amr"], "sid": grant["sid"], "scope": grant["scope"]}
         if grant["agent"]:  # delegation: an agent acting for the signed-in person (RFC 8693 act claim)
             claims["act"] = {"sub": grant["agent"]}
         access = jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid, "typ": "at+jwt"})
-        return JSONResponse({"access_token": access, "token_type": "Bearer", "expires_in": 900},
+        # The ID token: for the client (the page), carrying the nonce it chose and the same sign-in (sid, auth_time).
+        id_claims = {"iss": issuer, "aud": client_id_, "sub": grant["sub"], "iat": now, "exp": now + 900, "nonce": grant["nonce"],
+                     "sid": grant["sid"], "auth_time": grant["auth_time"], "amr": grant["amr"]}
+        id_token = jwt.encode(id_claims, key, algorithm="RS256", headers={"kid": kid, "typ": "JWT"})
+        return JSONResponse({"access_token": access, "id_token": id_token, "token_type": "Bearer", "expires_in": 900},
                             headers={"Cache-Control": "no-store"})
 
     return app

@@ -109,3 +109,72 @@ def test_login_config_tells_the_page_how_to_attest(monkeypatch):
     assert strict["attest_scope"] == "skillproof:attest" and strict["attest_once"] is True
     page = (Path(__file__).parents[1] / "src" / "skillproof" / "web" / "catalogue.html").read_text(encoding="utf-8")
     assert 'url.searchParams.set("prompt", "login")' in page and "a.attest_scope" in page
+
+
+# Decision: with bound attestation, an upload counts as human-written only with the ID token of a sign-in made for that
+# exact package (nonce = hash of a salt and the zip's bytes) from the same sign-in as the access token. The same sign-in
+# cannot attest different bytes, an upload without the ID token is unknown, and an access token is no ID token.
+def test_an_attestation_is_bound_to_the_exact_package(tmp_path, monkeypatch):
+    from skillproof.approvals import SQLiteApprovalStore
+    from skillproof.authorization import GovernanceAccess
+    from skillproof.history import EvaluationHistoryStore
+    from skillproof.provenance import package_nonce
+    from skillproof.registry import SQLiteSkillRegistry
+
+    from test_registry_api import EVIDENCE, SKILL, zip_of
+
+    monkeypatch.setenv("SKILLPROOF_HUMAN_ATTESTATION_BOUND", "true")
+    provider = TestClient(provider_module.create_app(ISSUER, [REDIRECT]))
+    salt = "salt-123"
+
+    def sign_in_for(nonce):
+        verifier_text, challenge = pkce()
+        form = {"client_id": "skillproof-catalogue", "redirect_uri": REDIRECT, "state": "s1", "code_challenge": challenge,
+                "user": "alice", "role": "evaluator", "tenant": "local", "nonce": nonce}
+        location = provider.post("/authorize", data=form, follow_redirects=False).headers["location"]
+        return exchange(provider, parse_qs(urlparse(location).query)["code"][0], verifier_text).json()
+
+    def pkg(n):  # distinct bytes per case: re-uploading identical bytes returns the version already registered
+        return zip_of(SKILL + f"\nVariant {n}.\n")
+
+    tokens = sign_in_for(package_nonce(pkg("A"), salt))
+    governance = GovernanceAccess(registry=SQLiteSkillRegistry(tmp_path / "registry.db"), approvals=SQLiteApprovalStore(tmp_path / "approvals.db"),
+                                  history=EvaluationHistoryStore(tmp_path / "history.db"))
+    api_app.state.governance = governance
+    api_app.state.oidc_verifier = OIDCAccessTokenVerifier(
+        OIDCSettings(issuer=ISSUER, audience="skillproof-api", jwks_url=ISSUER + "/jwks", client_id="skillproof-catalogue"),
+        signing_keys=Keys(provider.get("/jwks").json()))
+    try:
+        client = TestClient(api_app)
+
+        def upload(data, bearer=None, **fields):
+            response = client.post("/api/v1/registry/versions", files={"file": ("skill.zip", data)},
+                                   data={"evidence_json": EVIDENCE, **fields},
+                                   headers={"Authorization": "Bearer " + (bearer or tokens["access_token"])})
+            assert response.status_code == 200, response.text
+            upload.last = response.json()["version"]
+            made = upload.last["provenance"]
+            return made["author_kind"], " ".join(made["basis"])
+
+        kind, why = upload(pkg("B"), attestation_id_token=tokens["id_token"], attestation_salt=salt)
+        assert kind == "unknown" and "different package" in why, why
+        kind, why = upload(pkg("C"))
+        assert kind == "unknown" and "not bound to a sign-in made for this package" in why, why
+        unattested = upload.last["version_id"]
+        kind, why = upload(pkg("D"), attestation_id_token=tokens["access_token"], attestation_salt=salt)
+        assert kind == "unknown" and "binding refused" in why, why
+        stranger = sign_in_for(package_nonce(pkg("E"), salt))  # another sign-in, made for the bytes uploaded below
+        kind, why = upload(pkg("E"), attestation_id_token=stranger["id_token"], attestation_salt=salt)
+        assert kind == "unknown" and "different sign-ins" in why, why
+        kind, why = upload(pkg("A"), attestation_id_token=tokens["id_token"], attestation_salt=salt)
+        assert kind == "human" and "exactly these bytes" in why, why
+        # The person then attests the package already registered as unknown: the same version becomes human-written.
+        later = sign_in_for(package_nonce(pkg("C"), salt))
+        kind, why = upload(pkg("C"), bearer=later["access_token"], attestation_id_token=later["id_token"], attestation_salt=salt)
+        assert kind == "human" and upload.last["version_id"] == unattested, why
+        assert "attested" in [e["action"] for e in upload.last["events"]], upload.last["events"]
+    finally:
+        api_app.state.oidc_verifier = None
+        api_app.state.governance = None
+        governance.registry.close()
+        governance.approvals.close()

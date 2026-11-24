@@ -76,6 +76,13 @@ def _declared(declared: dict[str, Any] | None) -> dict[str, str]:
     return out
 
 
+def package_nonce(zip_bytes: bytes, salt: str) -> str:
+    """The OIDC nonce of a sign-in made to attest one package: a hash of a fresh salt and the package's exact bytes."""
+    import hashlib
+
+    return "skp1." + hashlib.sha256(salt.encode("utf-8") + b"." + zip_bytes).hexdigest()
+
+
 def sign_in_key(principal: Principal) -> str | None:
     """Which interactive sign-in a token comes from (tenant, subject, session id, sign-in time), hashed; None for a
     token with no sign-in time or a development sign-in."""
@@ -89,10 +96,11 @@ def sign_in_key(principal: Principal) -> str | None:
 
 
 def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, source: Source = "upload",
-            sign_in_used_by: str | None = None) -> Provenance:
+            sign_in_used_by: str | None = None, binding: tuple[bool, str] | None = None) -> Provenance:
     """The provenance of a version registered by this principal, with this declaration, from this source.
     `sign_in_used_by` names the version this token's sign-in already attested, when the server allows one attestation
-    per sign-in (the caller looks it up with sign_in_key)."""
+    per sign-in (the caller looks it up with sign_in_key). `binding` is (bound, reason): whether the upload came with
+    the ID token of a sign-in made for this exact package (oidc.verify_binding)."""
     claim = _declared(declared)
     basis: list[str] = []
     attested: str | None = None
@@ -130,12 +138,19 @@ def resolve(principal: Principal, declared: dict[str, Any] | None = None, *, sou
                 kind = "unknown"
                 basis.append(f"not accepted as human-written: the token lacks the scope {settings().human_attestation_scope!r}, "
                              "which only a person's own sign-in for attesting requests")
+            elif settings().human_attestation_bound and not (binding and binding[0]):
+                kind = "unknown"
+                basis.append("not accepted as human-written: " + (binding[1] if binding else
+                             "the upload is not bound to a sign-in made for this package (the ID token's nonce must name "
+                             "its bytes)"))
             elif settings().human_attestation_once_per_sign_in and sign_in_used_by:
                 kind = "unknown"
                 basis.append(f"not accepted as human-written: this sign-in already attested version {sign_in_used_by}; each "
                              "sign-in attests one version, so a reused token cannot attest again (sign in again to attest)")
             elif settings().human_attestation_once_per_sign_in:
                 attested = sign_in_key(principal)
+            if kind == "human" and binding and binding[0]:
+                basis.append(binding[1])
     record = Provenance(
         author_kind=kind, registered_by=principal.user_id, registered_as=principal.actor_kind,
         on_behalf_of=principal.on_behalf_of, agent=claim.get("agent") or (principal.user_id if principal.actor_kind == "agent" else None),

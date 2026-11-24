@@ -7,7 +7,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from skillproof.engines.capabilities.positions import CATEGORIES, DOC_SUFFIXES, SCOPE_RANK, TEST_NAME, TEST_PATH
+from skillproof.engines.capabilities.positions import CATEGORIES, DOC_SUFFIXES, SCOPE_RANK, SHIPPED_CONFIG, TEST_NAME, TEST_PATH
 
 
 
@@ -20,9 +20,9 @@ def source_kind(location: str, invoked: set[str] | frozenset[str] = frozenset())
     name = PurePosixPath(path).name
     if (TEST_PATH.search(path) or TEST_NAME.match(name)) and path not in invoked:
         return "test"
-    if PurePosixPath(name).suffix.lower() in DOC_SUFFIXES:
+    if PurePosixPath(name).suffix.lower() in DOC_SUFFIXES and not SHIPPED_CONFIG.search(path):
         return "instructions"
-    return "shipped"
+    return "shipped"  # scripts, binaries, and configuration that runs by itself (a CI workflow, .mcp.json)
 
 
 def _hook_additions(before: dict[str, list[str]], after: dict[str, list[str]], gained: dict[str, list[str]]) -> tuple[dict[str, list[str]], list[str]]:

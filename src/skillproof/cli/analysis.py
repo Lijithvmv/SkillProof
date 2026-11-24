@@ -45,6 +45,19 @@ def run_scan(args) -> Result:
     return scan_archive(args.archive)
 
 
+def run_lint(args) -> Result:
+    """Structural checks (engines/lint.py) for a skill directory or ZIP. Advice, not a gate: exit 1 when a check fails."""
+    try:
+        raw = read_package_bytes(args.path)
+    except (OSError, PackageError) as exc:
+        return {"error": str(exc)}, 2
+    text = {name: data.decode("utf-8", errors="replace") for name, data in raw.items()}
+    lint = analyze_files(text).get("lint")
+    if lint is None:
+        return {"error": "no SKILL.md in the package"}, 2
+    return lint, 1 if lint["failed"] else 0
+
+
 def run_update_report(args) -> Result:
     try:
         result = build_update_report(args.old, args.new, old_activation=args.old_activation, new_activation=args.new_activation,
@@ -109,6 +122,13 @@ def add(commands, conf) -> None:
     scan.add_argument("archive", help="Path to skill package ZIP.")
     scan.add_argument("--output", default="-", help="Report destination; use - for stdout.")
     scan.set_defaults(run=run_scan)
+
+    lint = commands.add_parser("lint", help="Pass-or-fail structural checks for a skill directory or ZIP: numbered steps, a way to "
+                               "check each step, a concrete command per step, an error-recovery table, body length, description "
+                               "length, referenced files present, no tool server. Advice with evidence; exit 1 when a check fails.")
+    lint.add_argument("path", help="Skill directory or ZIP.")
+    lint.add_argument("--output", default="-", help="Report destination; use - for stdout.")
+    lint.set_defaults(run=run_lint)
 
     update = commands.add_parser("update-report", help="Join capability diff, load rate, lift and grader agreement for one skill update. Exit 2 block, 1 review or no decision, 0 accept.")
     update.add_argument("old", help="Old skill directory or ZIP.")

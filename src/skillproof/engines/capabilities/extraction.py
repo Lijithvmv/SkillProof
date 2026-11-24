@@ -15,7 +15,7 @@ from typing import Any
 
 from skillproof.engines.capabilities.decoding import decode_text
 from skillproof.engines.capabilities.model import Manifest
-from skillproof.engines.capabilities.positions import AGENT_CONFIG, AGENT_INSTALL_DIR, AGENT_SPAWNING, ALTERNATION, ANTI_EXAMPLE, ARGV_AGENT, BINARY_SUFFIXES, BRACKET_SEGMENT, CHANGELOG_FILE, COMMENT_LINE, CREDENTIALS, CSP_LINE, DESTRUCTIVE, DOC_COMMENT, DOC_SUFFIXES, ECHO_LINE, ENV_ALL, ENV_INHERIT, ENV_OUT, ENV_READ, FETCH_CUE, FILE_COPY, FRONTMATTER, IDENTIFIER_HOSTS, INLINE_CODE, INSTALL, IPV4, IP_DATA_KEY, LIST_ITEM, LOCAL_BIN, LOCATE_BEFORE, LOCKFILES, MULTI_INSTALL_TOOLS, NAMESPACE_CONTEXT, NEGATED, NEGATED_LABEL, NETWORK_CLIENTS, NOT_CONTACTED_CONTEXT, NOT_EXTERNAL, PERSISTENCE, PLACEHOLDER_ARG, PLACEHOLDER_HOST, PLACEHOLDER_PATH, PLACEHOLDER_TOKEN, PROCESS_EXEC, PROSE_FENCES, PROVENANCE, SCRIPT_SUFFIXES, SETTING_SHELL, SHELL_RC, SHELL_SCRIPT_SUFFIXES, STOP_PACKAGES, TABLE_ROW, TEST_NAME, TEST_PATH, TEXT_SUFFIXES, TOOL_ALIASES, URL, VENDORED, WRITE_CUE, YAML_TEXT_VALUE, _declared_tools, _more_packages, _prose_cue, called_names, config_write, contact_reason, delete_scope, describes_span, exec_names, exec_reason, in_message_string, is_secret_env, joined_path_line, mask_search_patterns, matcher_scope, written_names
+from skillproof.engines.capabilities.positions import AGENT_CONFIG, AGENT_INSTALL_DIR, AGENT_SPAWNING, ALTERNATION, ANTI_EXAMPLE, ARGV_AGENT, BINARY_SUFFIXES, BRACKET_SEGMENT, CHANGELOG_FILE, COMMENT_LINE, CREDENTIALS, CSP_LINE, DESTRUCTIVE, DOC_COMMENT, DOC_SUFFIXES, ECHO_LINE, ENV_ALL, ENV_DUMP_UNATTENDED, ENV_INHERIT, ENV_OUT, ENV_READ, FETCH_CUE, FILE_COPY, FRONTMATTER, IDENTIFIER_HOSTS, INLINE_CODE, INSTALL, IPV4, IP_DATA_KEY, LIST_ITEM, LOCAL_BIN, LOCATE_BEFORE, LOCKFILES, MULTI_INSTALL_TOOLS, NAMESPACE_CONTEXT, NEGATED, NEGATED_LABEL, NETWORK_CLIENTS, NOT_CONTACTED_CONTEXT, NOT_EXTERNAL, PERSISTENCE, PLACEHOLDER_ARG, PLACEHOLDER_HOST, PLACEHOLDER_PATH, PLACEHOLDER_TOKEN, PROCESS_EXEC, PROSE_FENCES, PROVENANCE, SCRIPT_SUFFIXES, SETTING_SHELL, SHELL_RC, SHELL_SCRIPT_SUFFIXES, STOP_PACKAGES, TABLE_ROW, TEST_NAME, TEST_PATH, TEXT_SUFFIXES, TOOL_ALIASES, URL, VENDORED, WRITE_CUE, YAML_TEXT_VALUE, _declared_tools, _more_packages, _prose_cue, called_names, config_write, contact_reason, delete_scope, describes_span, exec_names, exec_reason, in_message_string, is_secret_env, joined_path_line, mask_search_patterns, matcher_scope, written_names
 
 
 # --------------------------------------------------------------------------------------------- extraction
@@ -343,19 +343,53 @@ def _add_hooks(manifest: Manifest, path: str, suffix: str, text: str) -> None:
         manifest.add("hooks", f"{event} {kind}: {target}", location)
         manifest.scope("hooks", f"{event} {kind}: {target}", matcher_scope(matcher))
         for value in [command, str(handler.get("url", ""))]:
-            if not value:
+            _scan_unattended(manifest, value, location)  # the hook's own command line runs unattended: read as code
+
+
+def _scan_unattended(manifest: Manifest, value: str, location: str) -> None:
+    """Read a command that runs without anyone reading it first (a hook, a CI step, a tool server's launch line) as
+    code: clients, execution, persistence and secrets by pattern, delete reach, hosts and package installs."""
+    if not value:
+        return
+    for category, patterns in HOOK_TEXT_GROUPS:
+        _scan_patterns(manifest, category, patterns, value, location)
+    if ENV_ALL.search(value) or ENV_DUMP_UNATTENDED.search(value):  # printenv, env |, $(env): the whole environment
+        manifest.add("credential_access", "env:<all>", location)
+    _add_delete_scope(manifest, value)
+    for host in URL.finditer(value):
+        name = host.group(1).lower()
+        if not NOT_EXTERNAL.match(name) and not PLACEHOLDER_HOST.search(name):
+            manifest.add("network_hosts", name, location)
+    for install in INSTALL.finditer(value):
+        groups = [g for g in install.groups() if g]
+        manifest.add("package_installs", f"{re.sub(chr(92) + 's+', ' ', groups[0]).lower()}:{groups[-1]}", location)
+
+
+def _add_shipped_config(manifest: Manifest, path: str, suffix: str, text: str) -> None:
+    """A tool server definition (.mcp.json) the package ships is agent configuration it writes; the server it launches
+    is read like a hook's command. In 8,807 public skills none shipped one. (A CI workflow inside a skill folder is not
+    read this way: it does not run when the skill is installed, and the 14 of 8,807 skills that had one were
+    repositories keeping their skill at the root next to their own tests. A script that writes a workflow into the
+    user's project at run time is caught by the sandbox.)"""
+    name = PurePosixPath(path).name.lower()
+    if suffix == ".json" and (name == ".mcp.json" or '"mcpServers"' in text):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            manifest.add("agent_config_writes", f"{name} (unreadable)", path)
+            return
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict):
+            return
+        manifest.add("agent_config_writes", ".mcp.json" if name == ".mcp.json" else f"tool servers in {name}", path)
+        for server, spec in servers.items():
+            if not isinstance(spec, dict):
                 continue
-            # The hook's own command line runs unattended, so it is read as code.
-            for category, patterns in HOOK_TEXT_GROUPS:
-                _scan_patterns(manifest, category, patterns, value, location)
-            _add_delete_scope(manifest, value)
-            for host in URL.finditer(value):
-                name = host.group(1).lower()
-                if not NOT_EXTERNAL.match(name) and not PLACEHOLDER_HOST.search(name):
-                    manifest.add("network_hosts", name, location)
-            for install in INSTALL.finditer(value):
-                groups = [g for g in install.groups() if g]
-                manifest.add("package_installs", f"{re.sub(chr(92) + 's+', ' ', groups[0]).lower()}:{groups[-1]}", location)
+            launch = " ".join([str(spec.get("command") or ""), *map(str, spec.get("args") or [])]).strip()
+            offset = text.find(f'"{server}"')
+            location = f"{path}:{text.count(chr(10), 0, offset) + 1 if offset >= 0 else 1}"
+            _scan_unattended(manifest, launch, location)
+            _scan_unattended(manifest, str(spec.get("url") or ""), location)
 
 
 # ------------------------------------------------------------------ per-file cache
@@ -455,6 +489,7 @@ def build_manifest(files: dict[str, bytes]) -> dict[str, Any]:
                     manifest.add("declared_tools", tool, f"SKILL.md:{key_line}")
             if not TEST_PATH.search(path):
                 _add_hooks(manifest, path, suffix, text)
+                _add_shipped_config(manifest, path, suffix, text)
             trail_start = len(manifest.decode_trail)
             if suffix == ".py":
                 text = _mask_python(text)

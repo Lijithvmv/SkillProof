@@ -536,6 +536,11 @@ ENV_INHERIT = re.compile(r"\benv\s*[=:]\s*(?:\{\s*(?:\*\*|\.\.\.)\s*)?(?:os\.env
 ENV_OUT = re.compile(r"json\.dumps|JSON\.stringify|\bprint\(|console\.\w+\(|\.write\(|\bpost\(|\bsend\(|\bfetch\(|requests\.|"
                      r"\bfor\s+\w+(?:\s*,\s*\w+)?\s+(?:in|of)\b|\.items\(\)|\.keys\(\)|Object\.(?:keys|entries|values)\(", re.I)
 ENV_ALL = re.compile(r"(?<!in )(?<!dict\()(?<!dict\(\")(?<!dict\(')\bos\.environ\b(?![\[.(])|\bprocess\.env\b(?![.\[])|\bprintenv\b|\benv\s*\|")
+# In unattended commands only (hooks, tool-server launch lines): $(env) prints the whole environment. Not in ENV_ALL: every real
+# $(env) in 8,807 public skills was an audit skill describing the attack, which ENV_ALL would raise at block level.
+ENV_DUMP_UNATTENDED = re.compile(r"\$\(\s*env\s*\)")
+# Configuration a package ships that takes effect without anyone reading it: it runs, it is not documentation.
+SHIPPED_CONFIG = re.compile(r"(?:^|/)\.mcp\.json$", re.I)
 INSTALL = re.compile(
     r"\b(pip3?|uv\s+pip|python3?\s+-m\s+pip)\s+install\s+" + r"(?:" + r"(?:--python|-i|--index-url|--extra-index-url|--index|-f|--find-links|-c|--constraint|--target|-t|--no-binary|--only-binary|--no-binary-package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!+:/@*]+)"
     r"|\buv\s+add\s+" + r"(?:" + r"(?:--python|--index-url|--extra-index-url|--index|-r|--requirements|--no-binary-package|--no-build-package|--package)(?:\s+|=)\S+\s+|-[\w-]+(?:=\S+)?\s+" + r")*[\"']?([A-Za-z0-9_.\-\[\]=<>~!*]+)"

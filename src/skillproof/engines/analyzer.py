@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 from skillproof.engines.semantic import analyze_instructions
+from skillproof.engines.lint import lint_skill
 from skillproof.engines.security import scan_security
 
 
@@ -52,13 +53,18 @@ def _finding(code: str, severity: str, message: str, evidence: str) -> dict[str,
     return {"code": code, "severity": severity, "message": message, "evidence": evidence[:500]}
 
 
+def _without_dot_slash(value: str) -> str:
+    """Remove leading "./" and "/" only: the leading dot of a name such as .mcp.json or .github/ is part of it."""
+    return re.sub(r"^(?:\./|/)+", "", value)
+
+
 def _normal_path(value: str) -> str:
     return str(PurePosixPath(value.replace("\\", "/")))
 
 
 def analyze_files(files: dict[str, str]) -> dict[str, Any]:
     """Analyze an in-memory package represented by normalized relative paths."""
-    normalized = {_normal_path(path).lstrip("./"): content for path, content in files.items()}
+    normalized = {_without_dot_slash(_normal_path(path)): content for path, content in files.items()}
     skill_paths = sorted(path for path in normalized if PurePosixPath(path).name == "SKILL.md")
     findings: list[dict[str, str]] = []
     if not skill_paths:
@@ -130,12 +136,12 @@ def analyze_files(files: dict[str, str]) -> dict[str, Any]:
             raw = raw.split("#", 1)[0].split("?", 1)[0]
             if not raw:
                 continue
-            target = _normal_path(str(PurePosixPath(source_path).parent / raw)).lstrip("./")
+            target = _without_dot_slash(_normal_path(str(PurePosixPath(source_path).parent / raw)))
             targets.append(target)
         for raw in REF_DEF.findall(content):
             if raw.startswith(("http://", "https://", "mailto:", "#")):
                 continue
-            target = _normal_path(str(PurePosixPath(source_path).parent / raw.split("#", 1)[0])).lstrip("./")
+            target = _without_dot_slash(_normal_path(str(PurePosixPath(source_path).parent / raw.split("#", 1)[0])))
             targets.append(target)
         references[source_path] = sorted(set(targets))
 
@@ -183,6 +189,9 @@ def analyze_files(files: dict[str, str]) -> dict[str, Any]:
         digest.update(b"\0")
     score = max(0, 100 - sum(20 if f["severity"] == "error" else 8 if f["severity"] == "warning" else 2 for f in findings))
     semantic = analyze_instructions(body) if main_path else analyze_instructions("")
+    root = str(PurePosixPath(main_path).parent) if main_path else ""
+    in_skill = {(p[len(root) + 1:] if root not in {"", "."} and p.startswith(root + "/") else p): c for p, c in normalized.items()}
+    lint = lint_skill(body, metadata if isinstance(metadata, dict) else {}, in_skill) if main_path else None
     security = scan_security(normalized)
     return {
         "schema_version": "1.7.0",
@@ -194,6 +203,7 @@ def analyze_files(files: dict[str, str]) -> dict[str, Any]:
         "progressive_disclosure": metrics,
         "structural_score": score,
         "instruction_quality": semantic,
+        "lint": lint,
         "security": security,
         "findings": findings,
     }

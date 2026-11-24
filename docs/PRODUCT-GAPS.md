@@ -238,4 +238,29 @@ exit code and output kept on each program run, and a program stopped at the limi
 (ask) - an unobserved program is never counted as clean.
 Weakest part: hand-made skills (six), two small local models, 3-4 runs per condition.
 
+The qwen CI-workflow rerun with the 60-second limit: caught in 3 of 4 skill runs, 0 of 4 baseline; the three runs
+that ran the script all exited 0 and were caught, and in the fourth the model never ran the script. The miss is the
+model not following the skill, now visible in the record (exit code and output on every program run).
+
+Structural lint (`skillproof lint`, and `lint` in every analysis report): pass-or-fail checks after Uber's published
+skill linter - numbered steps, a way to check each step, a concrete command per step in a technical skill, an
+error-recovery table whose fixes are not "try again", body under 500 lines, description under about 120 tokens,
+referenced files present, no tool server. Advice with evidence, never an assurance gate. On the 72 skills installed
+here (mostly official): steps checked 1 pass / 50 fail, error table 1 / 68, description budget 40 / 32, numbered steps
+50 / 20, body length 65 / 7, files present 70 / 2. Almost no published skill meets that bar. The missing-files check
+found one broken official skill (m5-onboard tells the agent to run scripts/onboard.py and five other files it does not
+ship) and one teaching false positive (a skill about writing skills names example paths without saying "example").
+
+A security hole found while testing the linter: ZIP paths were cleaned with lstrip("./"), which removes every leading
+dot, so a ZIP with .mcp.json or .claude/ at its root was read as mcp.json and claude/ (four places, two of them
+reading uploads). Fixed: only "./" and "/" are removed. And the capability engine did not read a shipped tool server
+at all: a skill shipping .mcp.json that launches `npx -y pkg@latest` showed no capability. Now .mcp.json is agent
+configuration the package writes, its launch line is read like a hook command, and the file counts as shipped code
+for confidence (no public skill of 8,807 ships one, matching Uber's rule to block them). Measured on 8,807 skills in
+the public clones before deciding: a rule for CI workflows inside skill folders was built and then removed (14 skills
+had one, all honest repositories keeping the skill at their root; a workflow there does not run on install), and of
+three new whole-environment patterns two matched 670 harmless lines (docs naming an `env` key, <env> placeholders)
+and were dropped; `$(env)` is read only in unattended commands (hooks, tool-server launch lines), because every
+real `$(env)` in public skills was an audit skill describing the attack.
+
 Open: a provider hosted and run by someone else.

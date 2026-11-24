@@ -26,6 +26,8 @@ from importlib import resources
 from pathlib import PurePosixPath
 from typing import Any
 
+from skillproof.engines.capabilities.positions import SHIPPED_CONFIG
+
 # Lower an item when P(real) is below the cost-weighted cut for its level (Bayes decision: lower when
 # P(real) < cost_false_alarm / (cost_false_alarm + cost_miss)). Missing a real block-level fact is taken as nine times
 # worse than one false alarm; for ask-level facts the two costs are taken as equal. Measured with each held-out scored
@@ -63,8 +65,8 @@ def block_of(files: dict[str, bytes], locations: list[str], fence_cache: dict[st
             path, number = location, ""
         if TEST.search(path):
             kinds.append("test")
-        elif SCRIPT.search(path):
-            kinds.append("step")
+        elif SCRIPT.search(path) or SHIPPED_CONFIG.search(path):
+            kinds.append("step")  # a script, or configuration that runs by itself (a CI workflow, .mcp.json)
         elif number and path in files:
             if path not in fence_cache:
                 fence_cache[path] = _shell_fence_lines(files[path])

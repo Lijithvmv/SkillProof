@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import stat
 import zipfile
 from pathlib import PurePosixPath
@@ -49,7 +50,7 @@ def read_skill_zip_bytes(data: bytes) -> dict[str, bytes]:
                 raise PackageError(f"Symlink entries are not allowed: {raw}")
             if info.is_dir():
                 continue
-            normalized = str(path).lstrip("./")
+            normalized = re.sub(r"^(?:\./|/)+", "", str(path))  # keep a name's own leading dot (.mcp.json, .github/)
             if normalized in files:
                 raise PackageError(f"Duplicate ZIP path: {normalized}")
             if info.file_size > MAX_FILE_SIZE:

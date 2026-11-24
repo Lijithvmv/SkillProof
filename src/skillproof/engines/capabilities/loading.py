@@ -1,6 +1,7 @@
 """Reading a package (folder or ZIP) as raw bytes, within the size limits."""
 from __future__ import annotations
 
+import re
 import stat
 import zipfile
 
@@ -52,6 +53,6 @@ def read_package_bytes(path: str | Path) -> dict[str, bytes]:
                 continue
             if info.file_size > MAX_FILE_SIZE:
                 raise PackageError(f"File exceeds {MAX_FILE_SIZE} bytes: {raw}")
-            files[str(PurePosixPath(raw)).lstrip("./")] = archive.read(info)
+            files[re.sub(r"^(?:\./|/)+", "", str(PurePosixPath(raw)))] = archive.read(info)  # keep a name's own leading dot
             _check_total(files)
     return files

@@ -41,7 +41,7 @@ unapproved skill intact, with restore records, and a rerun found the machine mat
 unchanged. One more real finding: a fourth candidate (claude-md-improver) could not enter review, because its instruction quality
 scored 51, under the minimum of 60. The same 29 checks, plus 2 more, passed with OIDC sign-in (`--oidc`: every person and the machine signed in through
 the code + PKCE flow of the development provider; a call without a token got 401, and a reporter token trying to
-register a version got 403): 31 of 31. Not yet exercised: a production identity provider, and real (not copied) agent folders.
+register a version got 403): 31 of 31. Not yet exercised: a provider hosted by someone else (Keycloak in production mode on this machine passed; see below), and real (not copied) agent folders.
 
 Gap 2 is built: provenance on every version (human, agent or unknown; agent identities from the token's delegation
 claim or an agent OAuth client; declarations only raise the bar). Agent-written and unknown updates are reviewed as new
@@ -143,5 +143,18 @@ upload made that way was recorded as human-written. amr stays empty until Keyclo
 With people signing in through Keycloak's login page and sync signing in as a Keycloak machine client, the end-to-end
 check passed 31 of 31.
 
-Open: a hosted production identity provider (Keycloak here is local, in development mode); a person's fresh, strong token used by
-an agent; programs other than read-only inspection are recorded, not run.
+Production mode and sign-in methods: the same Keycloak then ran in production mode (`kc.sh start`: HTTPS only with a
+certificate from a local test CA, PostgreSQL 16 database, strict hostname; `scripts/keycloak_prod_setup.sh`,
+`scripts/keycloak_prod_start.sh`), and the realm was rebuilt by `scripts/keycloak_realm.sh`. The browser sign-in's
+password step now reports amr `pwd` and its one-time-code step `otp`; erin sets up a TOTP code at her first sign-in (the
+script computes RFC 6238 codes, checked against the RFC's test vectors). With the server requiring `otp` for a
+human-written attestation, the end-to-end check passed 31 of 31, including: alice (password only) is recorded as
+`unknown` with the reason "the sign-in used ['pwd'] ... requires one of ['otp']"; erin's later sign-in with her code
+carries ['pwd', 'otp'] and her update is recorded as human-written; the sign-in in which erin set up her code does not
+claim `otp`. A trap found on the way: a method reference without a max age is dropped from amr almost at once
+(Keycloak's AmrUtils.isAmrValid), so the first attempt showed empty amr after the 30-second code wait; the realm script
+now sets `default.reference.maxAge`. Python needs a proper CA (basic constraints and key usage) to trust the server.
+Weakest part: still one machine, a test CA and test users; not a hosted provider run by someone else.
+
+Open: a provider hosted and run by someone else; a person's fresh, strong token used by an agent; programs other than
+read-only inspection are recorded, not run.

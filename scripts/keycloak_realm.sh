@@ -6,11 +6,16 @@
 # on for scripted tests only, turn them off in production); the confidential machine client sync-host-1 (client
 # credentials, role reporter); users alice, erin (evaluator), bob (approver), sync@test-machine (reporter).
 # Keycloak signs access tokens with a JWT header: set SKILLPROOF_OIDC_ACCEPTED_TYPES=at+jwt,application/at+jwt,JWT.
-# amr stays empty until the login flow's authenticators are given reference values in Keycloak.
+# Sign-in methods (amr): the realm's browser flow is a copy whose password step reports "pwd" and whose one-time-code
+# step reports "otp". erin must set up a one-time code (TOTP) at her first sign-in; alice signs in with a password only.
+# KC_SERVER (default http://127.0.0.1:8180) and KC_TRUSTSTORE (a PKCS12 file holding the server's CA, password in
+# KC_TRUSTPASS, default changeit) point the admin client at an HTTPS server.
 set -euo pipefail
 ADMIN_PASSWORD="$1"; USER_PASSWORD="$2"; MACHINE_SECRET="$3"
+SERVER="${KC_SERVER:-http://127.0.0.1:8180}"
 K=/opt/keycloak/bin/kcadm.sh
-$K config credentials --server http://127.0.0.1:8180 --realm master --user admin --password "$ADMIN_PASSWORD" >/dev/null
+if [ -n "${KC_TRUSTSTORE:-}" ]; then $K config truststore --trustpass "${KC_TRUSTPASS:-changeit}" "$KC_TRUSTSTORE" >/dev/null; fi
+$K config credentials --server "$SERVER" --realm master --user admin --password "$ADMIN_PASSWORD" >/dev/null
 $K create realms -s realm=skillproof -s enabled=true >/dev/null
 echo "realm created"
 
@@ -65,9 +70,21 @@ $K create client-scopes/$SCOPE/protocol-mappers/models -r skillproof -s name=aut
   -s protocolMapper=oidc-usersessionmodel-note-mapper -s 'config."user.session.note"=AUTH_TIME' \
   -s 'config."claim.name"=auth_time' -s 'config."jsonType.label"=long' -s 'config."access.token.claim"=true' >/dev/null
 echo "auth_time mapper added"
-if $K create client-scopes/$SCOPE/protocol-mappers/models -r skillproof -s name=amr -s protocol=openid-connect \
-  -s protocolMapper=oidc-amr-mapper -s 'config."access.token.claim"=true' >/dev/null 2>/tmp/amr.err; then
-  echo "amr mapper added"
-else
-  echo "amr mapper not available: $(head -c 200 /tmp/amr.err)"
-fi
+$K create client-scopes/$SCOPE/protocol-mappers/models -r skillproof -s name=amr -s protocol=openid-connect \
+  -s protocolMapper=oidc-amr-mapper -s 'config."access.token.claim"=true' >/dev/null
+echo "amr mapper added"
+
+# Give the browser flow's steps their method references, so amr says how the person signed in. Each reference needs a
+# max age (seconds after that step): without one, Keycloak drops it from amr almost at once (AmrUtils.isAmrValid).
+$K create authentication/flows/browser/copy -r skillproof -s newName=skillproof-browser >/dev/null
+$K get authentication/flows/skillproof-browser/executions -r skillproof > /tmp/executions.json
+for pair in auth-username-password-form:pwd auth-otp-form:otp; do
+  provider=${pair%%:*}; ref=${pair##*:}
+  exec_id=$(python3 -c "import json,sys; print(next(e['id'] for e in json.load(open('/tmp/executions.json')) if e.get('providerId') == sys.argv[1]))" "$provider")
+  $K create authentication/executions/$exec_id/config -r skillproof -s alias=amr-$ref -s "config.\"default.reference.value\"=$ref" -s 'config."default.reference.maxAge"=3600' >/dev/null
+  echo "sign-in step $provider reports amr $ref"
+done
+$K update realms/skillproof -s browserFlow=skillproof-browser >/dev/null
+ERIN=$($K get users -r skillproof -q username=erin -q exact=true --fields id --format csv --noquotes)
+$K update users/$ERIN -r skillproof -s 'requiredActions=["CONFIGURE_TOTP"]' >/dev/null
+echo "erin sets up a one-time code at her first sign-in"

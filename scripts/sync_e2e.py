@@ -35,6 +35,11 @@ parser.add_argument("--login", choices=["dev", "keycloak"], default="dev",
                     help="How people sign in with --oidc: the development provider's form, or a real Keycloak login page "
                          "(users alice, erin, bob and sync@test-machine with the password in SKILLPROOF_E2E_PASSWORD; roles "
                          "come from the provider, not from this script).")
+parser.add_argument("--strong-user", help="With --login keycloak: a person whose sign-in adds a one-time code (TOTP, set up at the first "
+                                          "sign-in by this script). Checks that the provider reports the sign-in methods (amr) and "
+                                          "that the server accepts a human-written attestation only from the stronger sign-in; "
+                                          "the server must require that method (SKILLPROOF_HUMAN_ATTESTATION_AMR).")
+parser.add_argument("--strong-method", default="otp", help="The amr value the stronger sign-in adds (default otp).")
 parser.add_argument("--machine-client", help="With --oidc: sync gets its own token as this machine client (client credentials, "
                                              "secret in SKILLPROOF_CLIENT_SECRET) instead of a person-style reporter sign-in.")
 cli = parser.parse_args()
@@ -92,14 +97,35 @@ def keycloak_login(user):
     query = urlencode({"client_id": "skillproof-catalogue", "response_type": "code", "scope": "openid", "redirect_uri": cli.redirect,
                        "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"})
     page = opener.open(discovery["authorization_endpoint"] + "?" + query, timeout=30).read().decode()
-    action = html.unescape(re.search(r'<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"', page).group(1))
-    form = urlencode({"username": user, "password": os.environ["SKILLPROOF_E2E_PASSWORD"], "credentialId": ""}).encode()
+    fields = {"username": user, "password": os.environ["SKILLPROOF_E2E_PASSWORD"], "credentialId": ""}
     no_follow = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), _NoRedirect)
-    try:
-        no_follow.open(urllib.request.Request(action, data=form, method="POST"), timeout=30)
-        raise RuntimeError(f"the login page did not redirect for {user}")
-    except urllib.error.HTTPError as exc:
-        location = exc.headers.get("Location") or ""
+    location = ""
+    for _step in range(6):  # password, then possibly one-time-code setup or prompt
+        action = html.unescape(re.search(r'<form[^>]*action="([^"]+)"', page).group(1))
+        request = urllib.request.Request(action, data=urlencode(fields).encode(), method="POST")
+        while True:  # follow the provider's own redirects; stop at the redirect back to the application
+            try:
+                page = no_follow.open(request, timeout=30).read().decode()
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (301, 302, 303, 307):
+                    raise
+                location = exc.headers.get("Location") or ""
+                if location.startswith(cli.redirect):
+                    break
+                request = urllib.request.Request(location)
+        if location.startswith(cli.redirect):
+            break
+        hidden = {html.unescape(n): html.unescape(v) for n, v in re.findall(r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"', page)}
+        if "totpSecret" in hidden:  # first sign-in: set up the one-time code, keep its secret for later sign-ins
+            TOTP[user] = hidden["totpSecret"].encode()
+            fields = {**hidden, "totp": fresh_code(user), "userLabel": "e2e"}
+        elif re.search(r'name="otp"', page):
+            if user not in TOTP:
+                raise RuntimeError(f"{user} has a one-time code this run did not set up; remove it in the provider first")
+            fields = {"otp": fresh_code(user)}
+        else:
+            raise RuntimeError(f"unexpected sign-in page for {user}: {re.sub(r'<[^>]+>', ' ', page)[:200]!r}")
     code = parse_qs(urlparse(location).query).get("code", [""])[0]
     if not code:
         raise RuntimeError(f"no code after signing in {user}")
@@ -107,6 +133,41 @@ def keycloak_login(user):
                           "client_id": "skillproof-catalogue", "code_verifier": verifier}).encode()
     with urllib.request.urlopen(urllib.request.Request(discovery["token_endpoint"], data=exchange, method="POST"), timeout=30) as response:
         return json.loads(response.read())["access_token"]
+
+
+TOTP: dict = {}
+
+
+def totp_code(secret: bytes, at: float | None = None) -> str:
+    """RFC 6238 one-time code (HMAC-SHA1, 6 digits, 30 s), as an authenticator app computes it."""
+    import hmac
+    import struct
+    import time
+
+    digest = hmac.new(secret, struct.pack(">Q", int((time.time() if at is None else at) // 30)), "sha1").digest()
+    offset = digest[-1] & 0x0F
+    return f"{(struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000:06d}"
+
+
+USED_STEP: dict = {}
+
+
+def fresh_code(user: str) -> str:
+    """A code from a 30-second step not used before: the provider refuses a code used once."""
+    import time
+
+    while int(time.time() // 30) == USED_STEP.get(user):
+        time.sleep(1)
+    USED_STEP[user] = int(time.time() // 30)
+    return totp_code(TOTP[user])
+
+
+def claims_of(token: str) -> dict:
+    """The token's claims, unverified: only to report what the provider put in (the server verifies)."""
+    import base64
+
+    body = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
 
 
 def token_for(user, role):
@@ -271,5 +332,26 @@ check("no staging folders left behind", not list(machine.glob("*.skillproof-inco
 code, again = sync("--strict")
 check("rerun: the machine matches the catalogue (exit 0)", code == 0 and again["approved"] == len(APPROVE) and again["to_replace"] == 0, f"exit {code}")
 check("the real installed skills were never touched", all(fp(REAL[n]) == approved[n] for n in APPROVE))
+
+if cli.strong_user:
+    # Who may attest that a person wrote a version: the provider reports how each person signed in (amr), and the
+    # server, configured to require the stronger method, accepts the attestation only from that sign-in.
+    weak = claims_of(token_for("alice", "evaluator")).get("amr") or []
+    setup = claims_of(token_for(cli.strong_user, "evaluator")).get("amr") or []
+    if cli.strong_user in TOTP:  # that sign-in set the code up; sign in again as on any later day, with the code
+        check(f"amr: the sign-in that set up {cli.strong_user}'s one-time code does not claim it", cli.strong_method not in setup, str(setup))
+        TOKENS[(cli.strong_user, "evaluator")] = keycloak_login(cli.strong_user)
+    strong = claims_of(token_for(cli.strong_user, "evaluator")).get("amr") or []
+    check("amr: a password sign-in reports the password method only", "pwd" in weak and cli.strong_method not in weak, str(weak))
+    check(f"amr: {cli.strong_user}'s sign-in reports password and {cli.strong_method}", "pwd" in strong and cli.strong_method in strong, str(strong))
+    for user, expect in (("alice", "unknown"), (cli.strong_user, "human")):
+        update = BASE / f"update-{user.replace('@', '_')}" / APPROVE[0]
+        shutil.copytree(REAL[APPROVE[0]], update)
+        (update / "SKILL.md").write_text((update / "SKILL.md").read_text(encoding="utf-8") + f"\n\nUpdated by {user}.\n", encoding="utf-8")
+        status, body = call("POST", "/api/v1/registry/versions", user, "evaluator", {"evidence_json": EVIDENCE},
+                            {"file": (f"{APPROVE[0]}.zip", zipped(update))})
+        authored = ((body.get("version") or {}).get("provenance") or {})
+        check(f"attestation: {user}'s update is recorded as {expect}-written", status == 200 and authored.get("author_kind") == expect,
+              f"HTTP {status} {authored.get('author_kind')} {' / '.join(authored.get('basis') or [])}"[:240])
 print(json.dumps({"passed": sum(ok for _, ok in results), "failed": sum(not ok for _, ok in results)}))
 sys.exit(sum(not ok for _, ok in results))

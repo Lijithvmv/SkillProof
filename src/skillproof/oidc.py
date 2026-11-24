@@ -57,12 +57,14 @@ class OIDCSettings:
         if not all((oidc.issuer, oidc.audience, oidc.jwks_url)):
             raise ValueError("OIDC issuer, audience, and JWKS URL must be configured together")
         return cls(issuer=oidc.issuer, audience=oidc.audience, jwks_url=oidc.jwks_url, role_claim=oidc.role_claim,
+                   accepted_types=oidc.accepted_types,
                    tenant_claim=oidc.tenant_claim, leeway_seconds=oidc.leeway_seconds, jwks_timeout_seconds=oidc.jwks_timeout_seconds,
                    agent_clients=oidc.agent_clients)
 
 
 class OIDCAccessTokenVerifier:
-    REQUIRED_CLAIMS = ["iss", "aud", "exp", "sub", "iat", "jti", "client_id"]
+    # client_id (RFC 9068) or azp: Keycloak puts the client in azp and adds client_id only for service accounts.
+    REQUIRED_CLAIMS = ["iss", "aud", "exp", "sub", "iat", "jti"]
 
     def __init__(self, settings: OIDCSettings, signing_keys: SigningKeyClient | None = None):
         self.settings = settings
@@ -76,7 +78,8 @@ class OIDCAccessTokenVerifier:
     def verify(self, token: str) -> Principal:
         try:
             header = jwt.get_unverified_header(token)
-            if str(header.get("typ", "")).lower() not in {value.lower() for value in self.settings.accepted_types}:
+            header_type = str(header.get("typ", "")).lower()
+            if header_type not in {value.lower() for value in self.settings.accepted_types}:
                 raise AuthenticationError("token is not a supported access-token type")
             if header.get("alg") not in self.settings.algorithms or not isinstance(header.get("kid"), str):
                 raise AuthenticationError("token signing algorithm or key identifier is not accepted")
@@ -94,6 +97,14 @@ class OIDCAccessTokenVerifier:
             raise
         except (PyJWTError, PyJWKClientError, TypeError, ValueError) as exc:
             raise AuthenticationError("access token validation failed") from exc
+        if header_type == "jwt" and str(claims.get("typ", "")).lower() != "bearer":
+            # A generic JWT header (Keycloak) is accepted only for a token that says it is an access token, so an ID
+            # token from the same provider can never be used as one.
+            raise AuthenticationError("token is not an access token (typ claim is not Bearer)")
+        client = claims.get("client_id") or claims.get("azp")
+        if not isinstance(client, str) or not client.strip():
+            raise AuthenticationError("access token names no client (client_id or azp)")
+        claims["client_id"] = client
 
         role_value = claims.get(self.settings.role_claim)
         tenant_id = claims.get(self.settings.tenant_claim)

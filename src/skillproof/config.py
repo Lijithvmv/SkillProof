@@ -14,7 +14,7 @@ a configuration; the service refuses to start in production while any problem re
 | SKILLPROOF_SCHEMA | schema_mode | `apply` pending migrations at start (default) or `verify` and refuse |
 | SKILLPROOF_LOG_LEVEL | log_level | default `info` |
 | SKILLPROOF_AUTH_MODE | auth_mode | `local` (development identity headers) or `oidc` |
-| SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated) |
+| SKILLPROOF_OIDC_* | oidc | issuer, audience, JWKS URL, client id, scope, role/tenant claims, endpoints, leeway, JWKS timeout, agent client ids (`AGENT_CLIENTS`, comma-separated), accepted token header types (`ACCEPTED_TYPES`, default at+jwt; add JWT for Keycloak) |
 | SKILLPROOF_OLLAMA_URL | ollama_url | local model server (loopback) |
 | SKILLPROOF_HUMAN_ATTESTATION_MAX_AGE | human_attestation_max_age_seconds | seconds since the token's interactive sign-in (auth_time) within which a "human-written" attestation counts (900) |
 | SKILLPROOF_HUMAN_ATTESTATION_AMR | human_attestation_methods | comma-separated sign-in methods (amr), at least one of which a "human-written" attestation's token must show, e.g. mfa,hwk (empty: not required) |
@@ -67,6 +67,9 @@ class OIDC:
     leeway_seconds: int = 30
     jwks_timeout_seconds: float = 5.0
     agent_clients: tuple[str, ...] = ()  # OAuth client ids issued to agents: their tokens are agent identities
+    # Access-token header types accepted. RFC 9068 says at+jwt; Keycloak signs access tokens as JWT, which is accepted
+    # only when listed here and only for tokens whose typ claim is Bearer (never an ID token).
+    accepted_types: tuple[str, ...] = ("at+jwt", "application/at+jwt")
 
     @property
     def configured(self) -> bool:
@@ -140,7 +143,8 @@ def settings() -> Settings:
             authorization_url=_get("SKILLPROOF_OIDC_AUTHORIZATION_URL"), token_url=_get("SKILLPROOF_OIDC_TOKEN_URL"),
             end_session_url=_get("SKILLPROOF_OIDC_END_SESSION_URL"),
             leeway_seconds=_int("SKILLPROOF_OIDC_LEEWAY_SECONDS", 30), jwks_timeout_seconds=_float("SKILLPROOF_OIDC_JWKS_TIMEOUT_SECONDS", 5.0),
-            agent_clients=tuple(c.strip() for c in (_get("SKILLPROOF_OIDC_AGENT_CLIENTS") or "").split(",") if c.strip())),
+            agent_clients=tuple(c.strip() for c in (_get("SKILLPROOF_OIDC_AGENT_CLIENTS") or "").split(",") if c.strip()),
+            accepted_types=tuple(t.strip() for t in (_get("SKILLPROOF_OIDC_ACCEPTED_TYPES") or "at+jwt,application/at+jwt").split(",") if t.strip())),
         ollama_url=_get("SKILLPROOF_OLLAMA_URL", "http://127.0.0.1:11434") or "http://127.0.0.1:11434",
         evaluation=Evaluation(model=_get("SKILLPROOF_EVAL_MODEL"), draft_model=_get("SKILLPROOF_EVAL_DRAFT_MODEL"),
                               tasks=_int("SKILLPROOF_EVAL_TASKS", 6), repeats=_int("SKILLPROOF_EVAL_REPEATS", 2)),

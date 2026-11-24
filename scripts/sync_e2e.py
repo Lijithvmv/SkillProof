@@ -31,6 +31,10 @@ parser.add_argument("--server", default="http://127.0.0.1:8796")
 parser.add_argument("--oidc", help="Issuer of a development OIDC provider (scripts/dev_oidc_provider.py). Every call then uses "
                                    "a bearer token from a real code + PKCE sign-in, and sync uses a reporter token.")
 parser.add_argument("--redirect", default="http://127.0.0.1:8796/catalogue", help="Redirect URI the provider accepts.")
+parser.add_argument("--login", choices=["dev", "keycloak"], default="dev",
+                    help="How people sign in with --oidc: the development provider's form, or a real Keycloak login page "
+                         "(users alice, erin, bob and sync@test-machine with the password in SKILLPROOF_E2E_PASSWORD; roles "
+                         "come from the provider, not from this script).")
 parser.add_argument("--machine-client", help="With --oidc: sync gets its own token as this machine client (client credentials, "
                                              "secret in SKILLPROOF_CLIENT_SECRET) instead of a person-style reporter sign-in.")
 cli = parser.parse_args()
@@ -59,8 +63,58 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _LoopbackIsSecure(__import__("http.cookiejar").cookiejar.DefaultCookiePolicy):
+    """Browsers treat http://127.0.0.1 as a secure origin and send Secure cookies there (Keycloak marks its login
+    cookies Secure); urllib does not."""
+
+    def return_ok_secure(self, cookie, request):
+        from urllib.parse import urlparse
+
+        return urlparse(request.get_full_url()).hostname in {"127.0.0.1", "localhost"} or super().return_ok_secure(cookie, request)
+
+
+def keycloak_login(user):
+    """Sign in through the provider's real login page (authorization code + PKCE), as a person in a browser does."""
+    import base64
+    import hashlib
+    import html
+    import http.cookiejar
+    import os
+    import re
+    import secrets
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    discovery = json.loads(urllib.request.urlopen(cli.oidc + "/.well-known/openid-configuration", timeout=30).read())
+    jar = http.cookiejar.CookieJar(policy=_LoopbackIsSecure())
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    query = urlencode({"client_id": "skillproof-catalogue", "response_type": "code", "scope": "openid", "redirect_uri": cli.redirect,
+                       "state": "s", "code_challenge": challenge, "code_challenge_method": "S256"})
+    page = opener.open(discovery["authorization_endpoint"] + "?" + query, timeout=30).read().decode()
+    action = html.unescape(re.search(r'<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"', page).group(1))
+    form = urlencode({"username": user, "password": os.environ["SKILLPROOF_E2E_PASSWORD"], "credentialId": ""}).encode()
+    no_follow = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), _NoRedirect)
+    try:
+        no_follow.open(urllib.request.Request(action, data=form, method="POST"), timeout=30)
+        raise RuntimeError(f"the login page did not redirect for {user}")
+    except urllib.error.HTTPError as exc:
+        location = exc.headers.get("Location") or ""
+    code = parse_qs(urlparse(location).query).get("code", [""])[0]
+    if not code:
+        raise RuntimeError(f"no code after signing in {user}")
+    exchange = urlencode({"grant_type": "authorization_code", "code": code, "redirect_uri": cli.redirect,
+                          "client_id": "skillproof-catalogue", "code_verifier": verifier}).encode()
+    with urllib.request.urlopen(urllib.request.Request(discovery["token_endpoint"], data=exchange, method="POST"), timeout=30) as response:
+        return json.loads(response.read())["access_token"]
+
+
 def token_for(user, role):
     """An access token from the provider's sign-in: authorize (with PKCE), read the code from the redirect, exchange it."""
+    if cli.login == "keycloak":
+        if (user, role) not in TOKENS:
+            TOKENS[(user, role)] = keycloak_login(user)
+        return TOKENS[(user, role)]
     import base64
     import hashlib
     import secrets

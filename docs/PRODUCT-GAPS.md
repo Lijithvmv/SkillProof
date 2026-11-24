@@ -132,5 +132,16 @@ Closing the weak points (latest round):
   (its description says "audit"), while the other three requests were picked 3 to 4 times of 5. The useful finding is
   which request type the skill loses, not the average.
 
-Open: a production identity provider (needs a download approved by the owner); a person's fresh, strong token used by
+Real identity provider: Keycloak 26.8.2 (official release, checksum verified) ran in a separate WSL distro on this
+machine, configured by `scripts/keycloak_realm.sh`. Its real tokens broke SkillProof twice, which only a real provider
+could show: (1) access tokens are signed with a `JWT` header, not `at+jwt`, so every token was refused; SkillProof now
+accepts `JWT` only when configured (`SKILLPROOF_OIDC_ACCEPTED_TYPES`) and only for tokens whose typ claim is Bearer, never an
+ID token; (2) people's tokens name the client in `azp`, with no `client_id`; `azp` is now used when `client_id` is absent.
+A password-grant token carries no auth_time, so it could never attest that a person wrote a version (the safe
+direction); the real browser login (authorization code + PKCE through Keycloak's login page) carries auth_time, and an
+upload made that way was recorded as human-written. amr stays empty until Keycloak's login flow is given reference values.
+With people signing in through Keycloak's login page and sync signing in as a Keycloak machine client, the end-to-end
+check passed 31 of 31.
+
+Open: a hosted production identity provider (Keycloak here is local, in development mode); a person's fresh, strong token used by
 an agent; programs other than read-only inspection are recorded, not run.

@@ -107,3 +107,30 @@ def test_api_requires_bearer_and_evaluator_role_when_oidc_enabled(monkeypatch):
     assert response.status_code == 200
     monkeypatch.setattr(app.state, "oidc_verifier", None)
 
+
+
+# Decision: a provider that signs access tokens with a generic JWT header (Keycloak) is accepted only when configured
+# and only for tokens that say they are access tokens (typ claim Bearer), never an ID token; the client may be named
+# in azp when there is no client_id.
+def test_keycloak_style_tokens_are_accepted_only_as_access_tokens():
+    keycloak = OIDCAccessTokenVerifier(OIDCSettings(issuer="https://login.example.test/", audience="skillproof-api",
+                                                    jwks_url="https://login.example.test/.well-known/jwks.json", leeway_seconds=0,
+                                                    accepted_types=("at+jwt", "JWT")), signing_keys=FakeKeys())
+
+    def keycloak_token(**claims):
+        token = make_token(**claims)
+        payload = jwt.decode(token, options={"verify_signature": False})
+        payload.pop("client_id", None)
+        payload.update(azp="skillproof-catalogue", **claims)
+        return jwt.encode(payload, PRIVATE_KEY, algorithm="RS256", headers={"typ": "JWT", "kid": "key-1"})
+
+    principal = keycloak.verify(keycloak_token(typ="Bearer"))
+    assert principal.user_id == "user-123" and principal.role == "evaluator"
+    with pytest.raises(AuthenticationError, match="not an access token"):
+        keycloak.verify(keycloak_token(typ="ID"))
+    with pytest.raises(AuthenticationError, match="access-token type"):
+        verifier().verify(keycloak_token(typ="Bearer"))  # not configured: a JWT header is refused
+    no_client = jwt.decode(keycloak_token(typ="Bearer"), options={"verify_signature": False})
+    no_client.pop("azp")
+    with pytest.raises(AuthenticationError, match="names no client"):
+        keycloak.verify(jwt.encode(no_client, PRIVATE_KEY, algorithm="RS256", headers={"typ": "JWT", "kid": "key-1"}))

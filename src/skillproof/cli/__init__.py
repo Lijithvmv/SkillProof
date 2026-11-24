@@ -9,7 +9,7 @@ import argparse
 from skillproof import __version__
 from skillproof.config import settings
 
-from skillproof.cli import analysis, catalogue, evaluation, operations
+from skillproof.cli import analysis, catalogue, evaluation, operations, signals
 from skillproof.cli.analysis import assurance_gate, scan_archive
 from skillproof.cli.common import write_json
 
@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="skillproof", description="Analyze agent skill packages and enforce assurance gates.")
     parser.add_argument("--version", action="version", version=f"SkillProof {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for group in (analysis, catalogue, evaluation, operations):
+    for group in (analysis, catalogue, evaluation, operations, signals):
         group.add(commands, conf)
     return parser
 

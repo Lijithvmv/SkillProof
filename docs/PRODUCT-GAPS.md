@@ -270,4 +270,16 @@ long runs, no A1B2C3/ABCDEF sequences or placeholder words), outside tests and f
 files. Raw matches were 221 lines; after the guards every raise (188 lines) was one Google key leaked in a tutorial
 notebook, repeated in its output cells, and nothing else.
 
-Open: a provider hosted and run by someone else.
+Signals from real use (after Uber's usage telemetry and papercuts): `skillproof usage-hook` runs from an agent hook
+(Claude Code: PostToolUse on the Skill tool and UserPromptSubmit) and appends the day, the skill's name and whether the
+agent chose it or a person typed its command to a local spool - no prompt text, and it never fails the agent.
+`skillproof signals-report` sends daily counts with each installed skill's fingerprint; resending replaces counts, so
+they are not doubled. `skillproof papercut` (and the shipped skill `skills/log-papercut`, which passes all eight lint
+checks) files what an agent tried, expected and saw, and what would fix it; only the skill's owners (skill.register)
+close one, once. `/api/v1/signals` lists skills by use with open papercuts. End to end against a local server over HTTP:
+three hook events and a typed command became create-pr 3 (2 by the agent, 1 by the user) and review-security 1, a
+second report did not double them, and a filed papercut showed as open on the skill.
+Weakest part: Claude Code's hook payload is used as this session's Skill tool shows it (tool_input.skill); other
+agents' hooks are not wired yet, and nothing here ran on real users' machines.
+
+Open: a provider hosted and run by someone else; usage hooks for other agents.

@@ -92,7 +92,7 @@ def _start_background() -> None:
         start_worker(governance_from_environment, settings, _worker_stop)
 
 
-from skillproof.api.routers import admin, analysis, catalogue, evaluations, fleet, system  # noqa: E402
+from skillproof.api.routers import admin, analysis, catalogue, evaluations, fleet, signals, system  # noqa: E402
 
-for _router in (system.router, analysis.router, catalogue.router, evaluations.router, admin.router, fleet.router):
+for _router in (system.router, analysis.router, catalogue.router, evaluations.router, admin.router, fleet.router, signals.router):
     app.include_router(_router)

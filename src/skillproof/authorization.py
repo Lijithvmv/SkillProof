@@ -13,23 +13,24 @@ from skillproof.storage.registry import SQLiteSkillRegistry
 if TYPE_CHECKING:
     from skillproof.storage.artifacts import ArtifactStore
     from skillproof.storage.fleet import FleetStore
+    from skillproof.storage.signals import SignalStore
     from skillproof.storage.jobs import JobStore
     from skillproof.storage.notify import NotificationStore
 
 
 Role = Literal["tenant_admin", "evaluator", "approver", "viewer", "reporter"]
 Permission = Literal[
-    "skill.read", "skill.register", "skill.promote", "fleet.report",
+    "skill.read", "skill.register", "skill.promote", "fleet.report", "signal.report",
     "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage",
 ]
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
-    "tenant_admin": frozenset({"skill.read", "skill.register", "skill.promote", "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage", "fleet.report"}),
-    "evaluator": frozenset({"skill.read", "skill.register", "evaluation.read", "evaluation.run", "approval.submit"}),
-    "approver": frozenset({"skill.read", "skill.promote", "evaluation.read", "approval.decide"}),
+    "tenant_admin": frozenset({"skill.read", "skill.register", "skill.promote", "evaluation.read", "evaluation.run", "approval.submit", "approval.decide", "policy.manage", "fleet.report", "signal.report"}),
+    "evaluator": frozenset({"skill.read", "skill.register", "evaluation.read", "evaluation.run", "approval.submit", "signal.report"}),
+    "approver": frozenset({"skill.read", "skill.promote", "evaluation.read", "approval.decide", "signal.report"}),
     "viewer": frozenset({"skill.read", "evaluation.read"}),
     # A machine that reports which skills it runs: nothing else.
-    "reporter": frozenset({"skill.read", "fleet.report"}),
+    "reporter": frozenset({"skill.read", "fleet.report", "signal.report"}),
 }
 
 
@@ -85,7 +86,7 @@ class GovernanceAccess:
 
     def __init__(self, *, registry: SQLiteSkillRegistry, approvals: SQLiteApprovalStore, history: EvaluationHistoryStore,
                  jobs: JobStore | None = None, notifications: NotificationStore | None = None, fleet: FleetStore | None = None,
-                 artifacts: ArtifactStore | None = None):
+                 artifacts: ArtifactStore | None = None, signals: SignalStore | None = None):
         self.registry = registry
         self.approvals = approvals
         self.history = history
@@ -93,6 +94,7 @@ class GovernanceAccess:
         self.notifications = notifications  # when alerts are configured
         self.fleet = fleet  # when machines report to this server
         self.artifacts = artifacts  # package bytes, so approved versions can be distributed
+        self.signals = signals  # usage counts and papercuts from real use
 
     def store_package(self, principal: Principal, files: dict[str, bytes], oversize: dict[str, str] | None = None) -> str:
         authorize(principal, principal.tenant_id, "skill.register")
@@ -136,6 +138,33 @@ class GovernanceAccess:
 
             raise RegistryError("fleet reporting is not enabled on this server")
         return self.fleet.record(principal.tenant_id, host, compared, reported_by=principal.user_id)
+
+    def _signals(self) -> SignalStore:
+        if self.signals is None:
+            from skillproof.storage.registry import RegistryError
+
+            raise RegistryError("usage signals are not enabled on this server")
+        return self.signals
+
+    def record_usage(self, principal: Principal, host: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "signal.report")
+        return self._signals().record_usage(principal.tenant_id, host, events)
+
+    def file_papercut(self, principal: Principal, report: dict[str, Any]) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "signal.report")
+        return self._signals().file_papercut(principal.tenant_id, report, reported_by=principal.user_id)
+
+    def resolve_papercut(self, principal: Principal, papercut_id: str, resolution: str) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "skill.register")  # the skill's owners fix and close papercuts
+        return self._signals().resolve_papercut(principal.tenant_id, papercut_id, resolution, resolved_by=principal.user_id)
+
+    def skill_signals(self, principal: Principal, skill_name: str, days: int = 30) -> dict[str, Any]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return self._signals().skill(principal.tenant_id, skill_name, days)
+
+    def signals_summary(self, principal: Principal, days: int = 30) -> list[dict[str, Any]]:
+        authorize(principal, principal.tenant_id, "skill.read")
+        return [] if self.signals is None else self.signals.summary(principal.tenant_id, days)
 
     def fleet_hosts(self, principal: Principal) -> list[dict[str, Any]]:
         authorize(principal, principal.tenant_id, "skill.read")

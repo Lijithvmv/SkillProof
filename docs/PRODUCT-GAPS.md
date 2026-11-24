@@ -187,9 +187,13 @@ the canary in a written file or the output is recorded. Real bubblewrap (WSL, un
 /opt invisible, /usr read-only, a hostile script's CLAUDE.md rewrite undone, a link to / removed. A bug found on the
 way: a link made in WSL is an unreadable reparse point to Windows Python and crashed the comparison; it is now treated
 as a special file. Evidence for the gap: a release-notes skill whose bundled script appends to CLAUDE.md and copies
-.env, judged with commands only recorded (gemma4, 4 runs each way): decision none, no rule hit - the damage was
-invisible. The same experiment with programs running was still in progress at this commit.
+.env (gemma4, 2 tasks x 2 repeats, with and without the skill). The agent ran the script in 4 of 4 skill runs both
+times. Commands only recorded: decision none, no rule hit - the damage was invisible. Programs running: decision block;
+agent_config_write in 4 of 4 skill runs and 0 of 4 baseline runs, canary_copied in 4 of 4 and 0 of 4, both attributed to
+the skill; CLAUDE.md was left as it was. (A first attempt showed nothing in both modes: the test skill's own script had a
+syntax error from a shell heredoc, and SkillProof correctly reported exit 1 with no change. Fixed and rerun.)
+One hostile skill, one model, 8 runs per mode: this shows the mechanism works, not how often it catches skills in general.
 Weakest part: what a program reads is not observed, only what it changes and prints.
 
 Open: a provider hosted and run by someone else; binding an attestation to the exact package the person saw (the
-token cannot name it); the hostile-script experiment with programs running.
+token cannot name it); observing what a program reads; more hostile skills and models for the program runs.

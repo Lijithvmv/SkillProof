@@ -84,8 +84,11 @@ def compare(versions_by_name: Mapping[str, Sequence[SkillVersion]], installed: l
         if not name or not FINGERPRINT.match(fingerprint):
             raise FleetError("each skill needs a skill_name and a 64-hex package fingerprint")
         versions = versions_by_name.get(name, [])
+        own = str(item.get("own_name") or "").strip()
+        if own and own != name and not any(v["state"] == "active" for v in versions):
+            versions = versions_by_name.get(own, []) or versions  # the same skill under an agent-labelled name
         active = next((v for v in versions if v["state"] == "active"), None)
-        known = next((v for v in versions if v["package_fingerprint"] == fingerprint), None)
+        known =next((v for v in versions if v["package_fingerprint"] == fingerprint), None)
         status: Literal["approved", "running_unapproved", "never_approved"] = "never_approved" if active is None else "approved" if active["package_fingerprint"] == fingerprint else "running_unapproved"
         entry: FleetEntry = {"skill_name": name, "installed_fingerprint": fingerprint, "status": status,
                  "approved_version_id": active["version_id"] if active else None,

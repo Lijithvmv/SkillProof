@@ -18,6 +18,7 @@ router = APIRouter()
 class InstalledSkill(BaseModel):
     skill_name: str = Field(min_length=1, max_length=200)
     fingerprint: str = Field(min_length=64, max_length=64)
+    own_name: str = Field(default="", max_length=200)  # the name in the folder's SKILL.md, when the catalogue name is labelled
 
 
 class FleetReport(BaseModel):

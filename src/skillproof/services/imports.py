@@ -57,6 +57,11 @@ def check_installed(governance: GovernanceAccess, principal: Principal, roots: l
         _, skill_dir = families[key]
         fingerprint = packages[key][2]
         versions = governance.list_skill_versions(principal, name)
+        own = _skill_name(packages[key][0], skill_dir)
+        if own != name and not any(v["state"] == "active" for v in versions):
+            # The same skill installed for several agents gets labelled catalogue names ("pdf (codex)"); a copy is the
+            # approved skill when its own SKILL.md name is approved, whichever agent's folder holds it.
+            versions = governance.list_skill_versions(principal, own) or versions
         active = next((v for v in versions if v["state"] == "active"), None)
         known = next((v for v in versions if v["package_fingerprint"] == fingerprint), None)
         status = "never_approved" if active is None else "approved" if active["package_fingerprint"] == fingerprint else "running_unapproved"

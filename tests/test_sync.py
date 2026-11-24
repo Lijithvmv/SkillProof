@@ -276,3 +276,74 @@ def test_machines_get_their_own_token_with_client_credentials(monkeypatch):
     args = SimpleNamespace(client_id="sync-host-1", client_secret_env="SKILLPROOF_CLIENT_SECRET", token_url=None,
                            issuer="http://127.0.0.1:8099", scope=None, token_env="SKILLPROOF_TOKEN")
     assert machine_token(args) == "tok" and discovered["secret"] == "s" * 20 and discovered["issuer"] == "http://127.0.0.1:8099"
+
+
+# Decision: with an install target per agent, an approved skill missing there is installed (verified on disk, same as a
+# replacement) so every agent on the machine runs the approved set; a skill already there, an unsafe name or a folder
+# that is in the way is left untouched, and a package that is not the approved one is never written.
+def test_install_into_gives_every_agent_the_approved_set(approved_machine, tmp_path):
+    root, _, governance, _ = approved_machine
+    source = LocalApproved(governance, VIEWER)
+    agents = tmp_path / ".agents" / "skills"
+    actions = distribution.plan(source.approved(), installed([root]), install_into=[root / "skills", agents])
+    to_install = [a for a in actions if a["action"] == "install"]
+    assert [(a["skill_name"], Path(a["folder"]).parent) for a in to_install] == [("release-notes", agents)]  # claude already has it
+    done = distribution.apply(actions, source, tmp_path / "q")
+    assert next(a for a in done if a["action"] == "install")["outcome"] == "installed_new"
+    on_disk, oversize = package.read_folder(agents / "release-notes")
+    assert package.fingerprint(on_disk, oversize) == to_install[0]["approved_fingerprint"]
+    assert not (tmp_path / "q").exists()  # nothing was moved aside
+    again = distribution.plan(source.approved(), installed([root, agents]), install_into=[root / "skills", agents])
+    assert not [a for a in again if a["action"] == "install"]
+
+    blocked_root = tmp_path / "other" / "skills"
+    (blocked_root / "release-notes").mkdir(parents=True)  # something already sits where the skill would go
+    in_the_way = distribution.plan(source.approved(), installed([root]), install_into=[blocked_root])
+    assert [a["action"] for a in in_the_way if a.get("folder", "").startswith(str(blocked_root))] == ["blocked"]
+
+    class Tampered:
+        def approved(self):
+            return source.approved()
+
+        def package(self, version_id):
+            return source.package(version_id)[0], pack({"SKILL.md": (NOTES + BYPASS).encode()})
+
+    fresh = tmp_path / "fresh" / "skills"
+    result = distribution.apply(distribution.plan(source.approved(), [], install_into=[fresh]), Tampered(), tmp_path / "q2")
+    assert result[0]["outcome"] == "failed" and not (fresh / "release-notes").exists()
+    assert distribution.install_target("claude") == Path.home() / ".claude" / "skills"
+    close(governance)
+
+
+# Decision: the same approved skill installed for two agents is approved in both folders (the importer labels the
+# names, e.g. "release-notes (skills)", but a copy is judged by its own SKILL.md name); before this, installing for a
+# second agent made both copies "never approved", and --strict would have quarantined them. A changed copy in one
+# folder is replaced alone.
+def test_copies_for_several_agents_are_judged_by_their_own_name(approved_machine, tmp_path):
+    from skillproof.services.imports import _skill_name, check_installed
+    from skillproof.storage.fleet import compare
+
+    root, _, governance, _ = approved_machine
+    source = LocalApproved(governance, VIEWER)
+    agents = tmp_path / ".agents" / "skills"
+    distribution.apply(distribution.plan(source.approved(), installed([root]), install_into=[agents]), source, tmp_path / "q")
+    families, names, packages, _ = installed_families([root, agents])
+    copies = [distribution.Installed(name=n, folder=families[k][1], fingerprint=packages[k][2],
+                                     skill_name=_skill_name(packages[k][0], families[k][1])) for k, n in names.items()]
+    notes = [c for c in copies if c.own_name == "release-notes"]
+    assert len(notes) == 2 and {c.name for c in notes} != {"release-notes"}  # the importer labelled them
+    actions = distribution.plan(source.approved(), copies, strict=True)
+    assert sorted(a["action"] for a in actions if a["skill_name"] in {c.name for c in notes}) == ["approved", "approved"]
+    checked = check_installed(governance, VIEWER, [root, agents])
+    assert sum(s["status"] == "approved" for s in checked["skills"]) == 2
+    versions = {"release-notes": governance.list_skill_versions(VIEWER, "release-notes")}
+    fleet = compare(versions, [{"skill_name": c.name, "fingerprint": c.fingerprint, "own_name": c.own_name} for c in notes])
+    assert [e["status"] for e in fleet] == ["approved", "approved"]
+
+    (agents / "release-notes" / "SKILL.md").write_bytes((NOTES + BYPASS).encode())  # one agent's copy is changed
+    families, names, packages, _ = installed_families([root, agents])
+    copies = [distribution.Installed(name=n, folder=families[k][1], fingerprint=packages[k][2],
+                                     skill_name=_skill_name(packages[k][0], families[k][1])) for k, n in names.items()]
+    replaced = [a for a in distribution.plan(source.approved(), copies) if a["action"] == "replace"]
+    assert [Path(a["folder"]) for a in replaced] == [agents / "release-notes"]
+    close(governance)

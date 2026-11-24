@@ -282,4 +282,16 @@ second report did not double them, and a filed papercut showed as open on the sk
 Weakest part: Claude Code's hook payload is used as this session's Skill tool shows it (tool_input.skill); other
 agents' hooks are not wired yet, and nothing here ran on real users' machines.
 
+One approved set for every agent (after Uber's aifx): `skillproof sync --install-into claude|agents|codex|FOLDER` also
+installs approved skills missing from each agent's skills folder, through the same path as a replacement (written
+beside the target, fingerprint re-checked on disk, then moved in; a tampered package is never written; a folder in the
+way is left untouched). A real run on an installed skill: the dry run planned one install and changed nothing, apply
+installed a byte-identical copy, the rerun had nothing left to do.
+A bug that real run exposed: the importer labels a name held by several agents ("maturity (claude-desktop)",
+"maturity (skills)"), and sync, catalogue-check and fleet compared those labels with the approved name, so after
+installing for a second agent both copies were "never approved" and --strict would have quarantined them. Now the exact
+catalogue name is tried first, then the copy's own SKILL.md name; fleet reports carry both. Rerun: 2 approved, exit 0.
+Weakest part: the codex and agents folder names come from the agents' documentation (agents is also named as a harness
+root in NVIDIA's evaluator), not verified here by running those agents.
+
 Open: a provider hosted and run by someone else; usage hooks for other agents.

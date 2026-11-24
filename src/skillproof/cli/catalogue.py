@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from skillproof.engines.apm_lock import check_lockfile
-from skillproof.services.imports import check_installed, import_installed, installed_families
+from skillproof.services.imports import _skill_name as skill_name_of, check_installed, import_installed, installed_families
 from skillproof.governance import AssurancePolicy
 from skillproof.engines.installed import default_roots, scan_installed
 from skillproof.wiring import close_governance
@@ -141,9 +141,10 @@ def send_fleet_report(server: str, token: str, host: str | None, roots: list[Pat
     parsed = urlparse(server)
     if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}):
         raise ValueError("the server must be an https URL (plain http only to this machine)")
-    _, names, packages, errors = installed_families(roots)
+    families, names, packages, errors = installed_families(roots)
     machine = host or socket.gethostname()
-    body = json.dumps({"host": machine, "skills": [{"skill_name": name, "fingerprint": packages[key][2]}
+    body = json.dumps({"host": machine, "skills": [{"skill_name": name, "fingerprint": packages[key][2],
+                                                    "own_name": skill_name_of(packages[key][0], families[key][1])}
                                                    for key, name in sorted(names.items(), key=lambda p: p[1])]}).encode()
     headers = {"Content-Type": "application/json"}
     if token:
@@ -229,9 +230,12 @@ def run_sync(args) -> Result:
             governance = catalogue_at(Path(args.data_dir))
             source = LocalApproved(governance, checker(args.tenant))
         try:
-            families, names, packages, errors = installed_families(roots)
-            installed = [distribution.Installed(name=name, folder=families[key][1], fingerprint=packages[key][2]) for key, name in names.items()]
-            actions = distribution.plan(source.approved(), installed, strict=args.strict)
+            targets = [distribution.install_target(t) for t in args.install_into]
+            scanned = roots + [t for t in targets if t.exists() and t not in roots]  # see what each target already holds
+            families, names, packages, errors = installed_families(scanned)
+            installed = [distribution.Installed(name=name, folder=families[key][1], fingerprint=packages[key][2],
+                                                skill_name=skill_name_of(packages[key][0], families[key][1])) for key, name in names.items()]
+            actions = distribution.plan(source.approved(), installed, strict=args.strict, install_into=targets)
             if args.apply:
                 distribution.apply(actions, source, Path(args.quarantine), log=lambda event, fields: log(event, **fields))
         finally:
@@ -239,7 +243,7 @@ def run_sync(args) -> Result:
                 close_governance(governance)
         result = distribution.summary(actions, args.apply)
         result["unreadable"] = errors
-        pending = result["to_replace"] + (result["unapproved"] if args.strict else 0) + result["blocked"]
+        pending = result["to_replace"] + result["to_install"] + (result["unapproved"] if args.strict else 0) + result["blocked"]
         return result, 1 if result["failed"] or (not args.apply and pending) or (args.apply and result["blocked"]) else 0
     except (OSError, ValueError, RuntimeError) as exc:
         return {"error": str(exc)}, 4
@@ -253,6 +257,9 @@ def add(commands, conf) -> None:
     sync.add_argument("--tenant", default="local")
     sync.add_argument("--root", action="append", default=[], help="Folder to search for SKILL.md; repeat. Default: common agent locations that exist.")
     sync.add_argument("--strict", action="store_true", help="Also quarantine installed skills that have no approved version.")
+    sync.add_argument("--install-into", action="append", default=[], metavar="AGENT_OR_FOLDER",
+                      help="Also install approved skills missing from this skills folder, so every agent runs the approved set: "
+                           "claude (~/.claude/skills), agents (~/.agents/skills), codex (~/.codex/skills) or a folder path; repeat.")
     sync.add_argument("--apply", action="store_true", help="Carry out the plan (default: report it only).")
     sync.add_argument("--quarantine", default=str(Path.home() / ".skillproof" / "quarantine"), help="Where replaced or unapproved skill folders are moved.")
     sync.add_argument("--output", default="-")

@@ -11,7 +11,7 @@ from skillproof.services import alerts
 
 
 def report(governance: GovernanceAccess, principal: Principal, host: str, installed: list[dict[str, Any]]) -> FleetReportResult:
-    names = {str(item.get("skill_name", "")).strip() for item in installed}
+    names = {str(item.get(key, "")).strip() for item in installed for key in ("skill_name", "own_name") if item.get(key)}
     compared = compare(governance.fleet_versions(principal, names), installed)
     result = governance.record_fleet_report(principal, host, compared)
     for entry in result["newly_unapproved"]:

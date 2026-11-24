@@ -6,7 +6,10 @@ For every installed skill (the same catalogue names and package fingerprints as 
                     unapproved update): the folder is moved to quarantine and the approved package installed in its
                     place;
 - `unapproved`      nothing is approved under that name: reported, and quarantined only with `strict`;
-- `blocked`         an approved version exists but its package is not stored (not distributable): reported, untouched.
+- `blocked`         an approved version exists but its package is not stored (not distributable): reported, untouched;
+- `install`         with install targets (one skills folder per agent: Claude Code, the shared .agents folder, Codex, or
+                    any folder given), an approved skill missing from a target is installed there, so every agent on
+                    the machine runs the same approved set.
 
 Nothing is deleted: a quarantined folder is moved, intact, under the quarantine folder with a record of why, and can be
 moved back. An installed package is written beside the target first, its fingerprint re-checked on disk, and only then
@@ -16,6 +19,7 @@ changes.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import socket
 from dataclasses import dataclass
@@ -35,16 +39,37 @@ class ApprovedSource(Protocol):
 
 @dataclass
 class Installed:
-    name: str
+    name: str          # the catalogue name (labelled, e.g. "pdf (codex)", when several agents hold a skill of that name)
     folder: Path
     fingerprint: str
+    skill_name: str = ""  # the name in the folder's own SKILL.md
+
+    @property
+    def own_name(self) -> str:
+        return self.skill_name or self.name
 
 
-def plan(approved: list[dict[str, Any]], installed: list[Installed], *, strict: bool = False) -> list[dict[str, Any]]:
+FOLDER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,99}$")
+INSTALL_PRESETS = {  # each agent's user-level skills folder
+    "claude": Path.home() / ".claude" / "skills",
+    "agents": Path.home() / ".agents" / "skills",   # the shared Agent Skills folder several agents read
+    "codex": Path.home() / ".codex" / "skills",
+}
+
+
+def install_target(value: str) -> Path:
+    """A preset name (claude, agents, codex) or a folder path."""
+    return INSTALL_PRESETS.get(value.lower(), Path(value).expanduser())
+
+
+def plan(approved: list[dict[str, Any]], installed: list[Installed], *, strict: bool = False,
+         install_into: list[Path] | tuple[Path, ...] = ()) -> list[dict[str, Any]]:
     by_name = {a["skill_name"]: a for a in approved}
     actions = []
     for item in sorted(installed, key=lambda i: i.name):
-        target = by_name.get(item.name)
+        # The exact catalogue name first (a skill imported under a labelled name keeps it); otherwise a copy is the
+        # approved skill when its own SKILL.md name is the approved name, whichever agent's folder holds it.
+        target = by_name.get(item.name) or by_name.get(item.own_name)
         base = {"skill_name": item.name, "folder": str(item.folder), "installed_fingerprint": item.fingerprint}
         if target is None:
             actions.append({**base, "action": "quarantine" if strict else "unapproved",
@@ -57,6 +82,22 @@ def plan(approved: list[dict[str, Any]], installed: list[Installed], *, strict: 
         else:
             actions.append({**base, "action": "replace", "version_id": target["version_id"], "approved_fingerprint": target["fingerprint"],
                             "reason": "the installed folder is not the approved version"})
+    for root in install_into:
+        here = {n for item in installed if Path(item.folder).resolve().parent == Path(root).resolve() for n in (item.name, item.own_name)}
+        for entry in sorted(approved, key=lambda a: a["skill_name"]):
+            name = entry["skill_name"]
+            folder_name = name.split(":")[-1]
+            if name in here or not entry.get("distributable", True):
+                continue
+            new: dict[str, Any] = {"skill_name": name, "folder": str(Path(root) / folder_name), "installed_fingerprint": None,
+                    "version_id": entry["version_id"], "approved_fingerprint": entry["fingerprint"]}
+            if not FOLDER_NAME.match(folder_name):
+                actions.append({**new, "action": "blocked", "reason": "the skill's name is not a safe folder name"})
+            elif (Path(root) / folder_name).exists():
+                actions.append({**new, "action": "blocked",
+                                "reason": "a folder of that name exists there but is not a readable skill; left untouched"})
+            else:
+                actions.append({**new, "action": "install", "reason": f"approved, and not installed in {root}"})
     return actions
 
 
@@ -111,6 +152,24 @@ def apply(actions: list[dict[str, Any]], source: ApprovedSource, quarantine_root
                     raise
                 action["quarantined_to"] = str(moved)
                 action["outcome"] = "installed_approved"
+            elif action["action"] == "install":
+                vouched, blob = source.package(action["version_id"])
+                if vouched != action["approved_fingerprint"]:
+                    raise ValueError("the server's fingerprint for the package differs from the approved one")
+                files = unpack(blob, action["approved_fingerprint"])
+                if folder.exists():
+                    raise ValueError(f"{folder} appeared since the plan was made; left untouched")
+                staging = folder.with_name(folder.name + ".skillproof-incoming")
+                if staging.exists():
+                    raise ValueError(f"{staging} already exists; a previous sync did not finish")
+                folder.parent.mkdir(parents=True, exist_ok=True)
+                _write_package(files, staging)
+                on_disk, oversize = package.read_folder(staging)
+                if package.fingerprint(on_disk, oversize) != action["approved_fingerprint"]:
+                    shutil.rmtree(staging)
+                    raise ValueError("the written package does not match the approved fingerprint on disk")
+                staging.rename(folder)
+                action["outcome"] = "installed_new"
             else:
                 action["outcome"] = "unchanged"
         except Exception as exc:  # noqa: BLE001 - one skill failing must not stop the rest
@@ -124,7 +183,8 @@ def apply(actions: list[dict[str, Any]], source: ApprovedSource, quarantine_root
 def summary(actions: list[dict[str, Any]], applied: bool) -> dict[str, Any]:
     count = lambda key, value: sum(a.get(key) == value for a in actions)  # noqa: E731
     return {"method": "catalogue_sync", "applied": applied, "skills": len(actions),
-            "approved": count("action", "approved"), "to_replace": count("action", "replace"),
+            "approved": count("action", "approved"), "to_replace": count("action", "replace"), "to_install": count("action", "install"),
+            "installed_new": count("outcome", "installed_new"),
             "unapproved": count("action", "unapproved") + count("action", "quarantine"), "blocked": count("action", "blocked"),
             "installed_approved": count("outcome", "installed_approved"), "quarantined": count("outcome", "quarantined"),
             "failed": count("outcome", "failed"), "actions": actions}

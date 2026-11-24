@@ -59,3 +59,27 @@ def test_a_ci_workflow_in_the_skill_folder_is_not_raised():
     workflow = b"on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest -q\n"
     decision, items = levels({"SKILL.md": SKILL, ".github/workflows/ci.yml": workflow})
     assert decision == "none" and not items
+
+
+# Decision: provider keys with no "api_key =" label are raised when they have a real key's shape, and not when they are
+# placeholders, documentation sequences, test fixtures or a secret scanner's own rules. Measured on 2,000+ public skill
+# repositories: the only raise was a Google key leaked in a tutorial notebook.
+def test_provider_keys_are_raised_only_when_they_look_real():
+    from skillproof.engines.security import scan_security
+
+    def raised(path, text):
+        found = scan_security({"SKILL.md": "x", path: text})["findings"]
+        return any(f["code"] == "CREDENTIAL_EXPOSURE" and f["evidence"].startswith(path) for f in found)
+
+    # Synthetic values, assembled at run time so the source holds no key-shaped literal for secret scanners to flag.
+    body = "Q7wE9rT2yU4iO6pA8sD1fG3hJ5kL7zX9cV2bN4mQ8wE6rT"
+    real = {"openai": "sk-" + "proj-" + body,
+            "slack": "xo" + "xb-73915820461-52918374650-" + body[:24],
+            "google": "AI" + "za" + "Sy" + body[:33],
+            "stripe": "sk" + "_live_" + body[:28]}
+    for name, key in real.items():
+        assert raised("notebook.ipynb", f'"key": "{key}"'), name
+    assert not raised("notes.md", "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q")       # a documentation sequence
+    assert not raised("notes.md", "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")  # a placeholder
+    assert not raised("tests/test_keys.py", f"k = '{real['google']}'")              # a test fixture
+    assert not raised("rules/gitleaks.json", real["google"])                         # a scanner's rule file

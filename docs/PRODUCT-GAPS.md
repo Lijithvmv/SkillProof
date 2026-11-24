@@ -263,4 +263,11 @@ three new whole-environment patterns two matched 670 harmless lines (docs naming
 and were dropped; `$(env)` is read only in unattended commands (hooks, tool-server launch lines), because every
 real `$(env)` in public skills was an audit skill describing the attack.
 
+Provider key formats (after NVIDIA SkillEvaluator's secret scan, which runs Gitleaks): SkillProof found AWS and GitHub
+keys and private keys but missed keys with no "api_key =" label - OpenAI, Anthropic, Slack, Google, Stripe formats.
+Added with three guards measured on 2,000+ public skill repositories first: a real key's shape (letters and digits, no
+long runs, no A1B2C3/ABCDEF sequences or placeholder words), outside tests and fixtures, and outside secret-scanner rule
+files. Raw matches were 221 lines; after the guards every raise (188 lines) was one Google key leaked in a tutorial
+notebook, repeated in its output cells, and nothing else.
+
 Open: a provider hosted and run by someone else.

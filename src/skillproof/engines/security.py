@@ -19,6 +19,28 @@ RULES: list[tuple[str, str, str, re.Pattern[str]]] = [
     ("CREDENTIAL_EXPOSURE", "critical", "Text appears to contain a credential or private key. The matched value is redacted.", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|\b(?:api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*['\"]?[A-Za-z0-9/+=_-]{16,}", re.I)),
 ]
 
+# Provider key formats that carry no "api_key =" label. Measured on 2,000+ public skill repositories before adding:
+# most matches were placeholders, documentation sequences (AIzaSyA1B2C3...), test fixtures and a secret scanner's own
+# rule file; what remained was a key in a tutorial notebook. So a match counts only when it has a real key's shape and
+# sits outside tests, fixtures and secret-scanning rule files.
+KEY_FORMATS = re.compile(
+    r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}"          # OpenAI
+    r"|\bsk-ant-(?:api|admin)[0-9]{2}-[A-Za-z0-9_-]{60,}"         # Anthropic
+    r"|\bxox[abposr]-[0-9]{8,}-[0-9A-Za-z-]{20,}"                 # Slack
+    r"|\bAIza[0-9A-Za-z_-]{35}\b"                                 # Google
+    r"|\b[sr]k_live_[0-9A-Za-z]{24,}")                            # Stripe
+NOT_A_KEY = re.compile(r"(.)\1{5,}|x{4,}|your|example|sample|dummy|fake|placeholder|redacted|abcdef|123456|a1b2c3|"
+                       r"but-then|thisis", re.I)
+KEY_TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__|testdata|fixtures?)/|(^|/)test_[^/]*$|_test\.\w+$|\.(test|spec)\.\w+$|"
+                           r"(^|/)[^/]*(gitleaks|redact|secret[-_]?(rules|patterns|scan))[^/]*$", re.I)
+
+
+def _real_keys(line: str) -> list[str]:
+    """Provider keys on a line that look real: letters and digits mixed, no long runs, no placeholder words."""
+    return [m.group(0) for m in KEY_FORMATS.finditer(line)
+            if re.search(r"\d", m.group(0)) and re.search(r"[A-Za-z]{2}", m.group(0)) and not NOT_A_KEY.search(m.group(0))]
+
+
 SECRET_NAMES = re.compile(r"(?:^|/)(?:\.env(?:\..*)?|id_rsa|id_ed25519|credentials(?:\.json)?|secrets?\.ya?ml|.*\.(?:pem|key|p12|pfx))$", re.I)
 URL = re.compile(r"https?://[^\s)\]>\"']+", re.I)
 
@@ -33,6 +55,10 @@ def scan_security(files: dict[str, str]) -> dict[str, Any]:
                 if pattern.search(line):
                     evidence = f"{path}:{line_no} (matched {code.lower().replace('_', ' ')})"
                     findings.append({"code": code, "severity": severity, "message": message, "evidence": evidence})
+            if not KEY_TEST_PATH.search(path.replace("\\", "/")) and _real_keys(line):
+                findings.append({"code": "CREDENTIAL_EXPOSURE", "severity": "critical",
+                                 "message": "Text appears to contain a provider API key. The matched value is redacted.",
+                                 "evidence": f"{path}:{line_no} (matched a provider key format)"})
             for target in URL.findall(line):
                 findings.append({"code": "EXTERNAL_REFERENCE_REVIEW", "severity": "info", "message": "External URL found; review destination and the trust of fetched content.", "evidence": f"{path}:{line_no} ({target[:120]})"})
     unique = {(item["code"], item["evidence"]): item for item in findings}
